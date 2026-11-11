@@ -1,4 +1,4 @@
-"""登录、首页概况、系统信息、重新加载和重启、实时日志。"""
+"""登录、首页概况、系统信息、重新加载和重启、核心的更新、实时日志。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from jianshanagent.admin.core import (
 from jianshanagent.admin.queries import DURATION_EDGES, fill_series
 from jianshanagent.core.logging import LOG_BUFFER, get_logger
 from jianshanagent.core.trace import Trace, brief
+from jianshanagent.core.update import UpdateError
 
 logger = get_logger(__name__)
 
@@ -156,16 +157,49 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         logger.info("admin_reloaded")
         return reply({"status": admin.status()})
 
-    async def restart(_request: web.Request) -> web.Response:
-        logger.warning("admin_restart_requested")
-
+    def restart_soon() -> None:
         async def soon() -> None:
             await asyncio.sleep(0.5)  # 先让这次请求的回应发出去
             admin.runtime.request_stop(restart=True)
 
         task = asyncio.get_running_loop().create_task(soon())
         _restarting.add(task)
+
+    async def restart(_request: web.Request) -> web.Response:
+        logger.warning("admin_restart_requested")
+        restart_soon()
         return reply({"restarting": True})
+
+    # ---- 核心的更新（做法见 core/update.py）----
+
+    async def update_status(_request: web.Request) -> web.Response:
+        return reply(admin.runtime.updater.status())
+
+    async def update_check(_request: web.Request) -> web.Response:
+        updater = admin.runtime.updater
+        await updater.check()
+        return reply(updater.status())
+
+    async def update_apply(_request: web.Request) -> web.Response:
+        """装上最新的版本并重启。新版本起不来的话，引导会退回原来的版本再启动一次。"""
+        updater = admin.runtime.updater
+        try:
+            version = await updater.apply()
+        except UpdateError as exc:
+            fail(409, str(exc))
+        logger.warning("admin_update_applied", version=version)
+        restart_soon()
+        return reply({"restarting": True, "version": version})
+
+    async def update_revert(_request: web.Request) -> web.Response:
+        """不用更新包了，回到环境里装的版本，并重启。"""
+        try:
+            version = admin.runtime.updater.revert()
+        except UpdateError as exc:
+            fail(409, str(exc))
+        logger.warning("admin_update_reverted", version=version)
+        restart_soon()
+        return reply({"restarting": True, "version": version})
 
     async def logs(request: web.Request) -> web.Response:
         after = int_param(request, "after", 0, 0, 2**62)
@@ -192,5 +226,9 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         web.get("/api/system", system),
         web.post("/api/system/reload", reload),
         web.post("/api/system/restart", restart),
+        web.get("/api/update", update_status),
+        web.post("/api/update/check", update_check),
+        web.post("/api/update/apply", update_apply),
+        web.post("/api/update/revert", update_revert),
         web.get("/api/logs", logs),
     ]

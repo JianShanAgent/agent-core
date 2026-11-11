@@ -21,7 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { type ComponentType, type ReactNode, Suspense, useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router";
+import { Link, NavLink, Outlet, useLocation } from "react-router";
 
 import { LoadingRows } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -155,6 +155,11 @@ function Sidebar({ onNavigate, onLogout }: { onNavigate?: () => void; onLogout: 
           <div className="text-muted-foreground mt-1 px-2 text-[11px] leading-relaxed">
             已运行 {formatUptime(status.uptime_seconds)}
             {status.release ? ` · 发布 ${status.release}` : ` · v${status.version}`}
+            {status.update?.available ? (
+              <Link to="/system" className="text-brand ml-1 font-medium hover:underline">
+                有新版本 v{status.update.latest}
+              </Link>
+            ) : null}
           </div>
         ) : null}
         <div className="mt-2.5 flex items-center justify-between">

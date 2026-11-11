@@ -86,16 +86,23 @@ export function useSystemActions() {
     },
   });
 
-  const restart = useCallback(async () => {
+  // trigger：让机器人重启的那个请求（默认就是重启；更新、还原也是做完自己的事再重启）。
+  // done：起来以后说的话，null = 不说（调用的一方自己看结果）。返回它起来了没有。
+  const restart = useCallback(
+    async (
+      trigger: () => Promise<unknown> = api.restart,
+      done: string | null = "机器人已重启",
+      failed = "没能重启",
+    ): Promise<boolean> => {
     setConfirming(false);
     setRestarting(true);
     const before = client.getQueryData<{ started_at: number }>(["status"])?.started_at;
     try {
-      await api.restart();
+      await trigger();
     } catch (error) {
       setRestarting(false);
-      toast.error("没能重启", { description: (error as Error).message });
-      return;
+      toast.error(failed, { description: (error as Error).message });
+      return false;
     }
     // 等它起来：启动时间变了就是新的进程
     const deadline = Date.now() + 90_000;
@@ -105,9 +112,9 @@ export function useSystemActions() {
         const status = await api.status();
         if (status.started_at !== before) {
           setRestarting(false);
-          toast.success("机器人已重启");
+          if (done) toast.success(done);
           void client.invalidateQueries();
-          return;
+          return true;
         }
       } catch {
         /* 还没起来，接着等 */
@@ -115,7 +122,10 @@ export function useSystemActions() {
     }
     setRestarting(false);
     toast.error("等了一分半钟机器人还没起来，去看看日志");
-  }, [client]);
+    return false;
+    },
+    [client],
+  );
 
   const confirmDialog = (
     <ConfirmDialog
@@ -137,6 +147,7 @@ export function useSystemActions() {
     reload: () => reload.mutate(),
     reloading: reload.isPending,
     askRestart: () => setConfirming(true),
+    restartWith: restart,
     restarting,
     confirmDialog,
   };

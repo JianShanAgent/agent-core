@@ -272,6 +272,8 @@ class Admin:
         return {
             "version": __version__,
             "release": os.environ.get("JIANSHANAGENT_RELEASE") or None,
+            # 有没有新版本（侧栏和系统信息页都看它；细节在 /api/update）
+            "update": runtime.updater.brief(),
             "now": now,
             "started_at": runtime.started_at,
             "uptime_seconds": now - runtime.started_at,

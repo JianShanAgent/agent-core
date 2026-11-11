@@ -98,6 +98,8 @@ LOCKED_PATHS: dict[str, tuple[tuple[str, ...], ...]] = {
     "core.admin": (("enabled",),),
     "app": (("healthcheck",),),
     WIKI_FILE: (("site",),),
+    # 从哪个仓库更新、下载走哪个镜像：能在网页上改，就等于能让机器人去下载并运行别人的代码
+    "core.update": (("repo",), ("download_prefix",)),
 }
 
 

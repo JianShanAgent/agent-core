@@ -35,6 +35,7 @@ from jianshanagent.core.plugin import EraserSpec, PluginHost
 from jianshanagent.core.router import MessageRouter
 from jianshanagent.core.trace import Tracer, brief
 from jianshanagent.core.trace_store import PostgresTraceStore
+from jianshanagent.core.update import Updater, UpdateSettings
 from jianshanagent.gateway.qq import QQGateway
 
 logger = get_logger(__name__)
@@ -166,6 +167,9 @@ class Runtime:
         self._retired: list[PluginHost] = []
         self._web: web.AppRunner | None = None
         self._maintenance: asyncio.Task[None] | None = None
+        #: 查主仓库有没有新版本、装更新包（见 core/update.py）。每次用的时候现读配置
+        self.updater = Updater(lambda: UpdateSettings.from_config(self.config))
+        self._update_check: asyncio.Task[None] | None = None
 
     # ---- 装配 ----
 
@@ -403,8 +407,14 @@ class Runtime:
 
         if self.trace_store is not None:
             self._maintenance = asyncio.get_running_loop().create_task(self._prune_forever())
+        # 走到这里就是起来了：刚装上的更新包从这一刻起算数（起不来的话引导会退回原来的版本）
+        self.updater.started()
+        self._update_check = asyncio.get_running_loop().create_task(self.updater.run_forever())
         logger.info(
-            "jianshanagent_ready", dry_run=self.dry_run, plugins=[p.id for p in self.host.loaded]
+            "jianshanagent_ready",
+            dry_run=self.dry_run,
+            version=self.updater.current,
+            plugins=[p.id for p in self.host.loaded],
         )
 
     async def handle(self, message: InboundMessage) -> OutboundMessage | None:
@@ -445,7 +455,7 @@ class Runtime:
             await self.gateway.stop()
         if self._web is not None:
             await self._web.cleanup()
-        for task in [self._maintenance, *self._retiring]:
+        for task in [self._maintenance, self._update_check, *self._retiring]:
             if task is not None:
                 task.cancel()
         with contextlib.suppress(TimeoutError):

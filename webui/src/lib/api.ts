@@ -29,6 +29,7 @@ import type {
   SystemInfo,
   TraceDetail,
   TraceRow,
+  UpdateInfo,
 } from "./types";
 
 export class ApiError extends Error {
@@ -122,6 +123,10 @@ export const api = {
   system: () => get<SystemInfo>("/api/system"),
   reload: () => post<{ status: Status }>("/api/system/reload"),
   restart: () => post<{ restarting: boolean }>("/api/system/restart"),
+  update: () => get<UpdateInfo>("/api/update"),
+  checkUpdate: () => post<UpdateInfo>("/api/update/check"),
+  applyUpdate: () => post<{ restarting: boolean; version: string }>("/api/update/apply"),
+  revertUpdate: () => post<{ restarting: boolean; version: string }>("/api/update/revert"),
   logs: (after: number, limit = 1000) =>
     get<{ items: LogEntry[]; last: number }>("/api/logs", { after, limit }),
 

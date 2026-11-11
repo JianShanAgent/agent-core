@@ -37,6 +37,8 @@ export interface BackupState {
 export interface Status {
   version: string;
   release: string | null;
+  /** 主仓库有没有比现在新的版本（细节在 /api/update） */
+  update: { available: boolean; latest: string | null };
   now: number;
   started_at: number;
   uptime_seconds: number;
@@ -261,6 +263,39 @@ export interface SystemInfo {
   };
   secrets: { key: string; set: boolean }[];
   tables: { name: string; rows: number; bytes: number }[];
+}
+
+/** 核心的更新：正在用哪个版本、主仓库最新是哪个、能不能在这里点更新 */
+export interface UpdateInfo {
+  enabled: boolean;
+  repo: string;
+  /** 正在用的版本 */
+  current: string;
+  /** 环境里装的版本；用着更新包时和 current 不一样 */
+  installed: string;
+  overlay: boolean;
+  trial: boolean;
+  /** overlay = 可以在程序里更新；managed = 按发布流程部署的；source = 从源码运行；none = 没有地方放更新包 */
+  mode: "overlay" | "managed" | "source" | "none";
+  mode_reason: string;
+  latest: {
+    version: string;
+    tag: string;
+    name: string;
+    notes: string;
+    published_at: string;
+    url: string;
+    size: number;
+    has_package: boolean;
+  } | null;
+  available: boolean;
+  checked_at: number | null;
+  error: string;
+  can_apply: boolean;
+  /** 有新版本、但不能在这里点更新的原因 */
+  blocked: string;
+  applying: boolean;
+  last_failure: { version: string; error: string; at: number } | null;
 }
 
 export interface LogEntry {

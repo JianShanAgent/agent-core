@@ -1,0 +1,69 @@
+# 发版：推一个 v0.3.1 这样的标签上来，就构建安装包并发一个 GitHub Release。
+#
+# 各个实例的「检查更新」看的就是这里发出来的 Release；在管理后台点「更新」装的是它带的安装包
+# （jianshanagent-<版本>-py3-none-any.whl，校验和在 SHA256SUMS 里）。做法见 docs/部署与运维.md 的「发版」。
+name: release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 标签要和 pyproject.toml 里的版本一致
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::标签是 $GITHUB_REF_NAME，pyproject.toml 里的版本是 $version：先改版本号、提交，再打标签"
+            exit 1
+          fi
+
+      # checkout 拿到的标签不带附注；更新说明取自标签的附注，所以把标签本身再取一次
+      - name: 取标签的附注
+        run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: 构建管理后台的页面
+        run: |
+          cd webui
+          npm ci --no-audit --no-fund
+          npm run build
+          # 页面的构建产物是入库的（不装 Node 的人从源码装也要有后台）。和这次构建出来的不一样，
+          # 多半是改了 webui/ 忘了重新构建再提交：安装包用这次构建的，这里提醒一句
+          if [ -n "$(git status --porcelain ../src/jianshanagent/admin/static)" ]; then
+            echo "::warning::仓库里的 src/jianshanagent/admin/static 和这次构建出来的不一样，记得重新构建并提交"
+          fi
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: 测试
+        run: |
+          uv sync --frozen --extra dev
+          uv run pytest -q
+
+      - name: 打安装包
+        run: |
+          uv build --wheel --out-dir dist
+          cd dist
+          test -f "jianshanagent-${GITHUB_REF_NAME#v}-py3-none-any.whl"
+          sha256sum *.whl > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: 发 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.whl dist/SHA256SUMS \
+            --title "$GITHUB_REF_NAME" --notes-from-tag --verify-tag

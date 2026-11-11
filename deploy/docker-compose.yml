@@ -85,6 +85,8 @@ services:
       JIANSHANAGENT_CONFIG_OVERRIDES_DIR: /data/config
       JIANSHANAGENT_KB_DIR: /data/kb
       JIANSHANAGENT_LOG_JSON: "1"
+      # 和机器人一样带着发布号：按发布流程部署的，用哪个版本由发布决定，不用后台装的更新包
+      JIANSHANAGENT_RELEASE: ${JIANSHANAGENT_RELEASE:-dev}
       JIANSHANAGENT_POSTGRES_DSN: postgresql://jianshanagent:${POSTGRES_PASSWORD}@postgres:5432/jianshanagent
       TZ: Asia/Shanghai
     volumes:

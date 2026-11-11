@@ -1,24 +1,31 @@
-// 系统信息：进程、连接、配置目录、凭据填没填、登录令牌、数据库的表和备份，以及重新加载 / 重启、界面主题。
+// 系统信息：进程、核心的版本和更新、连接、配置目录、凭据填没填、登录令牌、数据库的表和备份，
+// 以及重新加载 / 重启、界面主题。
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowUpCircle,
   CircleCheck,
   CircleX,
   DatabaseZap,
+  ExternalLink,
   Monitor,
   Moon,
   Power,
   RefreshCw,
   Sun,
+  Undo2,
 } from "lucide-react";
-import type { ComponentType, ReactNode } from "react";
+import { type ComponentType, type ReactNode, useState } from "react";
 import { Link } from "react-router";
 
-import { EmptyState, ErrorState, Field, PageHeader } from "@/components/common";
+import { toast } from "sonner";
+
+import { EmptyState, ErrorState, Field, Markdown, PageHeader } from "@/components/common";
 import { Banner, useSystemActions } from "@/components/layout/StateBanners";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/dialog";
 import { Skeleton, Table, Td, Th, Tr } from "@/components/ui/misc";
 import { api } from "@/lib/api";
 import {
@@ -29,7 +36,7 @@ import {
   formatUptime,
 } from "@/lib/format";
 import { type Theme, useTheme } from "@/lib/hooks";
-import type { BackupState, Status, SystemInfo } from "@/lib/types";
+import type { BackupState, Status, SystemInfo, UpdateInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const FEATURES: [string, string][] = [
@@ -136,6 +143,219 @@ function Running({ info }: { info: SystemInfo }) {
           改配置后不重启进程、把插件重新装一遍，算一次装配。
         </div>
       </Field>
+    </Section>
+  );
+}
+
+/** 有新版本、但不能在这里点更新时，告诉人该怎么更新。 */
+function ManualUpdate({ info }: { info: UpdateInfo }) {
+  if (info.mode === "managed") {
+    return (
+      <>
+        这个部署是按发布流程上线的，版本由实例仓库的 <Mono>components.lock</Mono> 决定：在旁边的{" "}
+        <Mono>agent-core</Mono> 里 <Mono>git pull</Mono>，回到实例目录{" "}
+        <Mono>./release pin</Mono>、提交、<Mono>./release deploy</Mono>。
+      </>
+    );
+  }
+  if (info.mode === "source") {
+    return (
+      <>
+        核心是从源码运行的：在核心的源码目录里 <Mono>git pull</Mono>，然后重启机器人。
+      </>
+    );
+  }
+  if (info.mode === "none") return <>{info.mode_reason}。</>;
+  // 能用更新包，但这一个版本装不了（多半是依赖变了）：后端给的原因里已经写了怎么做
+  return <>{info.blocked}</>;
+}
+
+/** 核心的版本和更新：正在用哪个、主仓库最新是哪个、点一下更新并重启。 */
+function Updates({ className }: { className?: string }) {
+  const client = useQueryClient();
+  const actions = useSystemActions();
+  const query = useQuery({ queryKey: ["update"], queryFn: api.update, refetchInterval: 60_000 });
+  const [asking, setAsking] = useState<"apply" | "revert" | null>(null);
+  const check = useMutation({
+    mutationFn: api.checkUpdate,
+    onSuccess: (data) => {
+      client.setQueryData(["update"], data);
+      if (data.error) toast.error("没查成", { description: data.error });
+      else if (data.available) toast.info(`有新版本 v${data.latest?.version}`);
+      else toast.success(data.latest ? "已经是最新的" : "主仓库还没有发布过版本");
+    },
+    onError: (error: Error) => toast.error("没查成", { description: error.message }),
+  });
+  const info = query.data;
+  if (!info) {
+    return query.isPending ? <Skeleton className={cn("h-40", className)} /> : null;
+  }
+  const latest = info.latest;
+
+  const run = async (kind: "apply" | "revert") => {
+    setAsking(null);
+    const up = await actions.restartWith(
+      kind === "apply" ? api.applyUpdate : api.revertUpdate,
+      null,
+      kind === "apply" ? "没有更新" : "没有还原",
+    );
+    if (!up) return;
+    // 起来的是不是想要的那个版本：新版本起不来的话，引导已经退回原来的了
+    const after = await client.fetchQuery({ queryKey: ["update"], queryFn: api.update });
+    if (kind === "revert") toast.success(`已回到环境里装的 v${after.current}`);
+    else if (latest && after.current === latest.version) toast.success(`已更新到 v${after.current}`);
+    else {
+      toast.error(`更新到 v${latest?.version} 没成，机器人仍在用 v${after.current}`, {
+        description: after.last_failure?.error,
+        duration: 15_000,
+      });
+    }
+  };
+
+  return (
+    <Section
+      title="版本与更新"
+      description={
+        info.enabled
+          ? `每隔几小时看一次主仓库（${info.repo}）有没有发新版本。`
+          : "没有开检查更新（core.update 的 enabled）。"
+      }
+      className={className}
+    >
+      <Field label="正在用的">
+        v{info.current}
+        {info.overlay ? (
+          <>
+            <Badge tone="info" className="ml-2">
+              更新包
+            </Badge>
+            <span className="text-muted-foreground">
+              ，环境里装的是 v{info.installed}。更新包在数据目录里，盖在它上面。
+            </span>
+          </>
+        ) : null}
+      </Field>
+      <Field label="最新版本">
+        {latest ? (
+          <>
+            v{latest.version}
+            {info.available ? (
+              <Badge tone="brand" className="ml-2">
+                有新版本
+              </Badge>
+            ) : (
+              <span className="text-muted-foreground">，已经是最新的</span>
+            )}
+            <span className="text-muted-foreground">
+              {" "}
+              · {formatDateTime(latest.published_at)} 发布
+            </span>
+            {latest.url ? (
+              <a
+                href={latest.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-brand ml-2 inline-flex items-center gap-1 text-xs hover:underline"
+              >
+                在 GitHub 上看 <ExternalLink className="size-3" />
+              </a>
+            ) : null}
+          </>
+        ) : (
+          <span className="text-muted-foreground">
+            {info.checked_at ? "主仓库还没有发布过版本" : "还没查过"}
+          </span>
+        )}
+      </Field>
+      <Field label="上次检查">
+        {info.checked_at ? (
+          <>
+            {formatDateTime(info.checked_at)}
+            <span className="text-muted-foreground">（{formatAgo(info.checked_at)}）</span>
+          </>
+        ) : (
+          <span className="text-muted-foreground">启动后过一会儿查第一次</span>
+        )}
+        {info.error ? (
+          <div className="text-destructive mt-0.5 text-xs break-all">没查成：{info.error}</div>
+        ) : null}
+      </Field>
+      {info.last_failure ? (
+        <Banner tone="warning" className="mt-1 mb-0">
+          <b>
+            {formatDateTime(info.last_failure.at)} 更新到 v{info.last_failure.version}{" "}
+            没成，已经退回原来的版本。
+          </b>
+          <div className="mt-0.5 font-mono text-xs break-all opacity-90">
+            {info.last_failure.error}
+          </div>
+        </Banner>
+      ) : null}
+      {info.available && latest?.notes ? (
+        <div className="bg-muted/40 mt-1 max-h-64 overflow-y-auto rounded-lg border px-3 py-2 text-sm">
+          <div className="text-muted-foreground mb-1 text-xs">v{latest.version} 的更新说明</div>
+          <Markdown>{latest.notes}</Markdown>
+        </div>
+      ) : null}
+      {info.available && !info.can_apply ? (
+        <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
+          这里不能直接更新：
+          <ManualUpdate info={info} />
+        </p>
+      ) : null}
+      <div className="mt-1 flex flex-wrap items-center gap-2">
+        {info.can_apply && latest ? (
+          <Button size="sm" loading={actions.restarting} onClick={() => setAsking("apply")}>
+            {actions.restarting ? null : <ArrowUpCircle />} 更新到 v{latest.version} 并重启
+          </Button>
+        ) : null}
+        <Button
+          variant="outline"
+          size="sm"
+          loading={check.isPending}
+          disabled={actions.restarting}
+          onClick={() => check.mutate()}
+        >
+          {check.isPending ? null : <RefreshCw />} 检查更新
+        </Button>
+        {info.overlay ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={actions.restarting}
+            onClick={() => setAsking("revert")}
+          >
+            <Undo2 /> 还原到环境里装的 v{info.installed}
+          </Button>
+        ) : null}
+      </div>
+      <ConfirmDialog
+        open={asking === "apply"}
+        onOpenChange={(open) => setAsking(open ? "apply" : null)}
+        title={`更新到 v${latest?.version}？`}
+        description={
+          <>
+            会从主仓库下载 v{latest?.version} 的安装包，核对校验和，装到数据目录里，然后原地重启机器人
+            （约十几秒，正在处理的消息会中断）。新版本起不来的话会自动退回现在的 v{info.current}。
+          </>
+        }
+        confirmText="更新并重启"
+        onConfirm={() => void run("apply")}
+      />
+      <ConfirmDialog
+        open={asking === "revert"}
+        onOpenChange={(open) => setAsking(open ? "revert" : null)}
+        title={`还原到 v${info.installed}？`}
+        description={
+          <>
+            不再用数据目录里的更新包，回到环境里装的 v{info.installed}，并原地重启机器人。
+            之后仍然可以再点更新。
+          </>
+        }
+        confirmText="还原并重启"
+        destructive
+        onConfirm={() => void run("revert")}
+      />
     </Section>
   );
 }
@@ -543,6 +763,7 @@ export default function System() {
       {info ? (
         // 每行两张卡片一样高；窄屏上排成一列
         <div className="grid gap-3 xl:grid-cols-2">
+          <Updates className="xl:col-span-2" />
           <Running info={info} />
           <Connections status={info.status} />
           <Configuration info={info} />

@@ -54,6 +54,7 @@ import hashlib
 import json
 import os
 import signal
+import sys
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
@@ -62,10 +63,12 @@ from typing import Any, Protocol
 
 import httpx
 
+from jianshanagent._bootstrap import running_version
 from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.db import Database
 from jianshanagent.core.embedding import EmbeddingProvider, EmbeddingSettings
 from jianshanagent.core.logging import get_logger
+from jianshanagent.core.update import restart_needed
 from jianshanagent.plugins.knowledge.changes import (
     ChangeContext,
     Cursor,
@@ -953,7 +956,7 @@ async def run_loop(config_dir: str | None = None) -> int:
 
     beating = loop.create_task(beat())
     interval = SyncSettings().interval_seconds
-    logger.info("kb_sync_loop_started")
+    logger.info("kb_sync_loop_started", version=running_version())
     try:
         while not stop.is_set():
             round_started = time.monotonic()
@@ -973,6 +976,11 @@ async def run_loop(config_dir: str | None = None) -> int:
             wait = max(60.0, interval - (time.monotonic() - round_started))
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), wait)
+            if not stop.is_set() and restart_needed():
+                # 机器人那边换了核心的版本（管理后台里点的更新）：这个进程也换过去
+                logger.warning("kb_sync_restarting_for_update")
+                beating.cancel()
+                os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
     finally:
         beating.cancel()
     logger.info("kb_sync_loop_stopped")
