@@ -46,7 +46,8 @@ jobs:
             echo "::warning::仓库里的 src/jianshanagent/admin/static 和这次构建出来的不一样，记得重新构建并提交"
           fi
 
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv 从 v8 起没有只写大版本的标签（v10 这样写找不到），要写全
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: 测试
         run: |
