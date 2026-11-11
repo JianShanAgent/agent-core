@@ -38,7 +38,7 @@
 3. **Wiki 图库以图搜图**：使用图文同向量空间的嵌入模型（默认对接 `Qwen3-VL-Embedding-8B`）索引站内立绘、皮肤、头像与图标。用户在 QQ 发图提问时，先通过以图搜图定位角色或皮肤，再结合词条资料作答。
 4. **每小时自动增量同步（`kbsync`）**：后台同步服务定时轮询 MediaWiki 的 `recentchanges` 接口，只重抓有变动的页面和受影响的数据集，增量算好向量热更新入库，无需停机；内置数据量暴跌与异常重算保护闸门。
 5. **开箱即用的 Web 管理后台**：包内已内置编译好的 React 管理面板（免装 Node.js），支持逐条查看问答检索与复核全链路、免连 QQ 直接在网页对话调试、在线热更新配置与插件开关。
-6. **灵活部署与插件扩展**：既支持 **Python / `uv` 原生直跑**（Windows / macOS / Linux 免 Docker），也支持 **`docker compose up -d` 一键启动**，还提供面向生产服务器的原子发布与故障自动回滚工具。用户自写的插件可直接放在实例仓库目录内随 Git 自动同步，也可发布为独立 Python 包。
+6. **灵活部署与插件扩展**：既支持 **Python / `uv` 原生直跑**（不需要 Docker），也支持 **`docker compose up -d` 一键启动**，还提供面向生产服务器的原子发布与故障自动回滚工具。用户自写的插件可直接放在实例仓库目录内随 Git 自动同步，也可发布为独立 Python 包。
 
 目前线上生产实例服务于[灰机阴阳师 Wiki](https://yys.huijiwiki.com)（见 [`instance-yys`](https://github.com/JianShanAgent/instance-yys)、[`site-huiji`](https://github.com/JianShanAgent/site-huiji)、[`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys)），已稳定索引约 7,700 篇文档、1.4 万个知识切片与 3,000 张图片。
 
@@ -65,13 +65,23 @@
 **2. 自然语言提问（多步查证 + 阶段进度提示 + 链接核验）**
 
 ```text
-用户  @见山 上次为崽而战的皮肤奖励都有谁来着？
+用户  千姬的CV是谁
 见山  正在查资料、整理答案…
 见山  正在复核…
-见山  最近一期「为崽而战·燃夏之约」的优胜式神皮肤奖励共五位：……（结论控制在 300 字以内）
+见山  千姬的 CV 是高垣彩阳。
+      顺带一提，SP 鲸汐千姬的 CV 是高垣彩阳（日）/ 王晓彤（中）。
+      详情：千姬
       参考资料：
-      1. 为崽而战·燃夏之约 https://yys.huijiwiki.com/wiki/...
+      · 千姬
+      · 鲸汐千姬
+      · 鲛歌汐梦，故海潮生。永生之海的故事揭开序幕。
 ```
+
+上面三段都是在阴阳师 Wiki 上实际跑出来的原文（`/查` 的回复中间省略了技能全文，参考资料在这里只留了标题，实际是带链接的）。这一问用了 4.9 秒。
+
+每一条提问在管理后台里都能看到它走了哪几步、每步多久、看了多少资料、复核过没过：
+
+<p align="center"><img src="docs/images/trace.png" alt="管理后台的查证过程页：一条提问的每一步、耗时和最后发给用户的回复" width="900"></p>
 
 **3. 日常对话与个人记忆指令**
 
@@ -104,7 +114,7 @@ flowchart LR
 
 你需要准备以下接口信息（只是在本地网页后台体验对话时，QQ 凭据和 PostgreSQL 都可以先不填）：
 - **目标 MediaWiki 接口地址**：站点的 `api.php` 地址（通常为 `https://你的站点/api.php` 或 `https://你的站点/w/api.php`，浏览器打开能看到 MediaWiki API 帮助页即说明可用）。
-- **对话大模型 API Key**：支持 OpenAI `Chat Completions` 协议的接口。默认配置对接小米 MiMo，也可改成 DeepSeek、OpenAI 等兼容接口。
+- **对话大模型 API Key**：走 OpenAI `Chat Completions` 协议。默认配置对接小米 MiMo，目前也只在 MiMo 上调通过。接口地址和模型名可以在配置里换，但请求里固定带一个 MiMo 写法的 `thinking` 参数，别家接口认不认没有测过。
 - **向量模型 API Key（可选，用于语义检索与以图搜图）**：默认对接模力方舟（Gitee AI）的 `Qwen3-VL-Embedding-8B`；不填时会自动降级为关键词检索。
 - **QQ 官方机器人凭据（接入 QQ 时必填）**：前往 [QQ 开放平台](https://q.qq.com/) 创建机器人，获取 `AppID` 与 `AppSecret`。
 
@@ -135,14 +145,7 @@ cp config/secrets.example.yaml config/secrets.yaml
 ```
 
 打开 `config/secrets.yaml`，填入 `llm.api_key`、`gitee_ai.api_key` 以及 `qq.app_id` / `qq.client_secret`。
-> 如果你用的对话模型不是默认的小米 MiMo，在 `config/` 下新建 `core.llm.yaml` 覆盖接口地址和模型名即可（参考 [`src/jianshanagent/defaults/core.llm.yaml`](src/jianshanagent/defaults/core.llm.yaml)）：
-> ```yaml
-> base_url: "https://api.deepseek.com/v1"
-> profiles:
->   chat:    { model: deepseek-reasoner, thinking: true, max_completion_tokens: 4096 }
->   quick:   { model: deepseek-chat, thinking: false, temperature: 0.2, max_completion_tokens: 2048 }
->   extract: { model: deepseek-chat, thinking: false, temperature: 0.2, max_completion_tokens: 1024 }
-> ```
+> 要改接口地址或模型名：在 `config/` 下新建 `core.llm.yaml`，只写要改的那几项。有哪些配置文件、每份管什么、常改的是哪几项，见 [配置说明](docs/配置说明.md)。
 
 ---
 
@@ -150,7 +153,7 @@ cp config/secrets.example.yaml config/secrets.yaml
 
 #### 方式 A：Python / `uv` 原生直跑（无需 Docker，适合本地运行或直接挂宿主机）
 
-只需安装 Python 3.12+ 与 [`uv`](https://docs.astral.sh/uv/getting-started/installation/)（Windows / macOS / Linux 通用，无需安装 Node.js）：
+只需安装 Python 3.12+ 与 [`uv`](https://docs.astral.sh/uv/getting-started/installation/)，不用装 Node.js。在 macOS 和 Linux 上验证过；Windows 上没有测过。
 
 ```bash
 # 1. 自动拉取核心框架及全部依赖
@@ -178,9 +181,11 @@ docker compose up -d --build
 ```
 
 这一条命令会自动构建镜像并拉起三个容器：**`qqbot`**（机器人本体 + Web 管理后台）、**`kbsync`**（每小时自动增量同步 Wiki 改动）、**`postgres`**（`pgvector/pgvector:0.8.7-pg17`）。
-- 查看后台登录令牌：`cat data/admin/token`
+- 还没有 QQ 凭据、只想先在网页对话里试：打开 `.env` 里 `JIANSHANAGENT_DRY_RUN=1` 那一行再启动。
+- 查看后台登录令牌：`docker compose exec qqbot cat /data/admin/token`
 - 打开 Web 管理后台：**`http://127.0.0.1:8080`**
 - 查看日志 / 重启：`docker compose logs -f qqbot`、`docker compose restart qqbot`
+- 改了 `config/` 下的配置要重新 `docker compose up -d --build`；改了凭据或自己写的插件，`docker compose restart qqbot kbsync` 就生效。
 
 #### 方式 C：生产服务器多版本发布与自动回滚（可选进阶）
 
@@ -274,6 +279,14 @@ my-wiki-bot/
 - **知识库与搜图测试**：查看文档切片总量、最近一次自动同步状态与保护闸门提示，支持直接在网页测试向量检索和以图搜图命中排序。
 - **运行统计与日志**：查看请求量与模型 Token 消耗统计、最近 5,000 条实时日志、用户会话记录与每日备份状态。
 
+| 网页对话 | 知识库 |
+|---|---|
+| <img src="docs/images/chat.png" alt="网页对话：不经过 QQ 直接问机器人" width="440"> | <img src="docs/images/knowledge.png" alt="知识库概况：切片、图库的数量和类型" width="440"> |
+| **机器人配置** | **插件** |
+| <img src="docs/images/config.png" alt="机器人配置：每一项的说明就是配置文件里的注释" width="440"> | <img src="docs/images/plugins.png" alt="插件：开关、顺序、各自注册了什么" width="440"> |
+
+截图来自一个本机的调试实例（不连 QQ，接的是阴阳师 Wiki 的知识库），里面只有测试时问的几句话。
+
 更多说明见 [管理后台文档](docs/管理后台.md)。
 
 ## 本仓库（`agent-core`）目录结构与参与开发
@@ -290,7 +303,7 @@ agent-core/
 │   └── testing/       # 插件测试辅助工具与规范自检函数（check_plugin）
 ├── webui/             # 管理后台前端源码（React 19 + TypeScript + Vite + Tailwind CSS）
 ├── deploy/            # 生产多版本发布编排（Dockerfile、docker-compose.yml、release.sh、自动备份、logs 插件）
-└── docs/              # 架构、插件规范、部署与运维、管理后台文档
+└── docs/              # 架构、插件规范、部署与运维、管理后台、配置说明、常见问题
 ```
 
 如果你想修改核心框架本身或管理后台前端：
@@ -303,7 +316,7 @@ uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
 
-- **修改了 `webui/` 前端源码后**：执行 `cd webui && npm ci && npm run build`，会将最新静态文件重新编译到 `src/jianshanagent/admin/static/`。日常联调可执行 `JIANSHANAGENT_ADMIN_API=http://127.0.0.1:8080 npm run dev`。
+- **修改了 `webui/` 前端源码后**：执行 `cd webui && npm ci && npm run build`，会将最新静态文件重新编译到 `src/jianshanagent/admin/static/`。这个目录是入库的（这样别人不装 Node.js 也有后台页面），所以改了前端要把重新构建出来的 `static/` 一起提交。日常联调可执行 `JIANSHANAGENT_ADMIN_API=http://127.0.0.1:8080 npm run dev`。
 - **礼貌抓取原则**：对任何外部生产 Wiki 站点取数时，请保持默认的低并发与限速配置（并发不超过 2、每秒不超过 2 个请求），不要给目标站点造成负担。
 
 ## 文档索引
@@ -314,6 +327,8 @@ uv run ruff check . && uv run ruff format --check .
 | [插件规范](docs/插件规范.md) | 功能插件 / 站点插件 / 部署插件的目录结构、本地与包两种加载方式、扩展点接口 |
 | [部署与运维](docs/部署与运维.md) | 原生运行、Docker Compose 与 `./release` 多版本生产发布的完整操作、增量同步与备份恢复 |
 | [管理后台](docs/管理后台.md) | 端口绑定、登录令牌管理、运行期配置热更新说明 |
+| [配置说明](docs/配置说明.md) | 有哪些配置文件、每份管什么、常改的项、凭据和环境变量 |
+| [常见问题](docs/常见问题.md) | 起不来、登不上、查不到、回复两次……各是什么原因、怎么办 |
 
 全部关联仓库见 [JianShanAgent 组织主页](https://github.com/JianShanAgent)。欢迎提 Issue 反馈问题或交流新 Wiki 接入。
 

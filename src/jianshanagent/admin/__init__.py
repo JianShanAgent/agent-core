@@ -39,7 +39,7 @@ _NOT_BUILT = """<!doctype html>
 <body style="font-family: system-ui; max-width: 40rem; margin: 4rem auto; line-height: 1.7">
 <h1>管理后台的页面还没有构建</h1>
 <p>接口已经在运行，只是没有前端的静态文件。在仓库里执行：</p>
-<pre>cd webui &amp;&amp; pnpm install &amp;&amp; pnpm build</pre>
+<pre>cd webui &amp;&amp; npm ci &amp;&amp; npm run build</pre>
 <p>然后刷新这一页。线上不用手动做：<code>deploy/scripts/release.sh push</code> 会自动构建。</p>
 </body></html>
 """
