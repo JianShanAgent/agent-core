@@ -1,0 +1,63 @@
+#!/bin/sh
+# 服务器上的 compose 入口，用法和 docker compose 一样：
+#   /opt/jianshanagent/ctl ps
+#   /opt/jianshanagent/ctl logs -f qqbot
+#   /opt/jianshanagent/ctl up -d
+#
+# 它固定做四件事：用 current 指向的发布目录里的 compose 文件、读 shared/.env、
+# 把发布号作为机器人镜像的标签、带上启用的部署插件。这样凭据和 .env 不随发布走，换版本只是换 current 的指向。
+#
+# 部署插件：shared/.env 的 JIANSHANAGENT_DEPLOY_PLUGINS 里列着的每个 id（逗号或空格隔开），对应发布目录的
+# deploy/plugins/<id>/compose.yaml，和主文件合在一起。一个都不带就写成空的；这一行不能没有——
+# 没有的话这里直接报错，免得少写一行就悄悄把日志之类的服务丢掉。
+#
+# 对还没切换过去的发布操作（比如先检查配置）：CTL_RELEASE=<发布号> /opt/jianshanagent/ctl config -q
+set -eu
+
+ROOT=${JIANSHANAGENT_ROOT:-/opt/jianshanagent}
+if [ -n "${CTL_RELEASE:-}" ]; then
+  REL="$ROOT/releases/$CTL_RELEASE"
+else
+  # 取真实路径而不是软链：容器挂载的配置文件就固定在那一个发布目录里
+  REL=$(readlink -f "$ROOT/current")
+fi
+ENV_FILE="$ROOT/shared/.env"
+
+if [ ! -f "$REL/deploy/docker-compose.yml" ]; then
+  echo "找不到发布目录：${REL}（current 还没指向任何发布？）" >&2
+  exit 1
+fi
+if [ ! -f "$ENV_FILE" ]; then
+  echo "找不到 ${ENV_FILE}，先运行 deploy/scripts/server-init.sh" >&2
+  exit 1
+fi
+if ! grep -q '^JIANSHANAGENT_DEPLOY_PLUGINS=' "$ENV_FILE"; then
+  echo "$ENV_FILE 里没有 JIANSHANAGENT_DEPLOY_PLUGINS：写上要带的部署插件，如 JIANSHANAGENT_DEPLOY_PLUGINS=logs；" \
+    "一个都不带就写成空的。有哪些见 $REL/deploy/plugins/" >&2
+  exit 1
+fi
+
+# 同一个变量写了几行时，和 compose 读 .env 一样，后面的算数
+PLUGINS=$(sed -n 's/^JIANSHANAGENT_DEPLOY_PLUGINS=//p' "$ENV_FILE" | tail -n 1 | tr -d "\"'" | tr ',' ' ')
+for id in $PLUGINS; do
+  case $id in
+    *[!a-z0-9_-]*)
+      echo "部署插件的名字不对：${id}（JIANSHANAGENT_DEPLOY_PLUGINS 里只写 id，用逗号或空格隔开）" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -f "$REL/deploy/plugins/$id/compose.yaml" ]; then
+    echo "发布 $(basename "$REL") 里没有部署插件「${id}」（$REL/deploy/plugins/$id/compose.yaml）" >&2
+    exit 1
+  fi
+  # 插在命令前面：docker compose 的 -f 要写在子命令之前
+  set -- -f "$REL/deploy/plugins/$id/compose.yaml" "$@"
+done
+
+JIANSHANAGENT_RELEASE=$(basename "$REL")
+export JIANSHANAGENT_RELEASE
+exec docker compose \
+  --project-directory "$REL/deploy" \
+  --env-file "$ENV_FILE" \
+  -f "$REL/deploy/docker-compose.yml" \
+  "$@"

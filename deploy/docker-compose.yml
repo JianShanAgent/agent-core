@@ -1,0 +1,217 @@
+# JianShanAgent（见山）：机器人 + 知识库自动更新 + Postgres(pgvector) + Redis + 每日备份。
+#
+# 这里只有机器人离不开的服务。可拆的那些是「部署插件」，各自一个目录（plugins/<id>/，里面有自己的
+# Compose 片段），带哪些写在 .env 的 JIANSHANAGENT_DEPLOY_PLUGINS 里——运行日志（Loki + Alloy + Grafana）就是 plugins/logs。
+#
+# 变量来自 .env（模板见 .env.example）。服务器上不直接敲 docker compose，
+# 用 /opt/jianshanagent/ctl（即 scripts/ctl），它会带上 shared/.env、当前发布目录和启用的部署插件。
+#
+# 镜像标签都选了服务器上已有的版本，起栈不需要联网拉镜像。
+# 所有数据都落在 JIANSHANAGENT_DATA_DIR 下；目录必须事先建好（scripts/server-init.sh），
+# 目录不存在时容器会拒绝启动，而不是悄悄在别的盘上建一个空库。
+name: jianshanagent
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  qqbot:
+    image: jianshanagent-qqbot:${JIANSHANAGENT_RELEASE:-dev}
+    # 镜像由 scripts/release.sh push 构建（Dockerfile 的构建上下文是整个发布目录）
+    restart: unless-stopped
+    stop_grace_period: 30s
+    # 内存上限。平时只用几十兆；会涨的是处理用户发来的大图（同时最多解两张，见 core/images.py）。
+    # 这台机器上还有别的项目，设个上限：真失控了被杀掉重启的是这一个容器，不是整台机器开始换页
+    mem_limit: 2g
+    environment:
+      JIANSHANAGENT_CONFIG_DIR: /app/config
+      # 管理后台里改的配置存在这里（数据盘上）：镜像里的配置是随发布走的默认值，这里只记改过的项，换发布还在
+      JIANSHANAGENT_CONFIG_OVERRIDES_DIR: /data/config
+      # 发布号，管理后台里显示
+      JIANSHANAGENT_RELEASE: ${JIANSHANAGENT_RELEASE:-dev}
+      # 知识库的文件（切片、向量、取数缓存）在数据盘上的位置；在这个容器里手动跑 load 之类的命令时用得上
+      JIANSHANAGENT_KB_DIR: /data/kb
+      JIANSHANAGENT_POSTGRES_DSN: postgresql://jianshanagent:${POSTGRES_PASSWORD:?请在 .env 里设置 POSTGRES_PASSWORD}@postgres:5432/jianshanagent
+      JIANSHANAGENT_REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Shanghai
+    volumes:
+      # 凭据不进镜像，单独挂进来
+      - type: bind
+        source: ${JIANSHANAGENT_SECRETS_FILE:-../config/secrets.yaml}
+        target: /app/config/secrets.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${JIANSHANAGENT_DATA_DIR:?请在 .env 里设置 JIANSHANAGENT_DATA_DIR}/bot
+        target: /data
+        bind:
+          create_host_path: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      # 健康检查只给本机用
+      - "127.0.0.1:${HEALTH_PORT:-18080}:8080"
+      # 管理后台和健康检查是容器里的同一个端口，这里另外映射一份：ADMIN_BIND_ADDR 填服务器的内网地址，
+      # 局域网里就能打开；不填只绑本机。要先登录（令牌见 config/core.admin.yaml 的说明）
+      - "${ADMIN_BIND_ADDR:-127.0.0.1}:${ADMIN_PORT:-13001}:8080"
+    logging: *logging
+    networks: [jianshanagent]
+
+  kbsync:
+    # 知识库自动更新：每隔一段时间看 wiki 改了什么，只重做变了的部分，再导入数据库
+    # （做法见 src/jianshanagent/plugins/knowledge/sync.py，参数在 src/jianshanagent/plugins/knowledge/config.yaml 的 sync 段，
+    # 管理后台里能改、能看状态）。和机器人是同一个镜像，跑的是另一个入口。
+    # 单独一个容器：重算切片要占几秒 CPU、四百多兆内存，放在机器人进程里会卡住收发消息；它出了问题也不影响机器人。
+    # 数据盘上没有知识库的文件（/data/kb）时它不会自己从头全量取数，只在日志和管理后台里说明，
+    # 等 deploy/scripts/release.sh kb-seed 把开发机的文件拷过来。
+    image: jianshanagent-qqbot:${JIANSHANAGENT_RELEASE:-dev}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command: ["python", "-m", "jianshanagent.plugins.knowledge", "sync", "--loop"]
+    mem_limit: 1536m
+    environment:
+      JIANSHANAGENT_CONFIG_DIR: /app/config
+      # 和机器人读同一份覆写：管理后台里改了知识库的配置，下一轮就按新的来
+      JIANSHANAGENT_CONFIG_OVERRIDES_DIR: /data/config
+      JIANSHANAGENT_KB_DIR: /data/kb
+      JIANSHANAGENT_POSTGRES_DSN: postgresql://jianshanagent:${POSTGRES_PASSWORD}@postgres:5432/jianshanagent
+      TZ: Asia/Shanghai
+    volumes:
+      - type: bind
+        source: ${JIANSHANAGENT_SECRETS_FILE:-../config/secrets.yaml}
+        target: /app/config/secrets.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${JIANSHANAGENT_DATA_DIR}/bot
+        target: /data
+        bind:
+          create_host_path: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # 镜像自带的健康检查问的是机器人的 HTTP 端口，这个容器没有；这里看循环的心跳文件最近动过没有
+      test: ["CMD", "python", "-m", "jianshanagent.plugins.knowledge", "sync", "--health"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    logging: *logging
+    networks: [jianshanagent]
+
+  postgres:
+    # 带 pgvector 扩展的 Postgres 17（pgvector 0.8.7）。固定到具体版本，避免标签漂移。
+    image: pgvector/pgvector:0.8.7-pg17
+    restart: unless-stopped
+    stop_grace_period: 60s
+    shm_size: 256mb
+    # 现在整个库 1 个 G、进程占五百多兆。上限留得宽：读文件用的缓存也算在里面，到了上限内核会先回收缓存
+    mem_limit: 4g
+    environment:
+      POSTGRES_DB: jianshanagent
+      POSTGRES_USER: jianshanagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 里设置 POSTGRES_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - type: bind
+        source: ${JIANSHANAGENT_DATA_DIR}/postgres
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jianshanagent -d jianshanagent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+    networks: [jianshanagent]
+
+  backup:
+    # 每天 pg_dump 一次，保留 BACKUP_KEEP_DAYS 天；连同管理后台改过的配置一起备份，
+    # 配了 BACKUP_COPY_DIR 就再拷一份到那里（做法、怎么恢复见 backup/backup.sh 开头）。
+    # 与数据库用同一个镜像，pg_dump 版本一定匹配。
+    image: pgvector/pgvector:0.8.7-pg17
+    restart: unless-stopped
+    user: "999:999"
+    mem_limit: 1g
+    entrypoint: ["/bin/bash", "/usr/local/bin/backup.sh"]
+    command: ["loop"]
+    environment:
+      PGHOST: postgres
+      PGUSER: jianshanagent
+      PGDATABASE: jianshanagent
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_DIR: /backups
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_TIME: ${BACKUP_TIME:-03:30}
+      BACKUP_COPY_DIR: /backups-copy
+      BACKUP_COPY_KEEP: ${BACKUP_COPY_KEEP:-3}
+      BACKUP_CONFIG_DIR: /botdata/config
+      TZ: Asia/Shanghai
+    volumes:
+      - ./backup/backup.sh:/usr/local/bin/backup.sh:ro
+      - type: bind
+        source: ${JIANSHANAGENT_DATA_DIR}/backups
+        target: /backups
+        bind:
+          create_host_path: false
+      # 第二个存放处：.env 里的 BACKUP_COPY_DIR 填另一块盘上的目录（要事先建好，属主 999）。
+      # 没填时这里挂的还是上面那个备份目录，脚本发现两处是同一个目录就不拷。
+      - type: bind
+        source: ${BACKUP_COPY_DIR:-${JIANSHANAGENT_DATA_DIR}/backups}
+        target: /backups-copy
+        bind:
+          create_host_path: false
+      # 机器人的数据目录，只读。备份的是其中的 config/（管理后台改过的配置）；
+      # 挂上一层是因为后台没改过东西时 config/ 还不存在，挂一个不存在的目录容器起不来
+      - type: bind
+        source: ${JIANSHANAGENT_DATA_DIR}/bot
+        target: /botdata
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # 最近 26 小时内有一份完整的备份才算健康
+      test: ["CMD", "/bin/bash", "/usr/local/bin/backup.sh", "check"]
+      interval: 5m
+      timeout: 10s
+      retries: 2
+      start_period: 3m
+    logging: *logging
+    networks: [jianshanagent]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # 目前代码没有用到它，占几兆
+    mem_limit: 256m
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - type: bind
+        source: ${JIANSHANAGENT_DATA_DIR}/redis
+        target: /data
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+    networks: [jianshanagent]
+
+networks:
+  jianshanagent:
+    name: jianshanagent_net

@@ -1,0 +1,6 @@
+# 插件清单（格式见 src/jianshanagent/core/manifest.py）
+id: logs
+kind: deploy
+name: 运行日志
+description: 把各个容器打到标准输出的日志收起来存 14 天，在 Grafana 里查（Loki + Alloy + Grafana）。
+services: [loki, alloy, grafana]

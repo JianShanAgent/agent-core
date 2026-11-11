@@ -1,0 +1,22 @@
+# 这个机器人服务的是哪个 wiki。查询（wiki_query）、知识库（knowledge）、提示词都从这里拿。
+# 这里是默认值（空的）：哪个 wiki 是每个部署自己的事，写在部署的 config/core.wiki.yaml 里，只写要改的项。
+# 那个站有自己的站点插件就写在 site 里，没有就不写（纯 MediaWiki）。
+
+name: ""                           # 这个 wiki 讲的是什么。提示词里用它：「你是 <name> wiki 机器人的查证员」
+about: ""                          # 一句话说明它是什么，向模型交代背景时用；可以不写
+
+api_url: ""                        # MediaWiki 的接口地址（https://<站点>/api.php，有的站是 <站点>/w/api.php）。必填
+site_base: ""                      # 站点地址。不写就取 api_url 的域名
+# article_path: "/wiki/$1"         # 页面地址在站内的写法（MediaWiki 的 $wgArticlePath，$1 是标题）；不写就是 /wiki/$1
+# 有的站在 Cloudflare 之类的后面，请求要带放行请求头才不会被挑战页拦截。
+# 这里只写请求头名（如 X-authkey）；密钥在 secrets.yaml 的 wiki.authkey（不入库）。不需要放行的站不写
+auth_header: ""
+user_agent: "JianShanAgent/0.1 (+https://github.com/JianShanAgent/agent-core)"   # 各个插件可以在自己的配置里另写
+
+# 用哪个站点插件（规范见 docs/插件规范.md）。通用的代码只懂 MediaWiki，某个平台、某个站特有的东西由站点插件带进来。
+# 站点插件是一棵树：平台在上，具体的站在它下面。这里只写最末一级的 id，上级顺着插件清单自动带出来
+# （写 yys，灰机平台 huiji 会先加载）。站点插件是另外装的包（如 jianshanagent-site-huiji-yys）。
+# 不写（或写成 ""）就是纯 MediaWiki：/查 只认页面标题和全文搜索，知识库只有条目页。
+# 没登记的包写它的包路径（如 mypkg.mysite），装在同一个 Python 环境里就行。
+# 这一项和上面的地址都不能在管理后台里改（它们决定加载哪些代码、密钥发到哪里），要改就改部署的配置文件再发布。
+site: ""

@@ -1,0 +1,5 @@
+# 插件清单（格式见 src/jianshanagent/core/manifest.py）
+id: chatlog
+kind: feature
+name: 群聊记录
+description: 把群里的消息和机器人的回复记进数据库，只旁听、只写库。

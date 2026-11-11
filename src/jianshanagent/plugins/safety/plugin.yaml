@@ -1,0 +1,5 @@
+# 插件清单（格式见 src/jianshanagent/core/manifest.py）
+id: safety
+kind: feature
+name: 安全兜底
+description: 发出去的消息过一遍兜底检查（长度、敏感内容），拦下不该发的。

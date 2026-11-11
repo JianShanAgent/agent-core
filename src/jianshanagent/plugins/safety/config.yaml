@@ -1,0 +1,6 @@
+# safety 插件 — 出站兜底
+enabled: true
+outbound:
+  strip_control_chars: true
+  max_message_chars: 1800
+  block_patterns: []               # 正则列表；命中的整条不发，日志里记一条是哪条规则拦的（不记内容）

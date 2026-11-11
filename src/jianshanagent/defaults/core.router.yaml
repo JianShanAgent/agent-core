@@ -1,0 +1,14 @@
+# 消息路由
+command_prefixes:
+  - "/"
+  - "！"
+  - "!"
+# 判定顺序是固定的（core/router.py）：指令 → 进行中的会话 → 关键词 → 对话
+active_session:
+  ttl_seconds: 600
+  cancel_commands:
+    - "/取消"
+    - "/cancel"
+rate_limit:
+  per_user_per_minute: 20
+  per_group_per_minute: 60

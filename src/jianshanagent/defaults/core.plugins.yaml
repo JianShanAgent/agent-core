@@ -1,0 +1,15 @@
+# 启用哪些功能插件（按顺序加载）。每个插件是 src/jianshanagent/plugins/ 下的一个目录：清单 plugin.yaml、
+# 默认配置 config.yaml、代码都在里面（规范见 src/jianshanagent/core/manifest.py）。
+# 站点插件（某个 wiki 平台、某个站特有的东西）不在这里，见 core.wiki.yaml 的 site。
+enabled:
+  - safety
+  - wiki_query                     # /查 和给模型用的 wiki 查询；查哪个 wiki、用哪个站点插件见 core.wiki.yaml
+  - knowledge                      # 知识库检索；没有数据库时自动不生效
+  - research                       # 查证工作流（知识库 → 站内搜索 → 联网搜索 → 复核）；要排在 knowledge、wiki_query 后面
+  - memory
+  - chat
+  - chatlog                        # 群聊记录（只旁听、只写库）；没有数据库时自动不生效
+# 未列出的插件目录不会加载
+#
+# 在管理后台动过开关或顺序以后，实际启用哪些以后台存下的清单为准（存在覆写目录里），再跟上
+# 这份清单后来的变化：这里新加的插件会自动启用，这里删掉的会拿掉，后台明确关掉的不会被重新打开。

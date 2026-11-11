@@ -1,0 +1,12 @@
+# memory 插件：让对话记住用户说过的事（需要 chat 插件启用）
+enabled: true
+max_items: 50                    # 每个用户最多记多少条，超出丢最旧的（群里和单聊分开计）
+max_chars: 200                   # 单条记忆的最大长度
+scope:
+  group: explicit_only           # 群聊：只记用户明确要求记住的
+  c2c: preferences_ok            # 单聊：还可以主动记长期有用的偏好
+# 「长期有用的偏好」给模型举的例子。因站而异，站点插件在它配置的 extend 段里换成那个站的
+preference_examples: "怎么称呼、常问的内容、习惯的说法"
+commands:
+  list: "记忆"                    # /记忆：查看记住了什么
+  forget: "清除记忆"              # /清除记忆：全部删除——记忆，以及别的插件存下的这个用户的数据（群聊记录）

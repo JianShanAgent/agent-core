@@ -1,0 +1,204 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+/* 配色：中性灰底 + 朱红做点缀（阴阳师的颜色），亮暗两套 */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.985 0.002 90);
+  --foreground: oklch(0.2 0.006 285);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.006 285);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.006 285);
+  --primary: oklch(0.25 0.008 285);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.955 0.003 90);
+  --secondary-foreground: oklch(0.25 0.008 285);
+  --muted: oklch(0.96 0.003 90);
+  --muted-foreground: oklch(0.52 0.012 285);
+  --accent: oklch(0.95 0.004 90);
+  --accent-foreground: oklch(0.25 0.008 285);
+  --destructive: oklch(0.58 0.22 27);
+  --border: oklch(0.915 0.004 90);
+  --input: oklch(0.9 0.004 90);
+  --ring: oklch(0.63 0.19 35);
+  --brand: oklch(0.63 0.19 35);
+  --brand-foreground: oklch(0.99 0 0);
+  --success: oklch(0.6 0.15 155);
+  --warning: oklch(0.72 0.16 70);
+  --info: oklch(0.6 0.14 245);
+  --chart-1: oklch(0.63 0.19 35);
+  --chart-2: oklch(0.6 0.13 190);
+  --chart-3: oklch(0.55 0.14 265);
+  --chart-4: oklch(0.75 0.15 85);
+  --chart-5: oklch(0.62 0.17 330);
+  --chart-6: oklch(0.65 0.14 150);
+  --sidebar: oklch(0.975 0.003 90);
+  --sidebar-foreground: oklch(0.3 0.008 285);
+  --sidebar-accent: oklch(0.935 0.005 90);
+  --sidebar-border: oklch(0.915 0.004 90);
+}
+
+.dark {
+  --background: oklch(0.165 0.006 285);
+  --foreground: oklch(0.96 0.003 90);
+  --card: oklch(0.205 0.007 285);
+  --card-foreground: oklch(0.96 0.003 90);
+  --popover: oklch(0.22 0.008 285);
+  --popover-foreground: oklch(0.96 0.003 90);
+  --primary: oklch(0.93 0.004 90);
+  --primary-foreground: oklch(0.2 0.006 285);
+  --secondary: oklch(0.27 0.008 285);
+  --secondary-foreground: oklch(0.96 0.003 90);
+  --muted: oklch(0.26 0.008 285);
+  --muted-foreground: oklch(0.7 0.012 285);
+  --accent: oklch(0.28 0.009 285);
+  --accent-foreground: oklch(0.96 0.003 90);
+  --destructive: oklch(0.68 0.2 25);
+  --border: oklch(1 0 0 / 11%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.7 0.17 38);
+  --brand: oklch(0.7 0.17 38);
+  --brand-foreground: oklch(0.18 0.006 285);
+  --success: oklch(0.72 0.16 155);
+  --warning: oklch(0.8 0.15 80);
+  --info: oklch(0.72 0.13 245);
+  --chart-1: oklch(0.7 0.17 38);
+  --chart-2: oklch(0.72 0.12 190);
+  --chart-3: oklch(0.68 0.14 270);
+  --chart-4: oklch(0.82 0.14 88);
+  --chart-5: oklch(0.72 0.16 330);
+  --chart-6: oklch(0.75 0.14 150);
+  --sidebar: oklch(0.19 0.007 285);
+  --sidebar-foreground: oklch(0.88 0.005 90);
+  --sidebar-accent: oklch(0.26 0.009 285);
+  --sidebar-border: oklch(1 0 0 / 9%);
+}
+
+@theme inline {
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "HarmonyOS Sans SC",
+    "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, "PingFang SC",
+    monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-border: var(--sidebar-border);
+  --animate-in: enter 0.18s ease-out;
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply bg-background;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    background: color-mix(in oklch, var(--brand) 28%, transparent);
+  }
+  /* 细一点的滚动条，深色主题下不刺眼 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklch, var(--foreground) 22%, transparent) transparent;
+  }
+}
+
+/* 机器人回复、提示词里的 Markdown */
+.prose-chat {
+  @apply text-sm leading-relaxed break-words;
+}
+.prose-chat p {
+  @apply my-1.5 first:mt-0 last:mb-0;
+}
+.prose-chat ul {
+  @apply my-1.5 list-disc pl-5;
+}
+.prose-chat ol {
+  @apply my-1.5 list-decimal pl-5;
+}
+.prose-chat li {
+  @apply my-0.5;
+}
+.prose-chat a {
+  @apply text-brand underline decoration-brand/40 underline-offset-2 hover:decoration-brand;
+}
+.prose-chat blockquote {
+  @apply border-border text-muted-foreground my-2 border-l-2 pl-3;
+}
+.prose-chat code {
+  @apply bg-muted rounded px-1 py-0.5 font-mono text-[0.85em];
+}
+.prose-chat pre {
+  @apply bg-muted my-2 overflow-x-auto rounded-md p-3;
+}
+.prose-chat pre code {
+  @apply bg-transparent p-0;
+}
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3 {
+  @apply mt-3 mb-1.5 text-sm font-semibold;
+}
+.prose-chat table {
+  @apply my-2 w-full border-collapse text-xs;
+}
+.prose-chat th,
+.prose-chat td {
+  @apply border-border border px-2 py-1 text-left;
+}
+.prose-chat strong {
+  @apply font-semibold;
+}

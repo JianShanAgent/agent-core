@@ -1,0 +1,11 @@
+# 全局应用配置
+name: jianshanagent
+env: production          # development | production
+timezone: Asia/Shanghai
+log:
+  level: INFO
+  json: true             # Compose 下走 stdout JSON，供 Promtail 采集
+healthcheck:
+  host: 0.0.0.0
+  port: 8080
+  path: /healthz

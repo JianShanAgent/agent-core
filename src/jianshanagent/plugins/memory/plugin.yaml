@@ -1,0 +1,5 @@
+# 插件清单（格式见 src/jianshanagent/core/manifest.py）
+id: memory
+kind: feature
+name: 记忆
+description: 让对话记住用户说过的事；用户可以查看和清除。

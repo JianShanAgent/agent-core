@@ -1,0 +1,5 @@
+# 插件清单（格式见 src/jianshanagent/core/manifest.py）
+id: chat
+kind: feature
+name: 对话
+description: 没有命中命令的消息走这里：闲聊直接回，涉及 wiki 内容的问题交给查证工作流。

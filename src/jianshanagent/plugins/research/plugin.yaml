@@ -1,0 +1,6 @@
+# 插件清单（格式见 src/jianshanagent/core/manifest.py）
+id: research
+kind: feature
+name: 查证工作流
+description: 对话模型判断要查资料时，把问题交给它：分析问题 → 逐级取证 → 写结论 → 复核，结论直接发给用户。
+after: [knowledge, wiki_query]   # 注册时就要用到知识库检索和 wiki 查询

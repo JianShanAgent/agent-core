@@ -1,0 +1,51 @@
+# LLM：小米 MiMo，OpenAI 兼容协议（POST {base_url}/chat/completions）
+# 密钥不写在这里：填到 secrets.yaml 的 llm.api_key（或环境变量 JIANSHANAGENT_LLM_API_KEY）
+enabled: true
+
+# Token Plan（tp-/ttp- 密钥）：https://token-plan-cn.xiaomimimo.com/v1
+# 按量付费  （sk- 密钥）    ：https://api.xiaomimimo.com/v1
+# 两种密钥不能混用，换地址时密钥要一起换。
+base_url: "https://token-plan-cn.xiaomimimo.com/v1"
+# 一次调用最多等多久。开思考的调用要等思考和正文全部生成完才返回，实测约每秒 40 个 token，
+# 想得多的一次要 1 分多钟；定成 60 秒的话会把还在生成的请求掐掉重来，反而更慢。等满了还没完就报错，不重试。
+timeout_seconds: 150
+max_retries: 2                    # 仅对 429 / 5xx / 连接失败退避重试
+
+# 模型下线很快（v2.5 只存活了半年），模型名只在这里出现，代码里不写死。
+# thinking 只有开/关，没有强度档位；开启后 temperature 不生效，
+# 且 max_completion_tokens 同时包含思考与正文，要留足。
+default_profile: chat
+profiles:
+  chat:                           # 面向用户的对话与工具调用
+    model: mimo-v2.6-pro          # 额度消耗是 flash 的 3 倍
+    # 必须开思考。关着的时候模型经常不查就凭记忆编（同一个问题问 8 次，有的题 8 次都不调工具，
+    # 还会编出假链接），偶尔把工具调用写成一段文字发给用户；降温度、改提示词都治不了，开思考后 8 次全调。
+    thinking: true
+    max_completion_tokens: 4096   # 含思考
+  # 下面两档的 max_completion_tokens 同时是「最多想多久」的上限：模型每秒约出 55 个 token，6144 约 110 秒。
+  # 思考的长短很不稳定（实测 200～7500 个 token），想到上限还没出结果的，工作流会改用 quick 档再做一次。
+  reason:                         # 带思考的查证员档位。现在查证员用的是 quick（见 plugin.research 的 profiles），这一档留着备用
+    model: mimo-v2.6-pro
+    thinking: true
+    max_completion_tokens: 6144
+  review:                         # 带思考的复核员档位。现在复核员用的是 quick，这一档留着备用
+    model: mimo-v2.6-pro
+    thinking: true
+    max_completion_tokens: 6144
+  quick:                          # 查证工作流里不用思考、要快的两步：查证前分析问题、按复核意见修正回答
+    model: mimo-v2.6-pro          # 实测 flash 做这一步平时更快（1～2 秒），但约两成的请求会卡 40 秒以上；pro 不开思考稳定在 1～9 秒
+    thinking: false
+    temperature: 0.2
+    max_completion_tokens: 2048
+  extract:                        # 后台的结构化抽取（槽位、记忆）：不赶时间，用便宜的
+    model: mimo-v2.6-flash
+    thinking: false
+    temperature: 0.2
+    max_completion_tokens: 1024
+
+# 多轮历史：每次对话带给模型多少上文。一轮 = 用户的一句话 + 模型为它做的查询 + 回答。
+# 先按轮数取，再按时间截断；数据库里的历史不会被删，只是不再带给模型。
+# 用户发送 /新话题（指令名在 plugin.chat）可以立刻清空自己的对话历史。
+history:
+  max_turns: 5                    # 最多带最近几轮
+  idle_expire_seconds: 7200       # 两轮之间隔了这么久就算新对话，之前的不带；0 = 不按时间过期

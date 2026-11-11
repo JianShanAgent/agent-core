@@ -1,0 +1,58 @@
+// 日志采集：通过 Docker 接口读容器的标准输出，推到本项目自己的 Loki。
+// 只采 compose 项目 jianshanagent 的容器，服务器上别的项目的容器不会被发现，也不会被读取。
+
+discovery.docker "jianshanagent" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=jianshanagent"]
+  }
+}
+
+// 把容器信息整理成查询时用的标签：service（compose 服务名）、container（容器名）
+discovery.relabel "jianshanagent" {
+  targets = discovery.docker.jianshanagent.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "jianshanagent" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.relabel.jianshanagent.output
+  labels        = {job = "jianshanagent"}
+  forward_to    = [loki.process.jianshanagent.receiver]
+}
+
+loki.process "jianshanagent" {
+  // 机器人和知识库自动更新的日志是 JSON，把 level 提成标签，方便按级别筛选；其它服务的日志原样转发
+  stage.match {
+    selector = "{service=~\"qqbot|kbsync\"}"
+
+    stage.json {
+      expressions = {level = "level"}
+    }
+
+    stage.labels {
+      values = {level = ""}
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

@@ -1,0 +1,30 @@
+# 嵌入（把文字算成向量）：OpenAI 兼容协议（POST {base_url}/embeddings）
+# 密钥不写在这里：填到 secrets.yaml 里 secret 指的那一段的 api_key
+#
+# 向量指纹 = 提供方 + 型号 + 维度。库里的向量和问题的向量指纹不同就不能直接比
+# （同一个型号，各家的做法也不一样：模力方舟和本机算出的同一段文字相似度只有 0.87）。
+enabled: true
+
+# 线上算问题向量、以后增量更新用哪一家。全量嵌入时可以用 --provider 另指
+default_provider: gitee
+
+providers:
+  gitee:                          # 模力方舟（ai.gitee.com）。实测质量与官方做法持平，图片也能算
+    base_url: "https://ai.gitee.com/v1"
+    model: "Qwen3-VL-Embedding-8B"
+    secret: "gitee_ai"
+    dimensions: 4096              # 每次请求都带上：模力方舟不带时只给前 1024 维，而且不归一化
+    batch_size: 16                # 一次请求几段文字
+    concurrency: 2                # 同时发几个请求
+    timeout_seconds: 120
+    max_retries: 5                # 网络错误、429、5xx 和偶发的 400 退避重试
+  local:                          # 本机模型（官方做法），先起服务：uv run --no-project tools/local_embedding/serve.py
+    base_url: "http://127.0.0.1:8765/v1"
+    model: "Qwen/Qwen3-VL-Embedding-8B"
+    secret: ""                    # 不需要密钥
+    dimensions: 4096
+    batch_size: 32
+    concurrency: 1                # 一块显卡，同时发多个请求不会更快
+    timeout_seconds: 900
+    max_retries: 3
+  # 硅基流动也有这个型号，但它的做法和官方不一样，实测检索质量差很多（第 1 名命中 27%，官方 78%），不用。

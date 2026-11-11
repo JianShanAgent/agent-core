@@ -1,0 +1,21 @@
+# 管理后台（网页）。和健康检查用同一个端口（app.yaml 的 healthcheck）；
+# 线上由 Compose 把这个端口另外映射到内网地址（服务器 shared/.env 的 ADMIN_BIND_ADDR、ADMIN_PORT）。
+# 这个文件里的项改了要重启机器人才生效。
+enabled: true
+# 登录令牌：优先用 secrets.yaml 的 admin.token；没填就在第一次启动时生成一个，存在下面这个文件里
+# （权限 600，不进日志）。忘了就看这个文件；想换就删掉它再重启，或者在 secrets.yaml 里写一个。
+# 同一个目录里还会有一个 sessions_valid_from：点「退出登录」时记下的时间点，在它之前发出去的
+# 登录 Cookie 全部作废（重启后还作数）。删掉它 = 忘掉退出过，没到期的旧 Cookie 又能用。
+token_file: /data/admin/token
+session_days: 30                   # 登录一次管多久；点一次「退出登录」，所有浏览器上的登录都失效
+login:
+  max_failures: 5                  # 同一个地址连着输错这么多次……
+  lock_seconds: 60                 # ……就锁这么久
+web_chat:
+  user: admin                      # 网页对话里的默认身份。它的对话历史、记忆和 QQ 上的用户互不相干
+# 数据库备份由备份容器每天做一次，结果记在数据库里（deploy/backup/backup.sh）。超过这么多小时
+# 没有一次成功的，页面顶上就出提醒；「系统信息」页一直显示最近一次的结果。0 = 不提醒。
+backup_warn_hours: 26
+# 更早的日志在哪看（后台的日志页只有内存里最近 5000 条）。填了的话，日志页给一个跳过去的链接；
+# 带着部署插件 logs 时填 Grafana 的地址。
+logs_url: ""

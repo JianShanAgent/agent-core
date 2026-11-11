@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets & local overrides
+config/secrets.yaml
+config/local/**
+!config/local/.gitkeep
+deploy/.env
+.env
+*.pem
+
+# Runtime data
+data/
+*.sqlite
+*.db
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Logs
+*.log
+logs/
+# 部署插件「运行日志」的目录正好也叫 logs，它是代码不是日志
+!deploy/plugins/logs/
+
+# 管理后台前端的构建产物（webui/ 里 npm run build 生成；发布时由 release.sh 构建）
+src/jianshanagent/admin/static/

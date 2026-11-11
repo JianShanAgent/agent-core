@@ -1,0 +1,98 @@
+# 部署插件「运行日志」（logs）的 Compose 片段：Loki 存、Alloy 采、Grafana 看。
+#
+# 不单独用。scripts/ctl 按 shared/.env 的 JIANSHANAGENT_DEPLOY_PLUGINS 把它和 ../../docker-compose.yml 合在一起，
+# 所以这里的相对路径都从 deploy/ 算起，网络 jianshanagent 也是那边定义的。
+# 机器人不知道这几个容器存在：它只管往标准输出打 JSON 日志，Alloy 通过 Docker 接口去读。
+# 数据在 JIANSHANAGENT_DATA_DIR 下的 loki/ grafana/ alloy/，目录由同目录的 init.sh 在上线前建好。
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  loki:
+    # 镜像里没有 shell，做不了容器内健康检查；Alloy 和 Grafana 连不上时会自己重试
+    image: grafana/loki:3.7.9
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yml"]
+    mem_limit: 1g
+    volumes:
+      - ./plugins/logs/loki-config.yaml:/etc/loki/config.yml:ro
+      - type: bind
+        source: ${JIANSHANAGENT_DATA_DIR}/loki
+        target: /loki
+        bind:
+          create_host_path: false
+    logging: *logging
+    networks: [jianshanagent]
+
+  alloy:
+    # 日志采集：只采带 com.docker.compose.project=jianshanagent 标签的容器（见 alloy-config.alloy）
+    image: grafana/alloy:v1.11.3
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    mem_limit: 512m
+    volumes:
+      - ./plugins/logs/alloy-config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # 读取进度存盘，重启后从上次的位置接着采
+      - type: bind
+        source: ${JIANSHANAGENT_DATA_DIR}/alloy
+        target: /var/lib/alloy/data
+        bind:
+          create_host_path: false
+    depends_on:
+      - loki
+    healthcheck:
+      test:
+        - CMD
+        - /bin/bash
+        - -c
+        - exec 3<>/dev/tcp/127.0.0.1/12345 && printf 'GET /-/ready HTTP/1.0\r\n\r\n' >&3 && grep -q '200 OK' <&3
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *logging
+    networks: [jianshanagent]
+
+  grafana:
+    image: grafana/grafana:13.3.0
+    restart: unless-stopped
+    mem_limit: 1g
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      # 只在 Grafana 第一次初始化数据目录时生效；之后改密码要在界面里改或用 grafana cli
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?请在 .env 里设置 GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_SERVER_ROOT_URL: http://${GRAFANA_BIND_ADDR:-127.0.0.1}:${GRAFANA_PORT:-13000}
+      TZ: Asia/Shanghai
+    volumes:
+      - ./plugins/logs/grafana/provisioning:/etc/grafana/provisioning:ro
+      - type: bind
+        source: ${JIANSHANAGENT_DATA_DIR}/grafana
+        target: /var/lib/grafana
+        bind:
+          create_host_path: false
+    ports:
+      - "${GRAFANA_BIND_ADDR:-127.0.0.1}:${GRAFANA_PORT:-13000}:3000"
+    depends_on:
+      - loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging: *logging
+    networks: [jianshanagent]

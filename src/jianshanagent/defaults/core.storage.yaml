@@ -1,0 +1,10 @@
+# 存储。这份配置改了要重启才生效。
+postgres:
+  # 实际 DSN 优先读 secrets / 环境变量 JIANSHANAGENT_POSTGRES_DSN
+  dsn_env: JIANSHANAGENT_POSTGRES_DSN
+  # 机器人进程的数据库连接池：平时留几个连接、最多开几个（知识库自动更新是另一个进程，固定最多 2 个）
+  pool_min: 1
+  pool_max: 10
+redis:
+  # 现在代码没有用到 Redis（限流、wiki 查询的缓存都在进程内），容器先留着；以后多进程部署时再接
+  url_env: JIANSHANAGENT_REDIS_URL

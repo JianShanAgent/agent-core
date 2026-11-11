@@ -1,0 +1,6 @@
+# 插件清单（格式见 src/jianshanagent/core/manifest.py）
+id: wiki_query
+kind: feature
+name: wiki 查询
+description: /查 和给模型用的 wiki 查询工具：按标题找页面、全文搜索、取摘要，不过大模型。站点插件可以接进自己的条目种类和命令。
+extension_points: [wiki]         # 站点插件往查询里接东西：自己的条目种类、别名、命令（接口见 provider.py）

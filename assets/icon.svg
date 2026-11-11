@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="JianShanAgent">
+  <title>JianShanAgent</title>
+  <defs>
+    <clipPath id="door"><path d="M150 420V214a106 106 0 0 1 212 0v206z"/></clipPath>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="#1f3b34"/>
+  <path d="M150 420V214a106 106 0 0 1 212 0v206z" fill="#f4efe6"/>
+  <g clip-path="url(#door)">
+    <circle cx="304" cy="196" r="23" fill="#e9a66b"/>
+    <path d="M130 420V338l74-84 52 58 34-34 92 96v46z" fill="#a9c7b8"/>
+    <path d="M130 420v-22l98-104 58 66 30-28 66 62v26z" fill="#2f6b5a"/>
+  </g>
+</svg>

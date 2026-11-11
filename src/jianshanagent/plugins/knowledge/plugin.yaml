@@ -1,0 +1,6 @@
+# 插件清单（格式见 src/jianshanagent/core/manifest.py）
+id: knowledge
+kind: feature
+name: 知识库
+description: 把 wiki 取下来清洗、切片、算向量、入库，供检索和以图搜图；另有按最近更改做的自动更新。站点插件可以接进自己的内容。
+extension_points: [knowledge]    # 站点插件往知识库里接东西：自己的文档、标注、图库（接口见 site.py）

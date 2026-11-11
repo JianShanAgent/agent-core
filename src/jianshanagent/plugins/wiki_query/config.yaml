@@ -1,0 +1,31 @@
+# wiki_query 插件：精确查询，不过 LLM
+# 查哪个 wiki（接口地址、放行请求头）在 core.wiki.yaml。通用的部分只认页面：按标题找、全文搜索、取摘要。
+# 那个站另有自己的条目和命令的，由站点插件接进来（core.wiki.yaml 的 site）：
+# 阴阳师 wiki 的式神、御魂（认昵称）和 /筛选 是 yys 插件加的，设置在 site.yys 的 wiki 段。
+commands:
+  lookup:                          # /查 <条目名>：名字完全一致就直接给内容，有几个候选就列出来让用户选
+    name: "查"
+    aliases: ["查询", "wiki"]
+    description: "查询 wiki 条目"
+wiki:
+  user_agent: "JianShanAgent/0.1 (+https://github.com/JianShanAgent/agent-core; wiki-query)"
+  timeout_seconds: 12
+  cache_ttl_seconds: 300
+  # 全文搜索的结果按什么排（接口 list=search 的 srqiprofile 参数，装了 CirrusSearch 的站才有）。
+  # /查 找不到同名条目时、查证流程的站内搜索，用的都是它。
+  # 不写 = 接口默认的排法：被很多页面链接到的页面排前面。在阴阳师 wiki 上，「超鬼王数据」搜出来前五条全是式神页，
+  # 「超鬼王」那一页排在 64 条里的第 62。wiki 网页上的搜索框不是这样排的。
+  # classic_noboostlinks = 不看链接数。2026-11-11 用 8 个词对过：前 20 条和网页上搜出来的完全一样。
+  # 这个站没有这种排法（接口报错）时，自动退回默认的排法，日志里有 wiki_search_ranking_failed。
+  search_ranking: "classic_noboostlinks"
+format:
+  max_chars: 800
+  include_link: true
+  disambiguation_limit: 5
+  markdown: true                   # /查 的结果用 Markdown 发（加粗、引用、链接）；发送失败会自动退回纯文本
+  buttons: true                    # 有多个候选时附按钮，点一下就查（只有提问的人能点）
+  # 普通页面的正文取的是 wiki 接口的「摘要」。模板拼出来的页面（阴阳师 wiki 的超鬼王、御魂检索器）摘要是空的，回复里只剩标题和链接。
+  # 打开后，这种时候用知识库里这一页的正文顶上（从头起，照样截到 max_chars）。
+  # 要 knowledge 插件开着；知识库里没有这一页时还是只有标题和链接。
+  # 知识库不是实时的：页面入库以后改过的话，顶上来的是入库时的内容（链接点开是最新的）。
+  knowledge_fallback: true

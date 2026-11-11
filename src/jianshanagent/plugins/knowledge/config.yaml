@@ -1,0 +1,176 @@
+# knowledge 插件：wiki 知识库。
+# 离线三步（都可以反复跑，只处理有变化的部分）：
+#   预处理（取数 → 清洗 → 转 Markdown → 切片 → 去重 → 输出）：.venv/bin/python -m jianshanagent.plugins.knowledge run
+#   给切片算向量（用哪一家、型号、密钥在 core.embedding.yaml）：.venv/bin/python -m jianshanagent.plugins.knowledge embed
+#   把切片和向量导入数据库：                                   .venv/bin/python -m jianshanagent.plugins.knowledge load
+# 运行时：从数据库里检索（下面的 retrieval 段），是查证工作流的第一级取证（plugin.research）。
+#
+# 这份配置里只有对任何 MediaWiki 都成立的项。某个平台、某个站特有的东西由站点插件带进来
+# （用哪个见 core.wiki.yaml 的 site）：它们自己的设置在 site.<id> 的 knowledge 段，
+# 对这份配置的补充（那个站的清洗规则、排除的页面……）在 site.<id> 的 extend 段，读配置时就并进来了。
+
+retrieval:
+  enabled: true
+  top_k: 10                        # 一次取几片。实测 98% 的目标切片在前 10 名里，所以不再做重排序
+  keyword_slots: 2                 # 其中关键词检索的前几名一定给（向量找不到的少见字眼靠它），其余名额按向量的名次补满；0 = 只用向量
+  max_df_ratio: 0.2                # 出现在超过这个比例的切片里的词不参与关键词检索（「的技」「活动」这类）
+  embed_timeout_seconds: 8         # 算问题向量最多等这么久；超时或出错就只用关键词一路
+  embed_retries: 1
+
+# 以图搜图：wiki 图片索引。离线三步（都可以反复跑，只处理新增和有变化的；说明见 image_cli.py）：
+#   选图、生成记录、下载原图：.venv/bin/python -m jianshanagent.plugins.knowledge images collect
+#   给图片算向量：            .venv/bin/python -m jianshanagent.plugins.knowledge images embed
+#   导入数据库：              .venv/bin/python -m jianshanagent.plugins.knowledge images load
+# 运行时：服务 image_search（images.py）。上面 retrieval.enabled 为 true、有数据库、嵌入接口可用时才有；
+# 算查询图片的向量用的也是 retrieval 段的 embed_timeout_seconds / embed_retries。
+# 收哪些图、每张图是什么因站而异，由站点插件定（阴阳师的在 site.yys 的 knowledge.images 段）；
+# 没有插件管图库时 images collect 不做事。
+images:
+  top_k: 3                         # 没认准时最多返回几张（认准了只返回那一张）；同一个造型的几张图（立绘大图、卡面小图、头像）只算一张
+  # 三个门槛是实测定的（tools/kb_eval/eval_images.py：240 张入库的图各做 10 种变形共 2100 条查询，
+  # 另有 80 张不在库里的公告配图）。先说结论：光看相似度高不高不够用——画风相近的立绘之间本来就有
+  # 0.7 上下的相似度（库里没有这个角色时，最像的那张中位数 0.68、最高 0.86），而截图、海报里的立绘和
+  # 原图也只有 0.6～0.8。管用的是「领先幅度」：库里有这张图时，它比第二像的造型高出一截（中位数 0.19，
+  # 95% 的情况不少于 0.056）；库里没有这个角色时，前两名挤在一起（中位数 0.013，95% 的情况不到 0.057）。
+  min_score: 0.65                  # 相似度低于它的不返回。取 0.65：入库的图变形后有 3.7% 被挡掉（多是整屏截图）；无关的图 90% 什么都不返回
+  # 最像的那张要标成「就是这张图」（sure），得同时满足：相似度不低于 sure_score；
+  # 比第二像的造型领先不少于 sure_margin × (1 - 相似度) / (1 - sure_score)——相似度刚到 sure_score 时要领先 sure_margin，
+  # 越接近 1 要求越少（原图的拷贝只要比它的换色版、臻藏版高一点就行）。
+  # 取 0.65 / 0.10：变形后的图 91.1% 判成「就是这张图」，其中认错 0 条（缩小、裁边、重压、换底色、留黑 93%～99.6%，
+  # 套一圈界面 94.6%，竖屏综合截图 65.4%，横屏整屏游戏截图 50.8%）。不管判没判上，98.6% 的查询排第 1 名的就是它，
+  # 没判上的只是标成「有些像」、和后面几名一起返回。
+  # 库里没有这个造型、但有同角色别的造型时误判 8.7%（多是典藏和臻藏、初始和觉醒这类几乎一样的图）；
+  # 库里没有这个角色时误判 2.0%（看了都是同系列、同一个画面的联动图）；80 张无关图判了 4 张，看过原图，
+  # 都是含着库里那张立绘的海报，没判错。
+  # 对照：只看相似度、门槛设 0.88 的话只有 62% 够格，后三类截图分别是 29% / 0% / 0%。
+  sure_score: 0.65
+  sure_margin: 0.10
+  # 算向量前的预处理（core/images.py 的 normalize_image）：铺白底，长边缩到 max_side，存成这个质量的 JPEG。
+  # 入库和查询共用这两个值；改了以后库里的向量就不能用了，要重跑 images embed 和 images load
+  max_side: 1024
+  jpeg_quality: 90
+  embed_batch_size: 8              # 全量算向量时一次请求几张图（同时发几个请求沿用 core.embedding.yaml 的 concurrency）
+
+wiki:
+  # 是哪个 wiki（接口地址、放行请求头名、页面地址的写法）在 core.wiki.yaml；这里只写取数时用的 User-Agent
+  user_agent: "JianShanAgent/0.1 (+https://github.com/JianShanAgent/agent-core; kb-preprocess)"
+
+fetch:
+  # 这是别人的生产站点：代码里把并发封顶为 2、速率封顶为每秒 2 个请求，这里写得再大也不会超过
+  max_concurrency: 2
+  requests_per_second: 2
+  timeout_seconds: 60
+  max_retries: 4
+  wikitext_batch_size: 50          # 一次请求取多少个页面的源码（MediaWiki 上限 50）
+
+paths:                             # 相对仓库根目录；data/ 已被 git 忽略
+  output_dir: "data/kb"            # 向量在它下面的 vectors/<提供方>/
+  cache_dir: "data/kb/cache"
+  # 服务器的容器里这两项不起作用：环境变量 JIANSHANAGENT_KB_DIR=/data/kb 把输出放到数据盘上，缓存在它下面的 cache/
+
+# 自动更新：服务器上的 kbsync 服务每隔一段时间做一轮，只重做 wiki 上变了的部分（做法见 sync.py 顶部）。
+#   手动做一轮：            .venv/bin/python -m jianshanagent.plugins.knowledge sync
+#   只看这一轮打算做什么：  .venv/bin/python -m jianshanagent.plugins.knowledge sync --plan
+#   看现状：                .venv/bin/python -m jianshanagent.plugins.knowledge sync --status（管理后台的知识库页也有）
+# 这一段在管理后台里改了，下一轮就生效，不用重启。
+sync:
+  enabled: true                    # false = kbsync 服务空转，不检查、不更新
+  # 每隔多少分钟看一次 wiki 的最近更改（最少 5 分钟）。没有变化时一轮只发 1 个请求；
+  # 有变化时重新列一遍页面（6 个请求上下）再取变了的。实测这个站一周 200 条变更、涉及 20 多个条目
+  interval_minutes: 60
+  template_namespaces: [10, 828]   # 模板、模块：它们改了，用到它们的页面的渲染结果跟着失效（页面的 touched 会变）
+  images_every_hours: 24           # 没有相关变更时，图库的文件清单也至少每隔这么久对一次（御魂的图没有固定的文件名前缀，靠它发现）
+  lookback_days: 30                # 第一次跑、或者停了很久以后，最多往回看多少天的最近更改
+  # 把渲染的页面全部重取一遍（400 多个请求，三四分钟）。它是兜底：有的页面是拿公共数据集渲染的
+  # （式神索引、皮肤、状态说明……），数据集改了，说不清是哪几页跟着变。
+  full_refresh:
+    window: "03:00-06:00"          # 只在这个时段做（服务器本地时间）；写成 "" 就不限时段
+    every_days: 7                  # 再怎么没动静，也每隔这么多天做一次；0 = 不按天数做
+    on_shared_data: true           # 公共数据集改了以后做一次
+    settle_hours: 24               # ……但要等改动过去这么久：wiki 自己的渲染缓存一天一换，早了取到的还是旧的
+    min_interval_hours: 20         # 两次之间至少隔这么久
+  # 闸门。没人盯着，宁可停下来等人看，也不把库改坏。被拦下的事在管理后台的知识库页看得到，
+  # 下一轮还会再试；确认拦得没道理，手动跑一次 sync --force
+  limits:
+    requests: 600                  # 一轮最多向 wiki 发多少个请求（代码里封顶 2000）。到了以后还没取的页面沿用旧内容，下一轮接着取
+    embed_chunks: 3000             # 要新算向量的切片多于这么多：不算、不导入（平时一天几十片；这么多，多半是向量文件没拷过来）
+    new_images: 300                # 要新下载、新算向量的图片多于这么多：不下、不导入
+    drop_ratio: 0.05               # 文档数、切片数或图片数比上一次少了超过这个比例：结果不写出去
+    failures: 20                   # 取数失败、缓存里又没有旧内容可用的文档多于这么多篇：结果不写出去
+
+sources:
+  pages:
+    namespace: 0                   # 条目所在的命名空间（0 = 主命名空间），只取非重定向页面
+    # 明确不要的页面（标题完全一致）写在 exclude_titles 里（阴阳师的在 site.yys 的 extend 段）
+    # 清洗后站内链接文字占全文的比例达到 nav_link_ratio、且链接以外的文字不足 nav_max_plain_chars，判为纯导航页，跳过
+    nav_link_ratio: 0.6
+    nav_max_plain_chars: 100       # 实测（阴阳师 wiki）：真正的目录页链接以外不超过 44 字；速度检索（内容本身就是带链接的式神名）有 166 字
+    # 导航页里的「章节目录页」入库（主线、活动一览、各活动的剧情目录）：站内链接里文字是名字、
+    # 指向已有页面的不少于 min_links 个，且占全部站内链接的 min_share 以上。
+    # 只有编号链接的翻页导航达不到，仍然不入库
+    directory:
+      min_links: 3
+      min_share: 0.5
+    min_chars: 20                  # 清洗后不足这么多字的页面按「空页」处理
+    # 页面渲染结果只有一句模块报错的不入库：正文不足 broken_max_chars 且含 broken_markers 里的字样
+    # （字样因站而异，阴阳师的在 site.yys 的 extend 段）
+    broken_max_chars: 200
+
+clean:
+  # 清洗规则都按 class 认。这里只写 MediaWiki 通用的；平台、站点自己的组件由各自的站点插件配置补充
+  # （site.<id> 的 extend 段里 plugin.knowledge 的 clean）：名单合在一起，单个值以站点插件写的为准。
+  # 能补充的项：remove_classes、heading_classes（class → 提成第几级小标题）、section_titles、
+  # badge_texts、term_classes、inline_classes、prefix_classes、linked_cards、table_placeholders、
+  # tabber_class / tabber_item_class / tabber_label_class。各项的意思见 site.yys 里的例子。
+  # 按 class 整块移除（命中任意一个即移除）。下面这几样是 MediaWiki 通用的，代码里本来就有
+  # （不写也会去掉），列在这里是为了看得见；要加别的接着往下写
+  remove_classes:
+    - navbox                       # 通用导航框（MediaWiki 惯例）
+    - vertical-navbox
+    - toc                          # 目录
+    - mw-editsection               # 编辑链接
+    - mw-cite-backlink             # 参考资料里的「↑」回跳
+    - mw-empty-elt
+    - noprint                      # MediaWiki 惯例：不参与打印的界面元素
+    - magnify                      # 缩略图右下角的放大图标
+  # 页面末尾若是「链接密集」的块（站内链接不少于 nav_block_min_links 个、链接文字占比不低于 nav_block_link_ratio、
+  # 且这一块不超过全页文字的 nav_block_max_share），按没有 class 的底部导航处理，移除
+  # （整页就是一个链接列表的不在此列）
+  nav_block_min_links: 10
+  nav_block_link_ratio: 0.8
+  nav_block_max_share: 0.3
+
+chunk:
+  # 长度按字符数算（不含切片首行的标题路径）。选 800 的理由见 chunker.py 顶部文档字符串
+  target_chars: 800
+  max_chars: 1200
+  min_chars: 120                   # 小于它的整节会尽量与相邻小节并成一片
+  label_max_chars: 40              # 表格前紧挨着的短句（如「SP阶式神应援寮总勋章排名」）当作表题，拆表时随表头重复
+
+dates:
+  # 条目的日期先认页面自己写明的，认不出来才推断（规则见 dates.py 顶部）。
+  # 日期紧跟在这些字样后面（同一行、相隔不超过 keyword_window 个字），才算页面自己写明的活动日期。
+  # 「上线时间」「实装日期」「更新记录」不在此列：那是常驻内容的起始日期或回顾，不是这一页讲的活动的日期
+  time_keywords: ["活动时间", "活动期间", "活动日期", "开启时间", "开放时间", "持续时间", "举办时间"]
+  keyword_window: 40
+  lead_chars: 300                  # 「正文开头」指前这么多个字
+  # min_year：早于这一年的年份不算页面写了年份（不写是 2000；阴阳师的在 site.yys 的 extend 段）
+  same_event_days: 92              # 页面写明的几个活动日期相差不超过这么多天才算同一期；否则是在罗列历届，不给日期
+  # 月日前后（同一行、marker_window 个字以内）出现这些字样的，本来就不该带年份，不算「缺年份」
+  non_event_markers: ["生日", "诞辰", "诞生日", "生辰", "每年", "农历"]
+  marker_window: 12
+  infer:
+    enabled: true
+    # exclude_prefixes：这些前缀的页面不推断（内容天天在变的页面）
+    min_name_chars: 4              # 拿去公告标题里找的条目名至少这么长
+    match_window_days: 31          # 公告 / 创建时间和页面里的月日相差不超过这么多天才算对得上
+    event_span_days: 62            # 推断出的年月取「依据日期前后这么多天以内、页面里最早的那个月日」
+    max_maintained_days: 180       # 页面创建后又维护了这么久的，不拿创建时间推断
+
+report:
+  sample_size: 20
+  sample_seed: 20261111
+  # 实体抽样核对的切片数（有站点插件标实体时才用得上）。抽两组：有确定标签的（按类型分层抽）；
+  # 带候选的（随机，每个昵称最多一片）
+  entity_sample_size: 10
+  # acceptance：验收点——某个页面里必须有同时含这几个字样的切片（阴阳师的在 site.yys 的 extend 段）
