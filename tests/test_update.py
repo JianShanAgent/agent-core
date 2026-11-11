@@ -424,6 +424,40 @@ async def test_apply_downloads_verifies_and_marks_the_package_pending(home: Path
     assert not (home / "versions" / "0.5.0").exists() and not updater.applying
 
 
+async def test_why_a_package_cannot_be_used_stays_visible(home: Path) -> None:
+    dist = home.parent / "dist"
+    wheel = make_wheel(dist, "0.3.0", requires=[*REQUIRES, "newdep >= 1"])
+    served = {"body": wheel.read_bytes(), "release": release_json("0.3.0", wheel)}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.github.test":
+            return httpx.Response(200, json=served["release"])
+        return httpx.Response(200, content=served["body"])
+
+    updater = updater_with(handler)
+    await updater.check()
+    assert updater.status()["can_apply"]  # 依赖变没变要下载下来才知道
+    with pytest.raises(UpdateError, match="第三方依赖和环境里装的不一样（newdep>=1）"):
+        await updater.apply()
+    # 原来只有点的那一下有一条提示，过后页面上又是一个能点的「更新」按钮
+    status = updater.status()
+    assert status["available"] and not status["can_apply"]
+    assert "newdep>=1" in status["blocked"] and "docker compose build" in status["blocked"]
+    assert not home.joinpath("state.json").exists() and not (home / "versions" / "0.3.0").exists()
+
+    # 主仓库出了别的版本：这条结论不再挡着
+    fine = make_wheel(dist, "0.3.1")
+    served.update(body=fine.read_bytes(), release=release_json("0.3.1", fine))
+    await updater.check()
+    assert updater.status()["can_apply"] and updater.status()["blocked"] == ""
+
+    # 下载没成、校验和对不上是一时的事：不记成「这个版本用不了」
+    served.update(body=b"garbage")
+    with pytest.raises(UpdateError, match="校验和对不上"):
+        await updater.apply()
+    assert updater.status()["can_apply"]
+
+
 async def test_the_checksum_can_come_from_the_sums_file(home: Path) -> None:
     wheel = make_wheel(home.parent / "dist", "0.3.0")
     release = release_json("0.3.0", wheel)

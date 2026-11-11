@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jianshanagent"
-version = "0.2.0"
+version = "0.2.1"
 description = "JianShanAgent（见山）核心：给 MediaWiki 站点用的 QQ 问答机器人"
 readme = "README.md"
 requires-python = ">=3.12"

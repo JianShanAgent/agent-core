@@ -64,6 +64,13 @@ class UpdateError(Exception):
     """更新做不了。信息是给管理后台的人看的。"""
 
 
+class PackageUnsuitable(UpdateError):
+    """这个版本的安装包用不到这个环境里（依赖变了、要更新的 Python、包本身不对）。
+
+    和下载没成不一样，再点一次也还是这样：原因要留在页面上，直到主仓库出了别的版本。
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class UpdateSettings:
     enabled: bool = True
@@ -175,7 +182,7 @@ def _python_ok(spec: str) -> bool:
 def install_wheel(wheel: Path, version: str, directory: Path) -> Path:
     """检查安装包，解到 ``directory/versions/<version>/``，返回那个目录。
 
-    不合适就报 :class:`UpdateError`。
+    不合适就报 :class:`PackageUnsuitable`。
 
     检查的是：它是不是 ``jianshanagent`` 的那个版本、纯 Python、里面只有包自己的文件；
     要的 Python 现在满足不满足；声明的依赖是不是环境里装的那一份都有；每个 ``.py`` 能不能编译。
@@ -184,29 +191,29 @@ def install_wheel(wheel: Path, version: str, directory: Path) -> Path:
     try:
         archive = zipfile.ZipFile(wheel)
     except (zipfile.BadZipFile, OSError) as exc:
-        raise UpdateError(f"安装包打不开：{exc}") from exc
+        raise PackageUnsuitable(f"安装包打不开：{exc}") from exc
     with archive:
         names = archive.namelist()
         for name in names:
             path = PurePosixPath(name)
             if path.is_absolute() or ".." in path.parts or path.parts[0] not in {PACKAGE, info_dir}:
-                raise UpdateError(f"安装包里有不该有的文件：{name}")
+                raise PackageUnsuitable(f"安装包里有不该有的文件：{name}")
         try:
             meta = Parser().parsestr(archive.read(f"{info_dir}/METADATA").decode("utf-8"))
             tags = Parser().parsestr(archive.read(f"{info_dir}/WHEEL").decode("utf-8"))
         except KeyError as exc:
-            raise UpdateError(f"安装包里没有 {info_dir} 的元数据") from exc
+            raise PackageUnsuitable(f"安装包里没有 {info_dir} 的元数据") from exc
         if _normalize(meta.get("Name", "")) != PACKAGE or meta.get("Version", "") != version:
-            raise UpdateError(
+            raise PackageUnsuitable(
                 f"安装包不是 {PACKAGE} {version}，而是 {meta.get('Name')} {meta.get('Version')}"
             )
         if "py3-none-any" not in (tags.get_all("Tag") or []):
-            raise UpdateError("安装包不是纯 Python 的，不能当更新包用")
+            raise PackageUnsuitable("安装包不是纯 Python 的，不能当更新包用")
         if f"{PACKAGE}/__init__.py" not in names:
-            raise UpdateError("安装包里没有 jianshanagent 包")
+            raise PackageUnsuitable("安装包里没有 jianshanagent 包")
         python = meta.get("Requires-Python", "")
         if python and not _python_ok(python):
-            raise UpdateError(
+            raise PackageUnsuitable(
                 f"新版本要 Python {python}，现在是 {sys.version.split()[0]}：要重建环境才能更新"
             )
         try:
@@ -215,7 +222,7 @@ def install_wheel(wheel: Path, version: str, directory: Path) -> Path:
             have = set()
         missing = sorted(_core_requirements(meta.get_all("Requires-Dist")) - have)
         if missing:
-            raise UpdateError(
+            raise PackageUnsuitable(
                 "新版本的第三方依赖和环境里装的不一样（" + "、".join(missing) + "），"
                 "在程序里更新不了，要重建环境：Docker 方式在实例目录里 "
                 "`docker compose build --no-cache && docker compose up -d`；"
@@ -232,7 +239,7 @@ def install_wheel(wheel: Path, version: str, directory: Path) -> Path:
                     compile(source.read_bytes(), str(source), "exec")
                 except SyntaxError as exc:
                     where = source.relative_to(staging)
-                    raise UpdateError(f"安装包里的 {where} 编译不过：{exc.msg}") from exc
+                    raise PackageUnsuitable(f"安装包里的 {where} 编译不过：{exc.msg}") from exc
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -258,6 +265,8 @@ class Updater:
         #: 上一次查没查成的原因；查成了是空的
         self.error = ""
         self.applying = False
+        #: 试着装过、发现用不到这个环境里的那个版本和原因（见 PackageUnsuitable）。只记在内存里
+        self._unsuitable: tuple[str, str] | None = None
         self._lock = asyncio.Lock()
 
     # ---- 现状 ----
@@ -286,6 +295,8 @@ class Updater:
             return f"{self.latest.tag} 这个版本没有带安装包（{wheel_name(self.latest.version)}）"
         if not self.latest.sha256 and not self.latest.sums_url:
             return f"{self.latest.tag} 这个版本没有带校验和，不装来路核对不了的包"
+        if self._unsuitable is not None and self._unsuitable[0] == self.latest.version:
+            return self._unsuitable[1]
         return ""
 
     def brief(self) -> dict[str, Any]:
@@ -404,6 +415,7 @@ class Updater:
         async with self._lock:
             settings = self._settings()
             await self.check()  # 装之前再问一次：页面上看到的可能是几小时前的
+            self._unsuitable = None  # 明确点了更新：再试一次，不拿上次的结论挡着
             reason = self.blocked()
             if reason:
                 raise UpdateError(reason)
@@ -438,6 +450,9 @@ class Updater:
                         "last_failure": None,
                     },
                 )
+            except PackageUnsuitable as exc:
+                self._unsuitable = (release.version, str(exc))
+                raise
             except httpx.HTTPError as exc:
                 raise UpdateError(f"下载没成：{type(exc).__name__}: {exc}"[:500]) from exc
             except OSError as exc:

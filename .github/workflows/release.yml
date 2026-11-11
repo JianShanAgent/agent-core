@@ -15,7 +15,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 标签要和 pyproject.toml 里的版本一致
         run: |
@@ -29,9 +29,9 @@ jobs:
       - name: 取标签的附注
         run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: webui/package-lock.json
 
@@ -46,7 +46,7 @@ jobs:
             echo "::warning::仓库里的 src/jianshanagent/admin/static 和这次构建出来的不一样，记得重新构建并提交"
           fi
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10
 
       - name: 测试
         run: |

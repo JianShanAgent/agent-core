@@ -199,7 +199,11 @@ function Updates({ className }: { className?: string }) {
       null,
       kind === "apply" ? "没有更新" : "没有还原",
     );
-    if (!up) return;
+    if (!up) {
+      // 没装成（比如新版本的依赖变了）：原因后端记着，重新取一次就显示在这张卡片里
+      void client.invalidateQueries({ queryKey: ["update"] });
+      return;
+    }
     // 起来的是不是想要的那个版本：新版本起不来的话，引导已经退回原来的了
     const after = await client.fetchQuery({ queryKey: ["update"], queryFn: api.update });
     if (kind === "revert") toast.success(`已回到环境里装的 v${after.current}`);
