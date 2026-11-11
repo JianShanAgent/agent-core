@@ -35,14 +35,17 @@ WRITE = {"X-Requested-With": "jianshanagent-admin"}
 
 
 def _copy_config(tmp_path: Path) -> Path:
-    """仓库配置的一份拷贝。令牌文件挪到临时目录里：退出登录要在它旁边记东西，不能去碰 /data。"""
+    """仓库配置的一份拷贝。令牌文件挪到临时目录里：退出登录要在它旁边记东西，不能去碰工作目录。"""
     root = tmp_path / "config"
     shutil.copytree(REPO_CONFIG, root, ignore=shutil.ignore_patterns("local", "secrets.yaml"))
     admin = root / "core.admin.yaml"
     source = admin.read_text("utf-8")
-    assert "token_file: /data/admin/token" in source
+    assert "token_file: data/admin/token" in source
     admin.write_text(
-        source.replace("/data/admin/token", str(tmp_path / "admin" / "token")), encoding="utf-8"
+        source.replace(
+            "token_file: data/admin/token", f"token_file: {tmp_path / 'admin' / 'token'}"
+        ),
+        encoding="utf-8",
     )
     return root
 

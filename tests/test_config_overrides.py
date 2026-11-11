@@ -101,8 +101,9 @@ def test_load_layers_defaults_local_and_overrides(tmp_path: Path) -> None:
     # 覆写导致起不来时用得上：整层不看
     plain = load_config(root, overrides, with_overrides=False)
     assert plain.plugin("demo")["nested"] == {"a": 1, "b": 2} and plain.overrides == {}
-    # 没有覆写目录（没设环境变量）也照常
-    assert load_config(root).overrides_dir is None
+    # 没设环境变量时默认落在实例目录下的 data/config；显式设为空字符串时禁用覆写目录
+    assert load_config(root).overrides_dir == (root.parent / "data" / "config").resolve()
+    assert load_config(root, "").overrides_dir is None
 
 
 def test_broken_or_stray_override_files_are_skipped_not_fatal(tmp_path: Path) -> None:
@@ -141,7 +142,7 @@ def test_write_override_stores_only_the_difference(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="没有叫"):
         write_override(config, "plugin.nope", {})
     with pytest.raises(ValueError, match="没有配置覆写目录"):
-        write_override(load_config(root), "plugin.demo", {})
+        write_override(load_config(root, ""), "plugin.demo", {})
 
 
 def _plugins_dir(tmp_path: Path, default: list[str]) -> tuple[Path, Path]:

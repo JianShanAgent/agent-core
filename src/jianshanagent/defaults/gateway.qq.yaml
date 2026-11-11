@@ -16,4 +16,5 @@ reply:
 # stop_grace_period），这里要比它小，留出存记录、关数据库的时间。0 = 不等，直接回那一句
 shutdown:
   drain_seconds: 20
-session_store_dir: /data/qq_ws
+# QQ 长连接会话信息保存目录（也可以用环境变量 JIANSHANAGENT_SESSION_STORE_DIR 改位置，容器里设成 /data/qq_ws）
+session_store_dir: data/qq_ws

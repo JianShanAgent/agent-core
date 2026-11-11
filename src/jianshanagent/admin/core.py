@@ -124,7 +124,7 @@ def time_param(request: web.Request, name: str) -> datetime | None:
 
 @dataclass(frozen=True, slots=True)
 class AdminSettings:
-    token_file: str = "/data/admin/token"
+    token_file: str = "data/admin/token"
     session_days: float = 30.0
     max_failures: int = 5
     lock_seconds: float = 60.0
@@ -138,8 +138,13 @@ class AdminSettings:
         raw = config.get("core.admin")
         defaults = cls()
         login = raw.get("login") or {}
+        token_file = (
+            os.environ.get("JIANSHANAGENT_ADMIN_TOKEN_FILE")
+            or raw.get("token_file")
+            or defaults.token_file
+        )
         return cls(
-            token_file=str(raw.get("token_file") or defaults.token_file),
+            token_file=str(token_file),
             session_days=float(raw.get("session_days") or defaults.session_days),
             max_failures=int(login.get("max_failures") or defaults.max_failures),
             lock_seconds=float(login.get("lock_seconds") or defaults.lock_seconds),

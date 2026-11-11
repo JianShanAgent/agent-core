@@ -233,7 +233,7 @@ class PluginHost:
         每个插件要有清单，包里要有 ``create_plugin()``，返回的对象有 ``id`` 和同步的
         ``register(ctx)``。"""
         enabled = [str(name) for name in self.config.get("core.plugins").get("enabled") or []]
-        manifests = feature_manifests()
+        manifests = feature_manifests(self.config.root.parent)
         for position, plugin_id in enumerate(enabled):
             manifest = manifests.get(plugin_id)
             if manifest is None:

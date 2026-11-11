@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.util
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -318,9 +319,32 @@ def _registered(kind: str) -> dict[str, Manifest]:
     return found
 
 
+def _ensure_sys_path(root: Path) -> None:
+    resolved = str(root.resolve())
+    if resolved not in sys.path:
+        sys.path.insert(0, resolved)
+
+
+def _local_features(workspace_root: Path | None) -> dict[str, Manifest]:
+    """实例目录下的 ``plugins/<id>/``：用户自己写的功能插件，免打包直接加载。"""
+    if workspace_root is None:
+        return {}
+    plugins_dir = workspace_root / "plugins"
+    if not plugins_dir.is_dir():
+        return {}
+    found: dict[str, Manifest] = {}
+    dirs = _plugin_dirs(plugins_dir)
+    if dirs:
+        _ensure_sys_path(workspace_root)
+    for directory in dirs:
+        package = f"plugins.{directory.name}"
+        found[directory.name] = read_manifest(directory, package, KIND_FEATURE)
+    return found
+
+
 @lru_cache(maxsize=1)
-def feature_manifests() -> dict[str, Manifest]:
-    """能用的功能插件（核心自带的，加上别的包登记的）：id → 清单。"""
+def _installed_package_features() -> dict[str, Manifest]:
+    """核心自带的与装成包登记的功能插件：id → 清单。"""
     found: dict[str, Manifest] = {}
     for directory in _plugin_dirs(_PACKAGE_ROOT / "plugins"):
         package = f"{FEATURES_PACKAGE}.{directory.name}"
@@ -328,6 +352,22 @@ def feature_manifests() -> dict[str, Manifest]:
     for name, manifest in _registered(KIND_FEATURE).items():
         if name in found:
             raise PluginError(f"功能插件的 id「{name}」重了：核心自带的和 {manifest.package}")
+        found[name] = manifest
+    return found
+
+
+@lru_cache(maxsize=8)
+def feature_manifests(workspace_root: Path | None = None) -> dict[str, Manifest]:
+    """能用的功能插件（核心自带的、装成包登记的，以及实例目录下的 ``plugins/``）：id → 清单。"""
+    base = _installed_package_features()
+    if workspace_root is None:
+        return base
+    found = dict(base)
+    for name, manifest in _local_features(workspace_root.resolve()).items():
+        if name in found:
+            raise PluginError(
+                f"功能插件的 id「{name}」重了：{found[name].package} 和 {manifest.path}"
+            )
         found[name] = manifest
     return found
 
@@ -362,8 +402,27 @@ def _scan_sites(directory: Path, package: str, parent: str, found: dict[str, Man
         _scan_sites(child / CHILDREN_DIR, f"{manifest.package}.{CHILDREN_DIR}", manifest.id, found)
 
 
+def _local_sites(workspace_root: Path | None) -> dict[str, Manifest]:
+    """实例目录下的 ``sites/<id>/``：用户自写的站点插件（``parent`` 可指向上级包或同目录上级）。"""
+    if workspace_root is None:
+        return {}
+    sites_dir = workspace_root / CHILDREN_DIR
+    if not sites_dir.is_dir():
+        return {}
+    dirs = _plugin_dirs(sites_dir)
+    if not dirs:
+        return {}
+    _ensure_sys_path(workspace_root)
+    found: dict[str, Manifest] = {}
+    for child in dirs:
+        manifest = read_manifest(child, f"{CHILDREN_DIR}.{child.name}", KIND_SITE)
+        found[manifest.id] = manifest
+        _scan_sites(child / CHILDREN_DIR, f"{manifest.package}.{CHILDREN_DIR}", manifest.id, found)
+    return found
+
+
 @lru_cache(maxsize=1)
-def installed_sites() -> dict[str, Manifest]:
+def _installed_package_sites() -> dict[str, Manifest]:
     """这个环境里登记了的站点插件，连同它们放在自己 ``sites/`` 里的下级：id → 清单。"""
     found = _registered(KIND_SITE)
     for manifest in list(found.values()):
@@ -373,49 +432,67 @@ def installed_sites() -> dict[str, Manifest]:
     return found
 
 
+@lru_cache(maxsize=8)
+def installed_sites(workspace_root: Path | None = None) -> dict[str, Manifest]:
+    """环境里登记的站点插件，连同 ``sites/`` 下的下级及实例目录内的 ``sites/``：id → 清单。"""
+    base = _installed_package_sites()
+    if workspace_root is None:
+        return base
+    found = dict(base)
+    for name, manifest in _local_sites(workspace_root.resolve()).items():
+        if name in found:
+            raise PluginError(f"站点插件的 id「{name}」重了：{found[name].path} 和 {manifest.path}")
+        found[name] = manifest
+    return found
+
+
 def clear_caches() -> None:
     """忘掉已经找到的插件（装了、卸了插件以后，或者测试里换了登记的插件以后）。"""
+    _installed_package_features.cache_clear()
     feature_manifests.cache_clear()
     extension_points.cache_clear()
+    _installed_package_sites.cache_clear()
     installed_sites.cache_clear()
 
 
-def _site(name: str) -> Manifest:
+def _site(name: str, workspace_root: Path | None = None) -> Manifest:
     if "." in name:
         # 没登记的包：按包路径找
+        if workspace_root is not None:
+            _ensure_sys_path(workspace_root)
         return read_manifest(_package_dir(name, "站点插件"), name, KIND_SITE)
-    installed = installed_sites()
+    installed = installed_sites(workspace_root)
     if name not in installed:
         raise PluginError(
             f"没有叫「{name}」的站点插件（装着的有：{'、'.join(installed) or '无'}；"
-            "没登记的包要写包路径，如 mypkg.mysite）"
+            "没登记的包要写包路径，如 mypkg.mysite，或放在实例的 sites/<id>/ 下）"
         )
     return installed[name]
 
 
-def _parent_of(manifest: Manifest) -> Manifest | None:
-    # 放在上级目录的 sites/ 里的：上级就是外面那一层，清单里写的得是它
+def _parent_of(manifest: Manifest, workspace_root: Path | None = None) -> Manifest | None:
+    # 放在上级插件目录的 sites/ 里的：上级就是外面那一层，清单里写的得是它
     enclosing = manifest.path.parent.parent
     if manifest.path.parent.name == CHILDREN_DIR and (enclosing / MANIFEST_FILE).is_file():
         _check_placement(manifest, enclosing.name)
-        known = installed_sites().get(manifest.parent)
+        known = installed_sites(workspace_root).get(manifest.parent)
         if known is not None and known.path == enclosing:
             return known
         outer = manifest.package.rpartition(f".{CHILDREN_DIR}.")[0]
         return read_manifest(enclosing, outer, KIND_SITE)
-    return _site(manifest.parent) if manifest.parent else None
+    return _site(manifest.parent, workspace_root) if manifest.parent else None
 
 
-def site_chain(name: str) -> tuple[Manifest, ...]:
+def site_chain(name: str, workspace_root: Path | None = None) -> tuple[Manifest, ...]:
     """``core.wiki.yaml`` 的 ``site`` → 要加载的站点插件，从最上面一级到写的那一级。
 
-    ``name`` 是最末一级：登记了的写 id，没登记的包写包路径；空的 = 不用站点插件。
+    ``name`` 是最末一级：已登记或实例 ``sites/`` 下的写 id，未登记的包写包路径；空表示不用。
     """
     name = name.strip()
     if not name:
         return ()
-    chain = [_site(name)]
-    while (parent := _parent_of(chain[0])) is not None:
+    chain = [_site(name, workspace_root)]
+    while (parent := _parent_of(chain[0], workspace_root)) is not None:
         if any(parent.id == manifest.id for manifest in chain):
             names = " → ".join(manifest.id for manifest in (parent, *chain))
             raise PluginError(f"站点插件的上级绕成了圈：{names}")

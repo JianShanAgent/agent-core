@@ -80,7 +80,9 @@ class _Boot:
         gateway = config.get("gateway.qq")
         passive = (gateway.get("reply") or {}).get("passive") or {}
         drain = (gateway.get("shutdown") or {}).get("drain_seconds")
-        store_dir = gateway.get("session_store_dir")
+        store_dir = os.environ.get("JIANSHANAGENT_SESSION_STORE_DIR") or gateway.get(
+            "session_store_dir"
+        )
         postgres = config.get("core.storage").get("postgres") or {}
         pool_min, pool_max = int(postgres.get("pool_min") or 1), int(postgres.get("pool_max") or 10)
         if not 1 <= pool_min <= pool_max:
@@ -288,9 +290,13 @@ class Runtime:
         config = load_config()
         app_cfg = config.app
         log_cfg = app_cfg.get("log") or {}
+        env_json = os.environ.get("JIANSHANAGENT_LOG_JSON", "").strip().lower()
+        json_logs = (
+            env_json in {"1", "true", "yes"} if env_json else bool(log_cfg.get("json", False))
+        )
         setup_logging(
             level=str(log_cfg.get("level") or "INFO"),
-            json_logs=bool(log_cfg.get("json", True)),
+            json_logs=json_logs,
         )
         logger.info(
             "config_loaded",

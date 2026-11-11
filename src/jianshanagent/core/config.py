@@ -188,14 +188,16 @@ def overlay(base: dict[str, Any], top: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def wiki_site_chain(wiki: dict[str, Any]) -> tuple[Manifest, ...]:
+def wiki_site_chain(
+    wiki: dict[str, Any], *, workspace_root: Path | None = None
+) -> tuple[Manifest, ...]:
     """``core.wiki`` 里写的站点插件（``site``）和它的各级上级，从上到下。"""
     if "sites" in wiki:
         raise ValueError(
             "core.wiki.yaml 里的 sites（站点插件的名单）不用了：改成 site，只写最末一级"
             "（如 site: yys），上级会顺着插件清单自动带出来"
         )
-    return site_chain(str(wiki.get("site") or ""))
+    return site_chain(str(wiki.get("site") or ""), workspace_root)
 
 
 def site_config_name(site: str) -> str:
@@ -388,7 +390,7 @@ class AppConfig:
     @property
     def site_chain(self) -> tuple[Manifest, ...]:
         """用到的站点插件的清单：``core.wiki`` 的 ``site`` 和它的各级上级，从上到下。"""
-        return wiki_site_chain(self.get(WIKI_FILE))
+        return wiki_site_chain(self.get(WIKI_FILE), workspace_root=self.root.parent)
 
     @property
     def sites(self) -> list[str]:
@@ -442,9 +444,17 @@ class AppConfig:
         )
 
 
-def resolve_overrides_dir(explicit: str | Path | None = None) -> Path | None:
-    chosen = explicit or os.environ.get(OVERRIDES_ENV)
-    return Path(chosen).expanduser().resolve() if chosen else None
+def resolve_overrides_dir(
+    explicit: str | Path | None = None, *, config_root: Path | None = None
+) -> Path | None:
+    if explicit is not None:
+        return Path(explicit).expanduser().resolve() if explicit else None
+    if OVERRIDES_ENV in os.environ:
+        env = os.environ[OVERRIDES_ENV].strip()
+        return Path(env).expanduser().resolve() if env else None
+    if config_root is not None:
+        return (config_root.parent / "data" / "config").resolve()
+    return None
 
 
 def load_config(
@@ -484,12 +494,19 @@ def load_config(
         sources[path.stem] = path
 
     # 用哪个站点插件（开发机可以在 local 里换），连同它的各级上级
+    workspace_root = root.parent
     wiki = _deep_merge(packaged.get(WIKI_FILE, {}), deployed.get(WIKI_FILE, {}))
-    chain = wiki_site_chain(_deep_merge(wiki, local.get(WIKI_FILE, {})))
+    chain = wiki_site_chain(
+        _deep_merge(wiki, local.get(WIKI_FILE, {})), workspace_root=workspace_root
+    )
 
     # 插件自己的默认配置：能用的功能插件和装着的站点插件都读（没用到的站点插件也读，后台里看得见），
     # 没登记、按包路径写的站点插件只读用到的
-    for manifest in (*feature_manifests().values(), *installed_sites().values(), *chain):
+    for manifest in (
+        *feature_manifests(workspace_root).values(),
+        *installed_sites(workspace_root).values(),
+        *chain,
+    ):
         if manifest.config_path.is_file():
             packaged[manifest.config_name] = _load_yaml(manifest.config_path)
             sources[manifest.config_name] = manifest.config_path
@@ -512,7 +529,7 @@ def load_config(
     files = dict(base)
     overrides: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
-    chosen = resolve_overrides_dir(overrides_dir)
+    chosen = resolve_overrides_dir(overrides_dir, config_root=root)
     if chosen is not None and with_overrides and chosen.is_dir():
         for path in sorted(chosen.rglob("*.yaml")):
             rel = path.relative_to(chosen)

@@ -30,6 +30,9 @@ services:
       JIANSHANAGENT_CONFIG_DIR: /app/config
       # 管理后台里改的配置存在这里（数据盘上）：镜像里的配置是随发布走的默认值，这里只记改过的项，换发布还在
       JIANSHANAGENT_CONFIG_OVERRIDES_DIR: /data/config
+      JIANSHANAGENT_ADMIN_TOKEN_FILE: /data/admin/token
+      JIANSHANAGENT_SESSION_STORE_DIR: /data/qq_ws
+      JIANSHANAGENT_LOG_JSON: "1"
       # 发布号，管理后台里显示
       JIANSHANAGENT_RELEASE: ${JIANSHANAGENT_RELEASE:-dev}
       # 知识库的文件（切片、向量、取数缓存）在数据盘上的位置；在这个容器里手动跑 load 之类的命令时用得上
@@ -81,6 +84,7 @@ services:
       # 和机器人读同一份覆写：管理后台里改了知识库的配置，下一轮就按新的来
       JIANSHANAGENT_CONFIG_OVERRIDES_DIR: /data/config
       JIANSHANAGENT_KB_DIR: /data/kb
+      JIANSHANAGENT_LOG_JSON: "1"
       JIANSHANAGENT_POSTGRES_DSN: postgresql://jianshanagent:${POSTGRES_PASSWORD}@postgres:5432/jianshanagent
       TZ: Asia/Shanghai
     volumes:

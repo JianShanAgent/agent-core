@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>JianShanAgent 管理后台</title>
+    <script>
+      // 先于页面渲染把主题定下来，免得深色主题下先闪一下白底
+      (function () {
+        try {
+          var saved = localStorage.getItem("jianshanagent.theme") || "system";
+          var dark =
+            saved === "dark" ||
+            (saved === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+        } catch (e) {}
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-9TLhlNcb.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/format-B5yHuIA9.js">
+    <link rel="modulepreload" crossorigin href="/assets/x-jAW_qQOG.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-kzEe7U_H.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

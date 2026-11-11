@@ -2,9 +2,10 @@
 # 在开发机上、在**实例仓库**（instance-*）的目录里运行：把一个部署发布到服务器。
 # 服务器不从 GitHub 拉代码，代码由这里打包传过去。
 #
+#   release.sh deploy [提交]         一键上传当前提交、构建镜像并激活上线（起不来自动切回上一个）
 #   release.sh pin                   把旁边各个仓库现在的提交记进 components.lock（然后提交实例仓库）
 #   release.sh push [提交]           打包上传到 releases/<发布号>/ 并构建机器人镜像（不影响正在运行的服务）
-#   release.sh activate <发布号>     切到该发布：先检查，再切换并 up -d，起不来自动切回原来的
+#   release.sh activate [发布号]     切到该发布（不写发布号默认切当前提交）：先检查，起不来自动切回原来的
 #   release.sh rollback              切回上一个发布（服务器上记着是哪个）
 #   release.sh prune [留几个]        清理旧发布的目录和镜像（activate 成功后会自动做，默认留 5 个）
 #   release.sh secrets               上传 config/secrets.yaml 到 shared/（权限 600）
@@ -181,8 +182,13 @@ cmd_push() {
     fi
     local up="$ROOT/releases/$rel.uploading"
     remote "rm -rf '$up' && mkdir -p '$up/components'"
-    # 这个部署的配置
-    git -c tar.umask=0022 archive --format=tar "$commit" config "$LOCK" | remote "tar -x -C '$up'"
+    # 这个部署的配置（以及实例仓库自带的 sites/ 和 plugins/ 目录）
+    local inst_paths=(config "$LOCK")
+    for extra in sites plugins; do
+      git cat-file -e "$commit:$extra" 2>/dev/null && inst_paths+=("$extra")
+    done
+    git -c tar.umask=0022 archive --format=tar "$commit" "${inst_paths[@]}" | remote "tar -x -C '$up'"
+    remote "mkdir -p '$up/sites' '$up/plugins'"
     # 部署工具：核心的 deploy/
     git -C "$core" -c tar.umask=0022 archive --format=tar "$core_commit" deploy | remote "tar -x -C '$up'"
     # 核心和各个插件的源码
@@ -229,9 +235,17 @@ cmd_push() {
 # 回切救不了的一种情况：新版本已经把数据库的结构改了（迁移在机器人启动时执行）。现有的迁移都只是加表加列，
 # 旧代码不受影响；以后要是有删改列的迁移，回滚前先看一眼。
 cmd_activate() {
-  local rel=${1:?用法: release.sh activate <发布号>}
-  valid_release "$rel" || { echo "发布号的样子不对：${rel}（应该是 push 打印出来的那个短号）" >&2; exit 1; }
+  local rel=${1:-$(git rev-parse --short=7 'HEAD^{commit}')}
+  valid_release "$rel" || { echo "发布号的样子不对：${rel}（应该是 7 位提交短号，或不传参数默认激活当前提交）" >&2; exit 1; }
   remote_script activate "$ROOT" "$rel" "$KEEP_RELEASES"
+}
+
+cmd_deploy() {
+  local commit rel
+  commit=$(git rev-parse --verify "${1:-HEAD}^{commit}")
+  rel=$(git rev-parse --short=7 "$commit")
+  cmd_push "$commit"
+  cmd_activate "$rel"
 }
 
 cmd_rollback() {
@@ -312,6 +326,7 @@ cmd_kb_seed() {
 }
 
 case "${1:-}" in
+  deploy) shift; cmd_deploy "$@" ;;
   pin) cmd_pin ;;
   push) shift; cmd_push "$@" ;;
   activate) shift; cmd_activate "$@" ;;
@@ -322,7 +337,7 @@ case "${1:-}" in
   kb-seed) cmd_kb_seed ;;
   webui) shift; cmd_webui "$@" ;;
   *)
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

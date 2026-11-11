@@ -4,7 +4,7 @@ env: production          # development | production
 timezone: Asia/Shanghai
 log:
   level: INFO
-  json: true             # Compose 下走 stdout JSON，供 Promtail 采集
+  json: false            # 本机终端直接跑输出易读格式；容器里设 JIANSHANAGENT_LOG_JSON=1 打 JSON 供日志采集
 healthcheck:
   host: 0.0.0.0
   port: 8080

@@ -39,5 +39,3 @@ logs/
 # 部署插件「运行日志」的目录正好也叫 logs，它是代码不是日志
 !deploy/plugins/logs/
 
-# 管理后台前端的构建产物（webui/ 里 npm run build 生成；发布时由 release.sh 构建）
-src/jianshanagent/admin/static/

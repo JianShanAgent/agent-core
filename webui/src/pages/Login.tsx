@@ -62,8 +62,8 @@ export function Login({ onDone, locked }: { onDone: () => void; locked: number }
         </div>
         <p className="text-muted-foreground mt-4 text-center text-xs leading-relaxed">
           令牌在 <code className="font-mono">secrets.yaml</code> 的{" "}
-          <code className="font-mono">admin.token</code>；没填的话，第一次启动时生成的那个存在{" "}
-          <code className="font-mono">/data/admin/token</code>（服务器上是数据目录的{" "}
+          <code className="font-mono">admin.token</code>；没填的话，第一次启动时自动生成在{" "}
+          <code className="font-mono">data/admin/token</code>（Docker 容器里是挂载数据目录下的{" "}
           <code className="font-mono">bot/admin/token</code>）。
         </p>
       </form>

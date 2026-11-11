@@ -53,9 +53,11 @@ RUN useradd --create-home --uid 10001 jianshanagent \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
-# 这个部署的配置随镜像走（一个镜像对应一个发布）。发布里只有 git 里提交了的文件，
+# 这个部署的配置（及实例仓库自带的 sites/ 和 plugins/ 目录）随镜像走。发布里只有 git 提交了的文件，
 # 所以没有 secrets.yaml 和 config/local；凭据在运行时由 compose 单独挂载到 /app/config/secrets.yaml
 COPY config ./config
+COPY sites ./sites
+COPY plugins ./plugins
 
 USER jianshanagent
 EXPOSE 8080

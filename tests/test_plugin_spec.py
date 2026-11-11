@@ -432,3 +432,59 @@ def test_an_extension_point_that_cannot_be_wired_is_explained(
         parents={},
     )  # fmt: skip
     assert setup.id == "top"
+
+
+def test_instance_local_sites_and_plugins_load_without_packaging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """实例目录下的 sites/<id>/ 和 plugins/<id>/ 免打包直接加载，随实例仓库同步。"""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    plat, _ = platform_and_station(tmp_path / "pkgs", monkeypatch)
+    register_plugins(monkeypatch, sites={"plat": "jianshanagent_site_plat"})
+
+    # 1. 实例目录下直接放 sites/mysite/（上级指向已安装的平台插件 plat）
+    write_site(
+        tmp_path / "sites" / "mysite",
+        manifest={"id": "mysite", "description": "实例目录内的站点插件。"},
+        parent="plat",
+        capabilities=("wiki", "extend"),
+        config={"label": "自写站", "extend": {"plugin.wiki_query": {"format": {"max_chars": 600}}}},
+        wiki=STATION.replace("station", "mysite"),
+    )
+
+    # 2. 实例目录下直接放 plugins/hello/
+    hello = tmp_path / "plugins" / "hello"
+    hello.mkdir(parents=True)
+    (hello / "plugin.yaml").write_text(
+        "id: hello\nkind: feature\nname: 打招呼\ndescription: 实例内功能插件\n", "utf-8"
+    )
+    (hello / "config.yaml").write_text("word: 你好\n", "utf-8")
+    (hello / "__init__.py").write_text(
+        "class Hello:\n"
+        "    id = 'hello'\n"
+        "    def register(self, ctx):\n"
+        "        ctx.register_service('hello_word', ctx.config.plugin('hello')['word'])\n\n"
+        "def create_plugin():\n"
+        "    return Hello()\n",
+        "utf-8",
+    )
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "core.wiki.yaml").write_text(
+        yaml.safe_dump({"api_url": f"{SITE}/api.php", "site": "mysite"}), "utf-8"
+    )
+    (cfg_dir / "core.plugins.yaml").write_text(yaml.safe_dump({"enabled": ["hello"]}), "utf-8")
+
+    config = load_config(cfg_dir, with_overrides=False)
+    assert config.sites == ["plat", "mysite"]
+    assert config.plugin("wiki_query")["format"]["max_chars"] == 600
+    assert config.plugin("hello") == {"word": "你好"}
+
+    _, loaded_site = load_sites(config, EXTENSION_WIKI, WIKI)
+    assert loaded_site.id == "mysite" and loaded_site.label == "自写站"
+
+    host = PluginHost(config)
+    host.load()
+    assert host.services["hello_word"] == "你好"
+    assert plat.name == "jianshanagent_site_plat"

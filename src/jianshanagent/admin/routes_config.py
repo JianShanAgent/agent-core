@@ -17,7 +17,6 @@ from typing import Any
 
 from aiohttp import web
 
-import jianshanagent.plugins
 from jianshanagent.admin.core import Admin, fail, read_body, reply
 from jianshanagent.admin.schema import build_schema, count_leaves, read_comments
 from jianshanagent.core import trace
@@ -32,6 +31,7 @@ from jianshanagent.core.config import (
 )
 from jianshanagent.core.llm import LLMError, user_message
 from jianshanagent.core.logging import get_logger
+from jianshanagent.core.manifest import feature_manifests
 from jianshanagent.runtime import RESTART_ONLY
 
 logger = get_logger(__name__)
@@ -145,23 +145,21 @@ async def save_configs(admin: Admin, edits: dict[str, dict[str, Any]]) -> dict[s
     return {"saved": changed, "needs_restart": needs_restart, "status": admin.status()}
 
 
-def _catalog() -> dict[str, str]:
-    """代码里有哪些插件 → 各自的说明（插件模块开头的文档字符串，不导入模块）。"""
+def _catalog(workspace_root: Path | None = None) -> dict[str, str]:
+    """代码里有哪些功能插件 → 各自的说明（插件模块开头的文档字符串或清单说明，不导入模块）。"""
     found: dict[str, str] = {}
-    for root in jianshanagent.plugins.__path__:
-        for folder in sorted(Path(root).iterdir()):
-            if not (folder / "__init__.py").is_file() or folder.name.startswith("_"):
-                continue
-            doc = ""
-            for candidate in (folder / "plugin.py", folder / "__init__.py"):
-                if candidate.is_file():
-                    try:
-                        doc = ast.get_docstring(ast.parse(candidate.read_text("utf-8"))) or ""
-                    except (SyntaxError, OSError):
-                        doc = ""
-                    if doc:
-                        break
-            found[folder.name] = doc
+    for plugin_id, manifest in feature_manifests(workspace_root).items():
+        folder = manifest.path
+        doc = ""
+        for candidate in (folder / "plugin.py", folder / "__init__.py"):
+            if candidate.is_file():
+                try:
+                    doc = ast.get_docstring(ast.parse(candidate.read_text("utf-8"))) or ""
+                except (SyntaxError, OSError):
+                    doc = ""
+                if doc:
+                    break
+        found[plugin_id] = doc or manifest.description
     return found
 
 
@@ -340,7 +338,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             str(item) for item in disk.base_files.get("core.plugins", {}).get("enabled") or []
         ]
         loaded = {plugin.id: plugin for plugin in host.loaded}
-        catalog = _catalog()
+        catalog = _catalog(disk.root.parent)
         items: list[dict[str, Any]] = []
         for plugin_id in [*enabled, *(name for name in catalog if name not in enabled)]:
             doc = catalog.get(plugin_id, "")
@@ -411,13 +409,13 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         wanted = body.get("enabled")
         if not isinstance(wanted, list) or not all(isinstance(item, str) for item in wanted):
             fail(400, "enabled 应该是插件名的列表")
-        catalog = _catalog()
+        disk = admin.disk_config()
+        catalog = _catalog(disk.root.parent)
         unknown = [item for item in wanted if item not in catalog]
         if unknown:
             fail(400, f"没有这些插件：{'、'.join(unknown)}")
         if len(set(wanted)) != len(wanted):
             fail(400, "插件名有重复")
-        disk = admin.disk_config()
         edited = {**disk.files.get("core.plugins", {}), "enabled": wanted}
         return reply(await save_configs(admin, {"core.plugins": edited}))
 
