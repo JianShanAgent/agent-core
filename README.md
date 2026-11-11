@@ -24,8 +24,7 @@
 
 群里总有人问「这个角色的技能是什么」「上次那个活动奖励有哪些」。答案 wiki 上都有，只是没人想去翻。
 
-见山（JianShanAgent）是一个挂在 QQ 上的 wiki 问答机器人：你在群里 @ 它问一句，它去 wiki 上把答案找出来，
-核对过再告诉你，后面附上出处。名字取自「开门见山」——不绕弯子，也不替 wiki 编答案。
+见山（JianShanAgent）是一个挂在 QQ 上的 wiki 问答机器人：你在群里 @ 它问一句，它去 wiki 上把答案找出来，核对过再告诉你，后面附上出处。名字取自「开门见山」——不绕弯子，也不替 wiki 编答案。
 
 它为 MediaWiki 而写。现在在线上服务的是[阴阳师 wiki](https://yys.huijiwiki.com)，换一个 wiki 不用改这个仓库的代码。
 
@@ -34,13 +33,11 @@
 ## 它有什么不一样
 
 - **能直接查的，不麻烦大模型。** `/查 高铁` 这样的命令直接读 wiki 的数据，一两秒回来，不会编。
-- **拿不准的，先查证再开口。** 自然语言的问题会先去知识库和站内搜索找资料，写完结论还要过一遍复核——
-  资料里没有的不说，复核不过就打回重写。回答后面带着参考资料，链接只留确实查到过的。
+- **拿不准的，先查证再开口。** 自然语言的问题会先去知识库和站内搜索找资料，写完结论还要过一遍复核——资料里没有的不说，复核不过就打回重写。回答后面带着参考资料，链接只留确实查到过的。
 - **认得图。** 发一张立绘、头像或者截图，它在 wiki 的图库里以图搜图，告诉你这是谁、哪个皮肤。
 - **跟着 wiki 走。** 每小时看一眼 wiki 的最近更改，只重做变了的那部分。wiki 改了，它的答案也跟着改。
 - **看得见它在想什么。** 自带一个网页后台：每条消息走了哪几步、各花了多久、看了哪些资料、复核怎么说，都查得到。
-- **换一个 wiki 不用动核心。** 核心只懂 MediaWiki 和 QQ。某个平台、某个站特有的东西——数据接口、清洗规则、
-  提示词里的说法、人设——都是插件，很多时候只要写一份配置。
+- **换一个 wiki 不用动核心。** 核心只懂 MediaWiki 和 QQ。某个平台、某个站特有的东西——数据接口、清洗规则、提示词里的说法、人设——都是插件，很多时候只要写一份配置。
 
 ## 聊起来是什么样
 
@@ -103,8 +100,7 @@ flowchart LR
 
 准备好以后：
 
-**1. 建一个实例仓库。** 用模板 [`template-instance`](https://github.com/JianShanAgent/template-instance) 建一个你自己的仓库，
-和这个仓库并排放在同一个目录下。它只有几个文件：服务哪个 wiki、用哪些插件的哪个版本、凭据的模板。
+**1. 建一个实例仓库。** 用模板 [`template-instance`](https://github.com/JianShanAgent/template-instance) 建一个你自己的仓库，和这个仓库并排放在同一个目录下。它只有几个文件：服务哪个 wiki、用哪些插件的哪个版本、凭据的模板。
 
 **2. 告诉它服务哪个 wiki。** 在实例的 `config/core.wiki.yaml` 里填上名字和接口地址：
 
@@ -144,9 +140,7 @@ JIANSHANAGENT_DRY_RUN=1 uv run jianshanagent             # 不连 QQ 试跑；�
 | 让它说这个站的话：去掉这个站的模板噪声、问题怎么分类、提示词里的说法、人设、昵称 | 写一个站点插件，多半只是一份配置 | [`template-site-wiki`](https://github.com/JianShanAgent/template-site-wiki) |
 | 让它读这个站的结构化数据、有自己的命令；或者好几个站共用一个 wiki 平台 | 站点插件里写代码；平台共用的部分单独成一个平台插件 | [`template-site-platform`](https://github.com/JianShanAgent/template-site-platform) |
 
-阴阳师 wiki 是走到第三档的例子：[`site-huiji`](https://github.com/JianShanAgent/site-huiji)（灰机平台）、
-[`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys)（阴阳师 wiki）、
-[`instance-yys`](https://github.com/JianShanAgent/instance-yys)（这个部署）。命名和写法的规矩在 [插件规范](docs/插件规范.md)。
+阴阳师 wiki 是走到第三档的例子：[`site-huiji`](https://github.com/JianShanAgent/site-huiji)（灰机平台）、[`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys)（阴阳师 wiki）、[`instance-yys`](https://github.com/JianShanAgent/instance-yys)（这个部署）。命名和写法的规矩在 [插件规范](docs/插件规范.md)。
 
 ## 管理后台
 
@@ -175,8 +169,7 @@ webui/         管理后台的页面（React）
 docs/          文档
 ```
 
-配置是分层的 YAML：默认值随代码走，站点插件往上补，每个部署只写和默认值不一样的地方，后台里还能再改。
-细节在 `src/jianshanagent/core/config.py` 开头。
+配置是分层的 YAML：默认值随代码走，站点插件往上补，每个部署只写和默认值不一样的地方，后台里还能再改。细节在 `src/jianshanagent/core/config.py` 开头。
 
 ## 参与开发
 
@@ -186,8 +179,7 @@ uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
 
-- 这里的测试是站在「一个不带站点插件的 MediaWiki」上跑的。查询和知识库管线的大部分测试是拿阴阳师 wiki 的数据写的，
-  在 [`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys) 里——改了这两块，那边也跑一遍。
+- 这里的测试是站在「一个不带站点插件的 MediaWiki」上跑的。查询和知识库管线的大部分测试是拿阴阳师 wiki 的数据写的，在 [`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys) 里——改了这两块，那边也跑一遍。
 - Postgres 相关的测试默认跳过，设 `JIANSHANAGENT_TEST_POSTGRES_DSN`（指向一个测试库）后运行。
 - 管理后台的页面：`cd webui && npm install && npm run build`。
 - 对真实的 wiki 取数要守规矩：那是别人的站点，限速和并发不要调高。

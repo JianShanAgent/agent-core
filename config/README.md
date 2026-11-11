@@ -1,7 +1,6 @@
 # config/
 
-部署目录的样子。**默认值不在这里**，在包里（`src/jianshanagent/defaults/` 和各插件目录的 `config.yaml`）。
-一个部署的 `config/` 只放它和默认值不一样的地方：
+部署目录的样子。**默认值不在这里**，在包里（`src/jianshanagent/defaults/` 和各插件目录的 `config.yaml`）。一个部署的 `config/` 只放它和默认值不一样的地方：
 
 | 文件 | 用途 |
 |---|---|
