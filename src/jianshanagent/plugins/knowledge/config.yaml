@@ -123,7 +123,7 @@ sources:
 clean:
   # 清洗规则都按 class 认。这里只写 MediaWiki 通用的；平台、站点自己的组件由各自的站点插件配置补充
   # （site.<id> 的 extend 段里 plugin.knowledge 的 clean）：名单合在一起，单个值以站点插件写的为准。
-  # 能补充的项：remove_classes、heading_classes（class → 提成第几级小标题）、section_titles、
+  # 能补充的项：remove_classes、nav_classes、heading_classes（class → 提成第几级小标题）、section_titles、
   # badge_texts、term_classes、inline_classes、prefix_classes、linked_cards、table_placeholders、
   # tabber_class / tabber_item_class / tabber_label_class / tabber_label_attribute。
   # 各项的意思见 site.huiji_yys 里的例子。标签页的名字默认从按钮的文字取（tabber_label_class）；
@@ -139,6 +139,10 @@ clean:
     - mw-empty-elt
     - noprint                      # MediaWiki 惯例：不参与打印的界面元素
     - magnify                      # 缩略图右下角的放大图标
+  # nav_classes：remove_classes 里哪几个是导航块。导航块照样去掉；去掉以后整页空了的页面，
+  # 留着「本页不在里面」的导航块（整页就是一张导航表的页面，表就是它的正文）。导航块里有指向本页自己的
+  # 那一项的（挂着导航表的占位页、面包屑）不留。通用的不写，平台按自己的约定补（platform.bwiki）
+  nav_keep_min_chars: 100          # 留下导航块以后正文至少有这么多字才算数
   # 页面末尾若是「链接密集」的块（站内链接不少于 nav_block_min_links 个、链接文字占比不低于 nav_block_link_ratio、
   # 且这一块不超过全页文字的 nav_block_max_share），按没有 class 的底部导航处理，移除
   # （整页就是一个链接列表的不在此列）

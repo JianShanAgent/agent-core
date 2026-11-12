@@ -77,6 +77,25 @@ def has_text(blocks: list[Block]) -> bool:
 # ── 条目页面 ──────────────────────────────────────────────────────────
 
 
+def _render(
+    html: str, clean_cfg: CleanSettings, chunk_cfg: ChunkSettings, *, keep_nav: bool = False
+) -> tuple[Any, CleanStats, list[Block], TableStats]:
+    """页面渲染后的 HTML → 清洗过的元素树、清洗的统计、块、表格的统计。"""
+    root = parse_html(html)
+    stats = clean(root, clean_cfg, wiki=True, keep_nav=keep_nav)
+    blocks, table_stats = html_to_blocks(
+        root,
+        label_max_chars=chunk_cfg.label_max_chars,
+        table_placeholders=clean_cfg.table_placeholders,
+    )
+    return root, stats, blocks, table_stats
+
+
+def _chars(blocks: list[Block]) -> int:
+    """正文的字数（标题不算），和 :meth:`Document.text_chars` 是同一种算法。"""
+    return sum(b.size() for b in blocks if b.kind != BLOCK_HEADING)
+
+
 def build_page(
     ref: PageRef,
     parsed: dict[str, Any],
@@ -91,14 +110,19 @@ def build_page(
     只在判断「章节目录页」时用来核对链接指向哪里；不给就不核对。
     """
     result = BuildResult()
-    root = parse_html(str(parsed.get("text") or ""))
-    stats = clean(root, settings.clean, wiki=True)
+    src = settings.sources
+    html = str(parsed.get("text") or "")
+    root, stats, blocks, table_stats = _render(html, settings.clean, settings.chunk)
+    nav_classes = settings.clean.nav_classes & settings.clean.remove_classes
+    if _chars(blocks) < src.min_chars and any(stats.removed[f".{cls}"] for cls in nav_classes):
+        # 去掉导航块以后什么都不剩：这一页的正文可能就是那个导航块（「花合战」整页是一张历年名单，
+        # 写成了导航模板，别的页面底部也挂着它）。留着本页不在里面的导航块再做一遍，
+        # 这样有了足够的正文才算数——只挂着导航表的占位页、只剩一条面包屑的页面还是空页
+        kept = _render(html, settings.clean, settings.chunk, keep_nav=True)
+        enough = max(src.min_chars, settings.clean.nav_keep_min_chars)
+        if kept[1].nav_blocks_kept and _chars(kept[2]) >= enough:
+            root, stats, blocks, table_stats = kept
     result.clean_stats = stats
-    blocks, table_stats = html_to_blocks(
-        root,
-        label_max_chars=settings.chunk.label_max_chars,
-        table_placeholders=settings.clean.table_placeholders,
-    )
     result.table_stats.add(table_stats)
 
     doc = Document(
@@ -111,7 +135,6 @@ def build_page(
         rev_id=ref.rev_id,
         blocks=blocks,
     )
-    src = settings.sources
     key = doc.doc_key
     body = "\n".join(b.render() for b in blocks)
     result.page_text = body

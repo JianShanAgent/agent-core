@@ -21,7 +21,9 @@ from jianshanagent.platforms.bwiki.wiki import BwikiPlatform, SemanticRow, _text
 from jianshanagent.platforms.huiji.knowledge import LABEL_DATA, HuijiKnowledge
 from jianshanagent.platforms.huiji.wiki import HuijiData
 from jianshanagent.plugins.knowledge.changes import Change, ChangeContext, Plan, plan_changes
+from jianshanagent.plugins.knowledge.documents import STATUS_EMPTY, STATUS_OK, build_page
 from jianshanagent.plugins.knowledge.settings import load_settings
+from jianshanagent.plugins.knowledge.sources import PageRef
 from jianshanagent.plugins.wiki_query.client import WikiQueryClient
 
 HUIJI = "https://game.huijiwiki.example"
@@ -61,6 +63,7 @@ def test_each_wiki_gets_what_its_platform_adds_and_nothing_from_the_others(tmp_p
     # BWiki：取数放慢，导航性的内容不进知识库，标签页是 Tabber 扩展的；知识库那边没接东西
     assert (bwiki.fetch.max_concurrency, bwiki.fetch.requests_per_second) == (1, 0.5)
     assert "navigation-not-searchable" in bwiki.clean.remove_classes
+    assert bwiki.clean.nav_classes == {"navigation-not-searchable"} and not plain.clean.nav_classes
     assert (bwiki.clean.tabber_class, bwiki.clean.tabber_item_class) == ("tabber", "tabbertab")
     assert bwiki.clean.tabber_label_attribute == "title"
     assert len(bwiki.sites) == 0
@@ -80,6 +83,71 @@ def test_each_wiki_gets_what_its_platform_adds_and_nothing_from_the_others(tmp_p
 
 
 # ---------- 灰机 ----------
+
+
+def test_a_page_that_is_nothing_but_a_navigation_block_keeps_it(tmp_path: Path) -> None:
+    settings = load_settings(deployment(tmp_path, "bwiki"), "bwiki")
+    crumb = (
+        '<div class="crumb navigation-not-searchable">'
+        '<a href="/game/首页">首页</a> &gt; <a class="mw-selflink selflink">花合战</a>　'
+        "短网址 • 刷新缓存 • 阅读 • 编辑 • 历史 • 这一条面包屑写得很长"
+        f"{'很长' * 50}</div>"
+    )
+
+    def link(number: int, month: int, current: bool) -> str:
+        text = f"式神{month}：{number}年的皮肤{month}"
+        if current:  # 指向本页自己的链接，MediaWiki 渲染成这样
+            return f'<a class="mw-selflink selflink">{text}</a>'
+        return f'<a href="/game/皮肤{number}{month}">{text}</a>'
+
+    def nav(current: tuple[int, int] | None = None) -> str:
+        years = "".join(
+            f'<div class="tabbertab" title="{number}"><table>'
+            + "".join(
+                f"<tr><td>{month}月</td>"
+                f"<td>{link(number, month, (number, month) == current)}</td></tr>"
+                for month in range(1, 13)
+            )
+            + "</table></div>"
+            for number in (2020, 2021)
+        )
+        return (
+            '<div class="navigation-not-searchable"><p>花合战导航</p>'
+            f'<div class="tabber">{years}</div></div>'
+        )
+
+    def build(body: str) -> Any:
+        html = f'<div class="mw-parser-output">{body}</div>'
+        return build_page(PageRef(page_id=1, title="花合战", rev_id=1), {"text": html}, settings)
+
+    # 平时：皮肤页底部挂着这张导航表，和面包屑一起去掉
+    skin = build(
+        f"{crumb}<p>初霜净洵是一目连的花合战皮肤，二〇二〇年一月上线。</p>{nav((2020, 1))}"
+    )
+    assert skin.page_status == STATUS_OK and skin.page_text.startswith("初霜净洵是一目连的")
+    assert "花合战导航" not in skin.page_text and "首页" not in skin.page_text
+    assert skin.clean_stats.removed[".navigation-not-searchable"] == 2
+    assert not skin.clean_stats.nav_blocks_kept
+
+    # 「花合战」这一页整页就是这张表（本页不在表里）：去掉就空了，所以留着，年份还是小标题；
+    # 面包屑里有本页自己，不留
+    only = build(f"{crumb}{nav()}")
+    assert only.page_status == STATUS_OK and only.clean_stats.nav_blocks_kept
+    assert only.page_text.startswith("花合战导航") and "面包屑" not in only.page_text
+    assert "1月：式神1：2020年的皮肤1" in only.page_text
+    assert "12月：式神12：2021年的皮肤12" in only.page_text
+    assert [b.text for b in only.documents[0].blocks if b.kind == "heading"] == ["2020", "2021"]
+    assert only.clean_stats.removed[".navigation-not-searchable"] == 1
+
+    # 还没写正文的皮肤页，只挂着这张表：本页是表里的一项，表不是它的正文，照旧是空页
+    stub = build(f"{crumb}<h2>初霜净洵</h2>{nav((2020, 1))}")
+    assert stub.page_status == STATUS_EMPTY and not stub.clean_stats.nav_blocks_kept
+    assert stub.documents == []
+
+    # 只剩一条面包屑的页面，照旧是空页
+    assert build(crumb).page_status == STATUS_EMPTY
+    assert not build(crumb).clean_stats.nav_blocks_kept
+    assert build("").page_status == STATUS_EMPTY
 
 
 async def test_huiji_reads_the_data_namespace_through_the_query_interface(tmp_path: Path) -> None:

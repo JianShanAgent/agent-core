@@ -20,6 +20,9 @@ extend:
     clean:
       remove_classes:
         - navigation-not-searchable   # MediaWiki 的约定：导航性的内容，不进站内搜索——也不进知识库。BWiki 的面包屑、页面底部的导航表带着它
+      # 上面那个是导航块：整页只有它、本页又不在它里面的页面（页面的正文就是那张导航表），把它留着
+      nav_classes:
+        - navigation-not-searchable
       # 标签页：BWiki 用的是 MediaWiki 的 Tabber 扩展。页面上没有按钮（按钮是浏览器里的脚本生成的），
       # 每个标签页的名字写在它的内容块的 title 属性上：提成对应内容的小标题
       tabber_class: "tabber"

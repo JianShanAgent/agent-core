@@ -81,6 +81,11 @@ GENERIC_REMOVE_CLASSES = frozenset(
 class CleanSettings:
     #: 按 class 整块移除。默认值是 MediaWiki 通用的那几样（:data:`GENERIC_REMOVE_CLASSES`）
     remove_classes: frozenset[str] = GENERIC_REMOVE_CLASSES
+    #: ``remove_classes`` 里哪几个是导航块：去掉以后整页空了的页面，留着本页不在里面的导航块
+    #: （它就是这一页的正文；规则见 cleaner.py 顶部）
+    nav_classes: frozenset[str] = frozenset()
+    #: 留下导航块以后正文至少要有这么多字才算数
+    nav_keep_min_chars: int = 100
     #: class → 相对层级（1 表示所在章节的下一级）
     heading_classes: dict[str, int] = field(default_factory=dict)
     term_classes: frozenset[str] = frozenset()
@@ -287,6 +292,8 @@ def clean_settings(c: dict[str, Any]) -> CleanSettings:
     defaults = CleanSettings()
     return CleanSettings(
         remove_classes=defaults.remove_classes | frozenset(_strs(c.get("remove_classes"))),
+        nav_classes=frozenset(_strs(c.get("nav_classes"))),
+        nav_keep_min_chars=int(c.get("nav_keep_min_chars") or defaults.nav_keep_min_chars),
         heading_classes={str(k): int(v) for k, v in (c.get("heading_classes") or {}).items()},
         term_classes=frozenset(_strs(c.get("term_classes"))),
         inline_classes=frozenset(_strs(c.get("inline_classes"))),

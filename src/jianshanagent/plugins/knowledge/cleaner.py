@@ -7,6 +7,11 @@
 - class 命中 ``remove_classes`` 的元素：整块移除。包括官方约定的 ``kb-ignore``、目录、
   导航框（「式神录导航」在近 300 个式神页各有一份）、剧情页的上下章导航、
   悬浮提示的预载内容（技能描述里每个状态名后面都跟着一份完整说明，同一页重复多次，页面下方另有汇总列表）。
+  其中 ``nav_classes`` 点了名的是导航块：有的页面整页就是一个导航块（BWiki 的「花合战」是一张
+  历年名单，写成了导航模板），去掉它页面就空了——这样的页面把它留着（``keep_nav``，
+  由 documents.build_page 判断）。留的只是「本页不在里面」的导航块：导航块里有指向本页自己的
+  那一项（MediaWiki 把它渲染成 ``selflink``），说明本页是它列的条目之一（挂着导航表的占位页、
+  面包屑），那就不是本页的正文，照样去掉。
 - 图片：移除。alt 是文件名或内部编号的直接丢；alt 是名字、而且附近文字里没有这个名字的
   （只用头像表示式神的地方）把名字留成文字。图注（缩略图说明、画廊文字）是普通文字，照常保留。
 - 红链（未创建页面）：退化为纯文字；指向缺失文件的红链（文字是「文件:xxx.png」之类）移除。
@@ -66,6 +71,8 @@ class CleanStats:
     link_chars: int = 0  # 其中站内链接的文字量
     nav_text_chars: int = 0  # 去掉页面末尾导航块之前的文字量（判断纯导航页用）
     nav_link_chars: int = 0
+    #: 这一页留着导航块（``keep_nav``，而且真有本页不在里面的导航块）
+    nav_blocks_kept: bool = False
 
 
 def parse_html(html: str) -> HtmlElement:
@@ -86,10 +93,13 @@ def _visible_len(text: str) -> int:
     return len(re.sub(r"\s+", "", text))
 
 
-def clean(root: HtmlElement, settings: CleanSettings, *, wiki: bool = True) -> CleanStats:
+def clean(
+    root: HtmlElement, settings: CleanSettings, *, wiki: bool = True, keep_nav: bool = False
+) -> CleanStats:
     """就地清洗 ``root``。
 
     ``wiki=False`` 用于公告帖子自带的 HTML：只做通用清洗，不做站点组件改写。
+    ``keep_nav=True``：留着本页不在里面的导航块（``nav_classes``），见本文件顶部。
     """
     stats = CleanStats()
     stats.raw_text_chars = _visible_len(
@@ -99,7 +109,7 @@ def clean(root: HtmlElement, settings: CleanSettings, *, wiki: bool = True) -> C
         _drop_linked_cards(root, settings, stats)
         _mark_tab_labels(root, settings, stats)
         _apply_badges(root, settings)
-    _prune(root, settings, stats)
+    _prune(root, settings, stats, keep_nav=keep_nav)
     if wiki:
         _insert_section_titles(root, settings)
         _promote_headings(root, settings)
@@ -247,7 +257,14 @@ def _is_tabber(el: HtmlElement, settings: CleanSettings) -> bool:
 # ── 剪枝 ──────────────────────────────────────────────────────────────
 
 
-def _removal_reason(el: HtmlElement, settings: CleanSettings, stats: CleanStats) -> str:
+def _lists_this_page(el: HtmlElement) -> bool:
+    """这一块里有没有指向本页自己的那一项（MediaWiki 渲染成 ``selflink`` / ``mw-selflink``）。"""
+    return any("selflink" in cls for item in el.iter() for cls in _classes(item))
+
+
+def _removal_reason(
+    el: HtmlElement, settings: CleanSettings, stats: CleanStats, *, keep_nav: bool = False
+) -> str:
     tag = el.tag.lower()
     if tag in _DROP_TAGS:
         return f"<{tag}>"
@@ -261,6 +278,9 @@ def _removal_reason(el: HtmlElement, settings: CleanSettings, stats: CleanStats)
         return "<img>"
     for cls in _classes(el):
         if cls in settings.remove_classes:
+            if keep_nav and cls in settings.nav_classes and not _lists_this_page(el):
+                stats.nav_blocks_kept = True
+                continue
             return f".{cls}"
     if el.get("hidden") is not None:
         return "[hidden]"
@@ -294,17 +314,19 @@ def _meaningful_alt(img: HtmlElement) -> str:
     return alt
 
 
-def _prune(el: HtmlElement, settings: CleanSettings, stats: CleanStats) -> None:
+def _prune(
+    el: HtmlElement, settings: CleanSettings, stats: CleanStats, *, keep_nav: bool = False
+) -> None:
     for child in list(el):
         if not isinstance(child.tag, str):  # 注释、处理指令
             child.drop_tree()
             continue
-        reason = _removal_reason(child, settings, stats)
+        reason = _removal_reason(child, settings, stats, keep_nav=keep_nav)
         if reason:
             stats.removed[reason] += 1
             child.drop_tree()  # 保留元素后面的尾随文字
         else:
-            _prune(child, settings, stats)
+            _prune(child, settings, stats, keep_nav=keep_nav)
 
 
 # ── 小标题 ────────────────────────────────────────────────────────────
