@@ -1,0 +1,15 @@
+# 灰机平台的默认配置（配置名 platform.huiji）：灰机 wiki（huijiwiki.com）在 MediaWiki 之上多出来的东西。
+# core.wiki.yaml 里哪个 wiki 在灰机上（platform 写的是 huiji，或者它的站点插件是灰机上的站，如 huiji_yys），就对那个 wiki 生效。
+# 某个部署要改：在实例的 config/platform.huiji.yaml 里只写要改的项。
+
+data_namespace: 3500               # Data 命名空间的编号（站点把结构化数据存成 Data:xxx.json 页面）
+data_path: "/api/rest_v1/namespace/data"   # Data 查询接口在站内的地址（按 MongoDB 过滤条件查）
+
+# 对通用配置的补充（配置名 → 要并进去的内容）：名单和通用的合在一起，单个值以这里写的为准。
+# 这一段读配置时就并进去了，不能在管理后台里改（要改这些项，去改它们所在的那份配置）
+extend:
+  plugin.knowledge:
+    clean:
+      remove_classes:
+        - kb-ignore                # 灰机官方知识库的约定：带这个 class 的不进知识库
+        - huiji-tt-preload         # 悬浮提示的预载内容：阴阳师 wiki 的技能描述里每个状态名后面跟着一份完整说明，合计约 18 万字；页面下方另有汇总列表

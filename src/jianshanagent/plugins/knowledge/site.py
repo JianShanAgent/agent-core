@@ -1,21 +1,20 @@
-"""知识库开给站点插件的扩展点（``knowledge``）。
-
-核心只懂 MediaWiki，平台、站点特有的东西由插件带进来。
+"""知识库开给平台和站点插件的扩展点（``knowledge``）。
 
 分三层：
 
-- 核心（这个包里的模块）：对任何 MediaWiki 都成立的做法——列页面、取渲染结果、
+- 通用的（这个包里的模块）：对任何 MediaWiki 都成立的做法——列页面、取渲染结果、
   清洗、转 Markdown、切片、去重、算向量、入库、检索，以及按最近更改做的自动更新。
-- 平台插件（``huiji``）：一个 wiki 平台特有的东西。灰机有 Data 命名空间和查询接口。
-- 站点插件（``huiji_yys``，在 ``huiji`` 下面）：一个站特有的东西。阴阳师 wiki 的公告、剧情、数据集、
+- 平台（``huiji``，核心带着的，在 ``jianshanagent/platforms/``）：一个 wiki 平台特有的东西。
+  灰机有 Data 命名空间和查询接口。
+- 站点插件（``huiji_yys``，灰机上的一个站）：一个站特有的东西。阴阳师 wiki 的公告、剧情、数据集、
   实体字典、图库。
 
-站点插件长什么样、怎么加载见 ``core/manifest.py`` 和 ``core/sites.py``：清单的 ``capabilities`` 里写
-``knowledge``，包里的 ``knowledge`` 模块有 ``create(setup)``，返回一个 :class:`SitePlugin`。
-这个站的清洗规则这类「对核心配置的补充」不经过这里：写在插件配置的 ``extend`` 段里，
-读配置时就并进 ``plugin.knowledge`` 了。
+平台和站点插件接进来的方式是同一个，见 ``core/manifest.py`` 和 ``core/sites.py``：清单的
+``capabilities`` 里写 ``knowledge``，包里的 ``knowledge`` 模块有 ``create(setup)``，
+返回一个 :class:`SitePlugin`。清洗规则这类「对通用配置的补充」不经过这里：写在自己配置的
+``extend`` 段里，读配置时就并进 ``plugin.knowledge`` 了。
 
-插件能插手的地方就是 :class:`SitePlugin` 的那些方法，都有什么都不做的默认实现，用到哪个覆盖哪个。
+能插手的地方就是 :class:`SitePlugin` 的那些方法，都有什么都不做的默认实现，用到哪个覆盖哪个。
 """
 
 from __future__ import annotations
@@ -53,9 +52,9 @@ Classifier = Callable[["Change", "Plan"], Verdict | None]
 
 
 class SitePlugin:
-    """站点插件的基类。每个方法都是一个可以插手的地方，默认什么都不做。"""
+    """平台、站点插件接知识库的基类。每个方法都是一个可以插手的地方，默认什么都不做。"""
 
-    #: 插件的 id，和清单里的一样
+    #: 平台、插件的 id，和清单里的一样
     id: str = ""
 
     # ── 取数 ──────────────────────────────────────────────────────────
@@ -115,7 +114,7 @@ class SitePlugin:
 
 
 class SiteSet:
-    """加载好的插件，按加载顺序。"""
+    """给一个 wiki 加载好的平台和站点插件，按加载顺序（平台在前）。"""
 
     def __init__(self, plugins: Iterable[SitePlugin] = ()):
         self._plugins: tuple[SitePlugin, ...] = ()

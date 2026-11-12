@@ -7,17 +7,17 @@
    - 核心自己的默认配置，在包里（``jianshanagent/defaults/*.yaml``）：全局、内核、接入——
      ``app``、``core.*``、``gateway.*``。
    - 插件自己的默认配置，在插件目录里（``<插件目录>/config.yaml``，见 ``core/manifest.py``）：
-     功能插件的叫 ``plugin.<id>``，站点插件的叫 ``site.<id>``。插件另外带的配置放在它的
-     ``configs/`` 下（对话插件的人设：``configs/persona/persona.default.yaml``，叫
-     ``persona/persona.default``）。
-   - 用到的站点插件（``core.wiki.yaml`` 的 ``wikis`` 里各个 wiki 的 ``site`` 和它的各级上级）
-     配置里的 ``extend`` 段：那个站对通用配置的补充，在这一层就并进去（见 :func:`overlay`）。
-     通用的插件照常读自己的配置，不用知道有站点插件这回事。
+     功能插件的叫 ``plugin.<id>``，站点插件的叫 ``site.<id>``；核心带着的平台的叫
+     ``platform.<id>``。插件另外带的配置放在它的 ``configs/`` 下
+     （对话插件的人设：``configs/persona/persona.default.yaml``，叫 ``persona/persona.default``）。
+   - 用到的平台和站点插件（``core.wiki.yaml`` 的 ``wikis`` 里各个 wiki 的 ``platform``、``site``）
+     配置里的 ``extend`` 段：那个平台、那个站对通用配置的补充，在这一层就并进去
+     （见 :func:`overlay`），平台的在前。通用的插件照常读自己的配置，不用知道有它们这回事。
    - 部署的 ``config/*.yaml``：这个部署和默认值不一样的地方，文件名和要改的那份配置一样，
      只写要改的项（字典逐层合并，别的整个替换）。挂哪几个 wiki、各用哪个站点插件
      （``core.wiki.yaml``）就是这样写的。部署目录里也可以有包里没有的配置，原样算数。
 
-   一个部署可以挂好几个 wiki，各有各的站点插件。站点插件的补充只对它那个 wiki 生效：
+   一个部署可以挂好几个 wiki，各有各的平台和站点插件。它们的补充只对那个 wiki 生效：
    每个 wiki 各有一份配置（:meth:`AppConfig.for_wiki`），取数、清洗、查询这些跟着 wiki 走的事
    读的是它自己那一份。对话、查证、人设这些只有一份的，读的是排第一的那个 wiki（主 wiki）的那一份
    ——不指明是哪个 wiki 时，读到的就是它。
@@ -27,7 +27,7 @@
    管理后台里改的配置落在这里，一个配置文件对应一个同名的 YAML，里面只有和前两层不一样的项。
    发布换了版本它还在；删掉某个文件 = 那份配置全部恢复默认。没设这个环境变量就没有这一层。
    后台里看到、改的是主 wiki 的那一份；改动对每个 wiki 的那一份都生效
-   （站点插件补过的名单，按「加了哪些、去了哪些」用到别的 wiki 上，
+   （平台、站点插件补过的名单，按「加了哪些、去了哪些」用到别的 wiki 上，
    见 :func:`apply_overrides_elsewhere`）。
 
 覆写文件里某一项写成 ``null`` 表示「删掉这一项」（当作默认值里没写它）。
@@ -35,6 +35,11 @@
 后来的变化，不然后台动过一次开关，以后发布新加的插件就再也不会启用（见 :func:`merge_enabled`）。
 覆写文件坏了（不是合法的 YAML、不是键值结构）不拦启动：跳过它，原因记在 ``override_errors`` 里。
 凭据（``secrets.yaml``）不在这三层里，也不能被覆写。
+
+在管理后台的「Wiki」页里从站点目录加的 wiki 也存在覆写目录里：``core.wiki.yaml`` 的
+``wikis_added``。它不算对配置的改动，是这个部署多挂的 wiki——读配置时接在部署写的 ``wikis``
+后面（见 :func:`load_config`），之后和部署写的一视同仁。id 和部署写的重了，以部署写的为准；
+哪一个挂不上了（它的站点插件没了）就跳过它，原因同样记在 ``override_errors`` 里。
 """
 
 from __future__ import annotations
@@ -53,7 +58,8 @@ from jianshanagent.core.manifest import (
     Manifest,
     feature_manifests,
     installed_sites,
-    site_chain,
+    platforms,
+    wiki_plugins,
 )
 
 OVERRIDES_ENV = "JIANSHANAGENT_CONFIG_OVERRIDES_DIR"
@@ -97,32 +103,41 @@ LOCKED_KEYS = frozenset(
 #: 写着「挂哪几个 wiki、各用哪个站点插件」的那份配置，和里面的那张名单
 WIKI_FILE = "core.wiki"
 WIKIS = "wikis"
-#: 站点插件的配置叫 ``site.<id>``；里面这一段是它对通用配置的补充（配置名 → 要并进去的内容）
+#: 覆写目录的 ``core.wiki.yaml`` 里的一项：在管理后台里从站点目录加的 wiki，接在 ``wikis`` 后面。
+#: 只在覆写文件里有，读配置时并进 ``wikis`` 就拿掉
+WIKIS_ADDED = "wikis_added"
+#: 并进去以后，后台加的那几项带着这个记号（部署写的 wiki 不能写它）
+ADDED = "added"
+#: 站点插件的配置叫 ``site.<id>``，平台的叫 ``platform.<id>``；
+#: 里面这一段是它对通用配置的补充（配置名 → 要并进去的内容）
 SITE_PREFIX = "site."
+PLATFORM_PREFIX = "platform."
 EXTEND = CAPABILITY_EXTEND
 
 #: 另外按路径锁住的几项（配置名 → 路径）。
 #: 关掉管理后台；健康检查的地址和端口（容器的端口映射、健康检查都写死了 8080 和 /healthz）：
 #: 在网页上改了会把管理后台自己关在外面，只能上服务器救。
 #: 挂哪几个 wiki：里面有地址，和用哪个站点插件——可以写包路径，
-#: 能在网页上改就等于能让机器人去加载别的代码
+#: 能在网页上改就等于能让机器人去加载别的代码。后台加的 wiki 只能来自站点目录（见 core/catalog.py）
 LOCKED_PATHS: dict[str, tuple[tuple[str, ...], ...]] = {
     "core.admin": (("enabled",),),
     "app": (("healthcheck",),),
-    WIKI_FILE: ((WIKIS,),),
+    WIKI_FILE: ((WIKIS,), (WIKIS_ADDED,)),
     # 从哪个仓库更新、下载走哪个镜像：能在网页上改，就等于能让机器人去下载并运行别人的代码
     "core.update": (("repo",), ("download_prefix",)),
+    # 站点目录在哪：它说了算「有哪些站点插件、从哪个仓库下载、wiki 的地址是什么」
+    "core.catalog": (("repo",), ("path",), ("ref",), ("download_prefix",)),
 }
 
 
 def locked_paths(name: str) -> tuple[tuple[str, ...], ...]:
     """``name`` 这份配置里按路径锁住的项。
 
-    站点插件配置里的 ``extend`` 也锁着：它在读配置的第一层就并进了别的配置，在网页上改它不会生效
-    ——要改那些项，去改它们所在的那份配置。
+    平台、站点插件配置里的 ``extend`` 也锁着：它在读配置的第一层就并进了别的配置，
+    在网页上改它不会生效——要改那些项，去改它们所在的那份配置。
     """
     paths = LOCKED_PATHS.get(name, ())
-    return (*paths, (EXTEND,)) if name.startswith(SITE_PREFIX) else paths
+    return (*paths, (EXTEND,)) if name.startswith((SITE_PREFIX, PLATFORM_PREFIX)) else paths
 
 
 def is_locked(name: str, path: Sequence[str]) -> bool:
@@ -189,7 +204,7 @@ def apply_overrides_elsewhere(
     """把在主 wiki 的那份配置上做的改动，用到另一个 wiki 的同一份配置（``base``）上。
 
     ``override`` 是相对 ``reference``（主 wiki 那一份的默认值）的差。和 :func:`apply_overrides`
-    只差在名单上：两边的名单不一样时（站点插件各补了各的），不整个替换，
+    只差在名单上：两边的名单不一样时（平台、站点插件各补了各的），不整个替换，
     只把「加了哪些、去了哪些」用过来——不然在后台里动一下清洗名单，别的 wiki 自己补的那几项就没了。
     """
     out = dict(base)
@@ -222,8 +237,8 @@ def overlay(base: dict[str, Any], top: dict[str, Any]) -> dict[str, Any]:
     """把 ``top`` 并到 ``base`` 上：字典逐层合并；列表接在一起（``base`` 的在前，重复的不要）；
     单个值用 ``top`` 的。不动传进来的两个。
 
-    站点插件对通用配置的补充就是这么并进去的：名单（要去掉的 class、给对话模型的工具……）是
-    通用的和这个站的合在一起，单个值（这个站的名字、提示词里的说法……）以站点插件给的为准。
+    平台、站点插件对通用配置的补充就是这么并进去的：名单（要去掉的 class、给对话模型的工具……）是
+    通用的和这个站的合在一起，单个值（这个站的名字、提示词里的说法……）以它们给的为准。
     """
     out = dict(base)
     for key, value in top.items():
@@ -250,10 +265,22 @@ class WikiEntry:
 
     #: 它在这个部署里的名字
     id: str
-    #: 这一项写的内容：地址、放行请求头的名字、出处里怎么称呼它、用哪个站点插件
+    #: 这一项写的内容：地址、放行请求头的名字、出处里怎么称呼它、在哪个平台上、用哪个站点插件
     raw: dict[str, Any]
-    #: 它的站点插件和各级上级，从上到下；没用站点插件就是空的
-    chain: tuple[Manifest, ...] = ()
+    #: 它在哪个平台上（核心带着的那一份）
+    platform: Manifest
+    #: 它的站点插件；没用就是 None
+    site: Manifest | None = None
+
+    @property
+    def added(self) -> bool:
+        """是不是在管理后台里加的（部署的配置文件里没有它）。"""
+        return bool(self.raw.get(ADDED))
+
+    @property
+    def chain(self) -> tuple[Manifest, ...]:
+        """要给它加载的东西，按顺序：平台，然后是站点插件。"""
+        return (self.platform,) if self.site is None else (self.platform, self.site)
 
 
 def wiki_entries(
@@ -281,8 +308,10 @@ def wiki_entries(
             )
         if any(entry.id == wiki_id for entry in entries):
             raise ValueError(f"{where} 里有两项的 id 都是「{wiki_id}」")
-        chain = site_chain(str(item.get("site") or ""), workspace_root)
-        entries.append(WikiEntry(wiki_id, dict(item), chain))
+        platform, site = wiki_plugins(
+            str(item.get("platform") or ""), str(item.get("site") or ""), workspace_root
+        )
+        entries.append(WikiEntry(wiki_id, dict(item), platform, site))
     return tuple(entries)
 
 
@@ -292,17 +321,17 @@ def site_config_name(site: str) -> str:
 
 
 def _extend_with_sites(files: dict[str, dict[str, Any]], chain: Sequence[Manifest]) -> None:
-    """把各级站点插件对通用配置的补充并进 ``files``（就地改），从上到下。"""
+    """把平台、站点插件对通用配置的补充并进 ``files``（就地改），平台的在前。"""
     for manifest in chain:
         source = manifest.config_name
         extend = files.get(source, {}).get(EXTEND) or {}
-        where = f"站点插件「{manifest.id}」的配置里的 {EXTEND}"
+        where = f"{manifest.what}的配置里的 {EXTEND}"
         if not isinstance(extend, dict):
             raise ValueError(f"{where} 要写成「配置名: 要并进去的内容」")
         if extend and EXTEND not in manifest.capabilities:
-            raise ValueError(f"{where}：它的清单（plugin.yaml）的 capabilities 里没有写 {EXTEND}")
+            raise ValueError(f"{where}：它的清单的 capabilities 里没有写 {EXTEND}")
         for target, patch in extend.items():
-            if target not in files or target.startswith(SITE_PREFIX):
+            if target not in files or target.startswith((SITE_PREFIX, PLATFORM_PREFIX)):
                 raise ValueError(f"{where} 里写了「{target}」，没有这份配置")
             if not isinstance(patch, dict):
                 raise ValueError(f"{where}.{target} 要写成键值结构")
@@ -495,7 +524,7 @@ class AppConfig:
         )
 
     def for_wiki(self, wiki_id: str) -> AppConfig:
-        """``wiki_id`` 这个 wiki 的那一份配置：通用的配置，加上它自己的站点插件的补充。
+        """``wiki_id`` 这个 wiki 的那一份配置：通用的配置，加上它自己的平台、站点插件的补充。
 
         跟着 wiki 走的事（取数、清洗、查询）读这一份。直接拿文件内容建出来的配置（测试里）
         没有分份，返回的就是它自己。
@@ -505,8 +534,13 @@ class AppConfig:
 
     @property
     def sites(self) -> list[str]:
-        """用到的站点插件的 id：各个 wiki 的站点插件和它们的上级，上级在前，不重复。"""
-        return list(dict.fromkeys(manifest.id for entry in self.wikis for manifest in entry.chain))
+        """用到的站点插件的 id，按 wiki 的顺序，不重复。"""
+        return list(dict.fromkeys(entry.site.id for entry in self.wikis if entry.site is not None))
+
+    @property
+    def platforms(self) -> list[str]:
+        """挂着的 wiki 各在哪个平台上（平台的 id），按 wiki 的顺序，不重复。"""
+        return list(dict.fromkeys(entry.platform.id for entry in self.wikis))
 
     def site(self, name: str) -> dict[str, Any]:
         """一个站点插件自己的配置（``site.<id>``）；它没有配置就是空的。"""
@@ -604,15 +638,38 @@ def load_config(
         packaged[path.stem] = _load_yaml(path)
         sources[path.stem] = path
 
-    # 挂哪几个 wiki、各用哪个站点插件（开发机可以在 local 里换），连同它们的各级上级
+    # 挂哪几个 wiki、各在哪个平台上、用哪个站点插件（开发机可以在 local 里换），
+    # 后面接上在管理后台里加的
     workspace_root = root.parent
     wiki = _deep_merge(packaged.get(WIKI_FILE, {}), deployed.get(WIKI_FILE, {}))
-    wikis = wiki_entries(_deep_merge(wiki, local.get(WIKI_FILE, {})), workspace_root=workspace_root)
+    wiki = _deep_merge(wiki, local.get(WIKI_FILE, {}))
+    if isinstance(wiki.get(WIKIS), list):
+        wiki[WIKIS] = [
+            {key: value for key, value in item.items() if key != ADDED}
+            if isinstance(item, dict)
+            else item
+            for item in wiki[WIKIS]
+        ]
+    wikis = wiki_entries(wiki, workspace_root=workspace_root)
+    chosen = resolve_overrides_dir(overrides_dir, config_root=root)
+    use_overrides = chosen is not None and with_overrides and chosen.is_dir()
+    errors: dict[str, str] = {}
+    if chosen is not None and use_overrides:
+        skipped: list[str] = []
+        for item in _stored_added_wikis(chosen / f"{WIKI_FILE}.yaml"):
+            listed = [*(entry.raw for entry in wikis), {**item, ADDED: True}]
+            try:
+                wikis = wiki_entries({WIKIS: listed}, workspace_root=workspace_root)
+            except ValueError as exc:  # 它的站点插件没了、id 和部署写的重了……：跳过它，不拦启动
+                skipped.append(f"在后台加的 wiki「{item.get('id') or '没写 id'}」没有挂上：{exc}")
+        if skipped:
+            errors[WIKI_FILE] = "；".join(skipped)[:600]
 
-    # 插件自己的默认配置：能用的功能插件和装着的站点插件都读（没用到的站点插件也读，后台里看得见），
-    # 没登记、按包路径写的站点插件只读用到的
+    # 插件自己的默认配置：能用的功能插件、核心带着的平台、装着的站点插件都读
+    # （没用到的也读，后台里看得见），没登记、按包路径写的站点插件只读用到的
     for manifest in (
         *feature_manifests(workspace_root).values(),
+        *platforms().values(),
         *installed_sites(workspace_root).values(),
         *(manifest for entry in wikis for manifest in entry.chain),
     ):
@@ -626,9 +683,9 @@ def load_config(
             sources[key] = path
 
     def defaults_for(chain: Sequence[Manifest]) -> dict[str, dict[str, Any]]:
-        """一份配置的默认值：随发布走的，加上 ``chain`` 这一串站点插件的补充和开发机的覆写。"""
+        """一份配置的默认值：随发布走的，加上 ``chain``（平台、站点插件）的补充和开发机的覆写。"""
         base = {**deployed, **packaged}
-        # 站点插件对通用配置的补充
+        # 平台、站点插件对通用配置的补充
         _extend_with_sites(base, chain)
         # 部署目录里和默认配置同名的文件：这次部署对它的改动（只写要改的项）
         for key in packaged.keys() & deployed.keys():
@@ -636,15 +693,15 @@ def load_config(
         # local 同名覆写
         for key, values in local.items():
             base[key] = _deep_merge(base.get(key, {}), values)
+        # 挂着的 wiki：部署写的，加上在管理后台里加的
+        base[WIKI_FILE] = {**base.get(WIKI_FILE, {}), WIKIS: [dict(e.raw) for e in wikis]}
         return base
 
-    # 不指明是哪个 wiki 时读到的那一份：主 wiki 的（一个 wiki 都没挂就没有站点插件的补充）
+    # 不指明是哪个 wiki 时读到的那一份：主 wiki 的（一个 wiki 都没挂就没有平台、站点插件的补充）
     base = defaults_for(wikis[0].chain if wikis else ())
     files = dict(base)
     overrides: dict[str, dict[str, Any]] = {}
-    errors: dict[str, str] = {}
-    chosen = resolve_overrides_dir(overrides_dir, config_root=root)
-    if chosen is not None and with_overrides and chosen.is_dir():
+    if chosen is not None and use_overrides:
         for path in sorted(chosen.rglob("*.yaml")):
             rel = path.relative_to(chosen)
             if any(part.startswith(".") for part in rel.parts):
@@ -661,6 +718,8 @@ def load_config(
             except (yaml.YAMLError, ValueError, OSError) as exc:
                 errors[key] = f"读不了：{exc}"[:300]
                 continue
+            if key == WIKI_FILE:  # 后台加的 wiki 上面已经并进名单了，不算对配置的改动
+                override = {k: v for k, v in override.items() if k != WIKIS_ADDED}
             if override:
                 files[key] = apply_overrides(base[key], override)
                 if key == PLUGINS_FILE:
@@ -679,7 +738,8 @@ def load_config(
         "override_errors": errors,
         "sources": sources,
     }
-    # 每个 wiki 各一份：它自己的站点插件的补充，加上后台里的改动（改动是对着主 wiki 那一份做的）
+    # 每个 wiki 各一份：它自己的平台、站点插件的补充，加上后台里的改动
+    # （改动是对着主 wiki 那一份做的）
     views: dict[str, AppConfig] = {}
     for position, entry in enumerate(wikis):
         if position == 0:
@@ -712,9 +772,14 @@ def write_override(config: AppConfig, name: str, edited: dict[str, Any]) -> dict
     if name == PLUGINS_FILE:
         edited = {key: value for key, value in edited.items() if key != ENABLED_BASELINE}
     override = diff_overrides(base, edited)
-    if not override:
+    # 在后台加的 wiki 和配置的改动存在同一个文件里：改配置不动它们
+    added = _stored_added_wikis(path) if name == WIKI_FILE else []
+    if not override and not added:
         path.unlink(missing_ok=True)
         return {}
+    if added:
+        _write_override_file(path, name, {**override, WIKIS_ADDED: added})
+        return override
     if name == PLUGINS_FILE and isinstance(override.get("enabled"), list):
         # 存下启用清单的同时记下现在的默认清单：以后默认清单变了，才认得出哪些是新加的
         override[ENABLED_BASELINE] = _names(base.get("enabled"))
@@ -729,6 +794,46 @@ def _write_override_file(path: Path, name: str, override: dict[str, Any]) -> Non
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(text, encoding="utf-8")
     temporary.replace(path)
+
+
+def _stored_added_wikis(path: Path) -> list[dict[str, Any]]:
+    """覆写目录的 ``core.wiki.yaml``（``path``）里存着的、在管理后台里加的 wiki。读不了就当没有。"""
+    try:
+        found = _load_yaml(path).get(WIKIS_ADDED)
+    except (yaml.YAMLError, ValueError, OSError):
+        return []
+    if not isinstance(found, list):
+        return []
+    return [dict(item) for item in found if isinstance(item, dict)]
+
+
+def added_wikis(config: AppConfig) -> list[dict[str, Any]]:
+    """在管理后台里加的 wiki，照存着的样子（挂不上、被跳过的也在里面）。"""
+    path = config.override_path(WIKI_FILE)
+    return _stored_added_wikis(path) if path is not None else []
+
+
+def write_added_wikis(config: AppConfig, items: Sequence[dict[str, Any]]) -> None:
+    """把在管理后台里加的 wiki 存成 ``items``（整张换掉）。同一个文件里对配置的改动不动。
+
+    只动磁盘上的文件，要生效得重新 :func:`load_config`。
+    """
+    path = config.override_path(WIKI_FILE)
+    if path is None:
+        raise ValueError(f"没有配置覆写目录（环境变量 {OVERRIDES_ENV}），加的 wiki 没有地方存")
+    try:
+        override = _load_yaml(path)
+    except (yaml.YAMLError, ValueError, OSError):
+        override = {}
+    override.pop(WIKIS_ADDED, None)
+    if items:
+        override[WIKIS_ADDED] = [
+            {key: value for key, value in item.items() if key != ADDED} for item in items
+        ]
+    if override:
+        _write_override_file(path, WIKI_FILE, override)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def note_plugin_baseline(config: AppConfig) -> bool:

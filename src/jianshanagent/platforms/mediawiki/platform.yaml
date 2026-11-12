@@ -1,0 +1,4 @@
+# 平台的清单（格式见 core/manifest.py）
+id: mediawiki
+name: MediaWiki
+description: 自己架的 MediaWiki 站，不在哪个 wiki 平台上。通用的代码懂的就是它，这里什么都不多带。

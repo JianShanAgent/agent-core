@@ -707,3 +707,83 @@ export interface Labels {
   chat: Record<string, string>;
   user: Record<string, string>;
 }
+
+// ---- 挂着的 wiki、站点目录 ----
+
+/** 一个站点插件：哪来的、哪个版本 */
+export interface SitePluginInfo {
+  id: string;
+  name: string;
+  /** environment = 随部署装在环境里的；downloaded = 在这里下载的；local = 实例目录的 sites/ 下的；path = 按包路径写的 */
+  source: "environment" | "downloaded" | "local" | "path";
+  version: string | null;
+}
+
+/** 一个 wiki 的知识库在这台机器上的现状 */
+export interface WikiKbState {
+  /** none = 没有文件；requested = 点了建知识库、自动更新还没接手；building = 正在从头建；ready = 有了 */
+  state: "none" | "requested" | "building" | "ready";
+  requested_at: string | null;
+  started_at: string | null;
+  /** 上一轮没做成的原因 */
+  problem: string;
+}
+
+export interface WikiInfo {
+  id: string;
+  label: string;
+  /** 排第一的那个：对话、查证、人设用的是它的站点插件的补充 */
+  primary: boolean;
+  /** 在这一页里加的（能在这里移除）；不然是部署的配置文件里写的 */
+  added: boolean;
+  platform: string;
+  site: SitePluginInfo | null;
+  api_url: string;
+  /** 请求要带的放行请求头的名字；不用放行是空的 */
+  auth_header: string;
+  auth_key_set: boolean;
+  /** 正在运行的那一套里有没有它 */
+  running: boolean;
+  kb: WikiKbState;
+}
+
+export interface WikisInfo {
+  writable: boolean;
+  platforms: { id: string; name: string; description: string }[];
+  wikis: WikiInfo[];
+  /** 在这里加过、现在挂不上的和原因 */
+  skipped: string;
+  /** 建知识库靠的几样东西在不在 */
+  kb: { plugin: boolean; embedding: boolean; sync_alive: boolean };
+  catalog: { enabled: boolean; repo: string; error?: string };
+  state: ConfigState;
+}
+
+/** 站点目录里的一项 */
+export interface CatalogSite {
+  id: string;
+  platform: string;
+  name: string;
+  description: string;
+  repo: string;
+  /** 建议的 wiki 名字、出处里的叫法 */
+  wiki_id: string;
+  label: string;
+  api_url: string;
+  auth_header: string;
+  /** 这个版本的核心用不了它的原因；能用是空的 */
+  unavailable: string;
+  /** 这个站点插件在不在这台机器上；不在的话添加时会下载 */
+  installed: SitePluginInfo | null;
+  /** 已经挂着的话，是哪个 wiki */
+  wiki: string | null;
+}
+
+export interface CatalogInfo {
+  enabled: boolean;
+  repo: string;
+  sites: CatalogSite[];
+  error: string;
+  problems?: string[];
+  fetched_at?: number | null;
+}

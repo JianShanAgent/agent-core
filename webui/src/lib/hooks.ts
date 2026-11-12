@@ -52,7 +52,7 @@ export function useStatus() {
 export function useRefreshConfig(): () => void {
   const client = useQueryClient();
   return useCallback(() => {
-    for (const key of ["status", "config", "models", "plugins", "overview", "system", "kb"]) {
+    for (const key of ["status", "config", "models", "plugins", "overview", "system", "kb", "wikis"]) {
       void client.invalidateQueries({ queryKey: [key] });
     }
   }, [client]);

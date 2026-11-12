@@ -1,6 +1,7 @@
 // 调后端接口。登录靠 Cookie（浏览器自己带）；改东西的请求要带一个自定义请求头（见 admin/auth.py）。
 
 import type {
+  CatalogInfo,
   ChatLogMessage,
   ChatSummary,
   ConfigFile,
@@ -30,6 +31,9 @@ import type {
   TraceDetail,
   TraceRow,
   UpdateInfo,
+  WikiInfo,
+  WikiKbState,
+  WikisInfo,
 } from "./types";
 
 export class ApiError extends Error {
@@ -156,6 +160,24 @@ export const api = {
   testModel: (profile: string) => post<ModelTestResult>("/api/models/test", { profile }),
   plugins: () => get<PluginsInfo>("/api/plugins"),
   savePlugins: (enabled: string[]) => put<SaveResult>("/api/plugins", { enabled }),
+
+  wikis: () => get<WikisInfo>("/api/wikis"),
+  wikiCatalog: (refresh = false) => get<CatalogInfo>("/api/wikis/catalog", { refresh }),
+  addWiki: (site: string, id: string, label: string) =>
+    post<{ added: WikiInfo; downloaded: string | null; status: Status }>("/api/wikis", {
+      site,
+      id,
+      label,
+    }),
+  removeWiki: (id: string) =>
+    del<{ removed: string; site_removed: boolean; status: Status }>(`/api/wikis/${seg(id)}`),
+  buildWikiKb: (id: string) =>
+    post<{ kb: WikiKbState; sync_alive: boolean }>(`/api/wikis/${seg(id)}/kb`),
+  cancelWikiKb: (id: string) => del<{ kb: WikiKbState }>(`/api/wikis/${seg(id)}/kb`),
+  updateSitePlugin: (site: string) =>
+    post<{ version: string; updated: boolean; restarting: boolean }>(
+      `/api/wikis/sites/${seg(site)}/update`,
+    ),
 
   kbSummary: () => get<KbSummary>("/api/kb/summary"),
   kbChunks: (query: {

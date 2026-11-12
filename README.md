@@ -39,9 +39,10 @@
 4. **每小时自动增量同步（`kbsync`）**：后台同步服务定时轮询 MediaWiki 的 `recentchanges` 接口，只重抓有变动的页面和受影响的数据集，增量算好向量热更新入库，无需停机；内置数据量暴跌与异常重算保护闸门。
 5. **开箱即用的 Web 管理后台**：包内已内置编译好的 React 管理面板（免装 Node.js），支持逐条查看问答检索与复核全链路、免连 QQ 直接在网页对话调试、在线热更新配置与插件开关；主仓库发了新版本，后台里点一下就更新并重启，起不来自动退回。
 6. **一个机器人挂多个 Wiki**：同一个题材有好几个 Wiki 时可以都挂上，各用各的站点插件。知识库各建各的、一起检索，`/查` 每个都查，回答和参考资料里标明出自哪个 Wiki。
-7. **灵活部署与插件扩展**：既支持 **Python / `uv` 原生直跑**（不需要 Docker），也支持 **`docker compose up -d` 一键启动**，还提供面向生产服务器的原子发布与故障自动回滚工具。用户自写的插件可直接放在实例仓库目录内随 Git 自动同步，也可发布为独立 Python 包。
+7. **做好了的站点一键添加**：灰机、BWiki 这些 Wiki 平台的接口核心自带；已经有人做好站点插件的站列在[站点目录](https://github.com/JianShanAgent/catalog)里，在管理后台按平台筛选、点一下就下载并挂上，不用改配置、不用重启，再点一下开始建知识库。
+8. **灵活部署与插件扩展**：既支持 **Python / `uv` 原生直跑**（不需要 Docker），也支持 **`docker compose up -d` 一键启动**，还提供面向生产服务器的原子发布与故障自动回滚工具。用户自写的插件可直接放在实例仓库目录内随 Git 自动同步，也可发布为独立 Python 包。
 
-目前线上生产实例服务于[灰机阴阳师 Wiki](https://yys.huijiwiki.com)（见 [`instance-yys`](https://github.com/JianShanAgent/instance-yys)、[`site-huiji`](https://github.com/JianShanAgent/site-huiji)、[`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys)），已稳定索引约 7,700 篇文档、1.4 万个知识切片与 3,000 张图片。
+目前线上生产实例服务于[灰机阴阳师 Wiki](https://yys.huijiwiki.com)（见 [`instance-yys`](https://github.com/JianShanAgent/instance-yys)、[`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys)），已稳定索引约 7,700 篇文档、1.4 万个知识切片与 3,000 张图片。
 
 <sub>JianShanAgent is an open-source QQ bot framework for MediaWiki sites. It combines deterministic command lookups, multi-step retrieval-augmented generation with an independent verification pass, reverse image search over wiki media, hourly incremental sync via `recentchanges`, and a prebuilt React admin console.</sub>
 
@@ -221,6 +222,8 @@ docker compose exec qqbot python -m jianshanagent.plugins.knowledge embed
 docker compose exec qqbot python -m jianshanagent.plugins.knowledge load
 ```
 
+也可以不敲命令：在管理后台的「Wiki」页里点那个 Wiki 的「建知识库」，`kbsync` 服务（Docker Compose 里已经带着）会在后台把这三步做完。
+
 首次全量导入完成后，后台的 `kbsync` 服务就会自动接手，每小时增量同步 Wiki 上的新改动。如果站点插件配置了图库选图规则，再跑 `images collect` → `images embed` → `images load` 即可开启以图搜图。
 
 ---
@@ -252,8 +255,8 @@ my-wiki-bot/
 
 #### 2. 写成独立的 Git 仓库 / Python 包（适合多人协作或多实例共用）
 
-如果你希望把插件开源分享给别人，或者像灰机平台插件那样给多个实例共用：
-- 用模板 **[`template-site-wiki`](https://github.com/JianShanAgent/template-site-wiki)**（单站插件）或 **[`template-site-platform`](https://github.com/JianShanAgent/template-site-platform)**（平台插件）新建独立仓库。
+如果你希望把插件开源分享给别人，或者给多个实例共用：
+- 用模板 **[`template-site-wiki`](https://github.com/JianShanAgent/template-site-wiki)** 新建独立仓库。站建在灰机或 BWiki 上时，在清单里写 `platform: huiji` / `platform: bwiki`，平台的接口核心带着，直接用。
 - 在实例仓库的 `pyproject.toml` 的 `dependencies` 里加上它的 Git 地址：
   ```toml
   dependencies = [
@@ -268,7 +271,7 @@ my-wiki-bot/
 - **90% 的基础定制只需写 YAML 配置**：在站点插件的 `config.yaml` 里写 `extend` 段，就能直接过滤特定 HTML class 模板噪声、定义查证问题分类、补充提示词术语解释、修改机器人人设，不用写一行 Python 代码。
 - **进阶定制再写 Python 代码**：在 `wiki.py` 里接入别名词典、结构化属性卡片与自定义命令（如 `/筛选`）；在 `knowledge.py` 里接入站外公告/剧情数据源、实体消歧标注与以图搜图选图逻辑。
 
-完整的清单格式与接口定义请查阅 [插件规范](docs/插件规范.md)，实战代码可直接参考 [`site-huiji`](https://github.com/JianShanAgent/site-huiji) 与 [`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys)。
+完整的清单格式与接口定义请查阅 [插件规范](docs/插件规范.md)，实战代码可直接参考 [`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys) 与 [`site-bwiki-yys`](https://github.com/JianShanAgent/site-bwiki-yys)。
 
 ---
 
@@ -278,6 +281,7 @@ my-wiki-bot/
 
 - **查证过程（Trace 追踪）**：查看每条问答走过的步骤耗时、检索命中的切片原文、每次大模型调用的完整输入输出与复核意见，直观定位回答不准的原因。
 - **网页对话**：不连 QQ 直接在浏览器里发文字或传图片测试问答，调提示词和清洗规则时非常方便。
+- **Wiki**：机器人挂着哪些 Wiki；从站点目录里按平台挑一个做好了的站，点一下就下载它的站点插件并挂上，再点一下建知识库。
 - **配置与插件热更新**：在网页表单里直接改业务配置或开关功能插件，保存立即生效（写错参数会自动回滚撤回，不会把进程改挂；修改项保存在 `data/config/`）。
 - **知识库与搜图测试**：查看文档切片总量、最近一次自动同步状态与保护闸门提示，支持直接在网页测试向量检索和以图搜图命中排序。
 - **运行统计与日志**：查看请求量与模型 Token 消耗统计、最近 5,000 条实时日志、用户会话记录与每日备份状态。
@@ -300,6 +304,7 @@ agent-core/
 │   ├── core/          # 配置分层加载、消息模型、插件发现与宿主、路由、LLM / Embedding 客户端、Trace 记录
 │   ├── gateway/       # QQ 官方机器人网关接入（基于 qqbot-agent-sdk）
 │   ├── plugins/       # 7 个内置功能插件：wiki_query、knowledge、research、chat、memory、chatlog、safety
+│   ├── platforms/     # 各个 Wiki 平台在 MediaWiki 之上多出来的东西：huiji（灰机）、bwiki（BWiki）
 │   ├── admin/         # 管理后台 HTTP API 与预编译前端静态资源（admin/static/）
 │   ├── migrations/    # PostgreSQL 表结构迁移 SQL（启动时自动按序执行）
 │   ├── defaults/      # 核心随包默认 YAML 配置

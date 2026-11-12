@@ -36,7 +36,7 @@ def one_wiki(
 ) -> dict[str, Any]:
     """``core.wiki`` 的内容：只挂一个 wiki，用 ``site`` 这个站点插件。
 
-    ``more``：这个 wiki 的别的项（``site_base``、``article_path``、``label``……）。
+    ``more``：这个 wiki 的别的项（``platform``、``site_base``、``article_path``、``label``……）。
     """
     return {"wikis": [{"id": wiki_id, "api_url": api_url, "site": site, **more}]}
 
@@ -44,7 +44,7 @@ def one_wiki(
 def write_site(
     directory: Path,
     *,
-    parent: str = "",
+    platform: str = "",
     capabilities: tuple[str, ...] = (),
     config: dict[str, Any] | None = None,
     manifest: dict[str, Any] | None = None,
@@ -54,21 +54,19 @@ def write_site(
 
     ``config``：它的默认配置（``config.yaml``）；``modules``：接扩展点的模块，名字 → 源码；
     ``manifest``：要改写或加进清单里的项（测不合规范的清单时用）。
-    下级插件放在上级目录的 ``sites/`` 里，id 以上级的 id 开头：
-    ``write_site(上级目录 / "sites" / "上级_子站", parent="上级")``。
+    ``platform``：它是哪个平台上的站，id 要以平台的 id 开头
+    （``write_site(root / "huiji_demo", platform="huiji")``）；不给就是自己架的 MediaWiki 站。
     """
     directory.mkdir(parents=True, exist_ok=True)
-    for package in (directory, directory.parent if directory.parent.name == "sites" else None):
-        if package is not None:
-            (package / "__init__.py").write_text("", encoding="utf-8")
+    (directory / "__init__.py").write_text("", encoding="utf-8")
     content: dict[str, Any] = {
         "id": directory.name,
         "kind": "site",
         "name": f"测试站点 {directory.name}",
         "capabilities": list(capabilities),
     }
-    if parent:
-        content["parent"] = parent
+    if platform:
+        content["platform"] = platform
     content |= manifest or {}
     (directory / "plugin.yaml").write_text(
         yaml.safe_dump(content, allow_unicode=True), encoding="utf-8"

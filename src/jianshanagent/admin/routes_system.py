@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -157,13 +156,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         logger.info("admin_reloaded")
         return reply({"status": admin.status()})
 
-    def restart_soon() -> None:
-        async def soon() -> None:
-            await asyncio.sleep(0.5)  # 先让这次请求的回应发出去
-            admin.runtime.request_stop(restart=True)
-
-        task = asyncio.get_running_loop().create_task(soon())
-        _restarting.add(task)
+    restart_soon = admin.restart_soon
 
     async def restart(_request: web.Request) -> web.Response:
         logger.warning("admin_restart_requested")
@@ -216,7 +209,6 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             }
         )
 
-    _restarting: set[asyncio.Task[None]] = set()
     return [
         web.get("/api/session", session),
         web.post("/api/login", login),

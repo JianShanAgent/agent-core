@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -172,6 +173,16 @@ class Admin:
         #: 上一次查到的备份情况（见 :meth:`refresh_backup`）和查的时间
         self._backup: dict[str, Any] | None = None
         self._backup_checked: float | None = None
+        self._restarting: set[asyncio.Task[None]] = set()
+
+    def restart_soon(self) -> None:
+        """过一小会儿重启机器人：先让这次请求的回应发出去。"""
+
+        async def soon() -> None:
+            await asyncio.sleep(0.5)
+            self.runtime.request_stop(restart=True)
+
+        self._restarting.add(asyncio.get_running_loop().create_task(soon()))
 
     @property
     def config(self) -> AppConfig:

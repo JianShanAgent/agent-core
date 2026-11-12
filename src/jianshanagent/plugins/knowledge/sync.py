@@ -39,7 +39,8 @@
 
 没人盯着，所以每一步都有闸门（``sync.limits``）——宁可停下来等人看，也不把库改坏：
 
-- 这台机器上没有这个 wiki 的知识库文件：不做。自动更新只做增量，不会自己从头全量取数。
+- 这台机器上没有这个 wiki 的知识库文件：不做。自动更新只做增量，不会自己从头全量取数——
+  除非有人在管理后台的「Wiki」页里点了「建知识库」（见下面的「从头建」）。
 - 一轮向 wiki 发的请求有上限。到了上限还没取的页面沿用旧内容，下一轮接着取。
 - wiki 出故障（连着几个请求都没成）：这一轮不再发请求，没取的页面同样沿用旧内容，下一轮再说。
 - 页面取不下来：缓存里有旧内容就用旧的（sources.py），不让这一页从库里消失；
@@ -48,6 +49,13 @@
 - 库里这个 wiki 的向量的指纹和现在配置的嵌入接口不是同一种：不导入（导进去会把库里的向量清掉）。
 
 被闸门拦下的事记在状态里（管理后台看得到），下一轮还会再试；确认拦得没道理就手动 ``--force`` 一次。
+
+从头建：新挂上的 wiki 这台机器上什么文件都没有。管理后台的「Wiki」页里点「建知识库」，会在它的
+知识库目录下放一个请求（``build.json``，:func:`request_build`）；``--loop`` 一分钟内看到它，
+给那个 wiki 做一轮不一样的（:func:`_build`）：不设请求数上限地全量取数、切片，站点插件管图库的
+连图片记录一起生成，然后照常算向量、导入——这一轮不过闸门（全是新的，闸门拦的正是这个）。
+做成了把请求删掉，以后就是普通的增量；中途断了请求留着，下一轮接着做（取过的页面在缓存里）。
+一个大的 wiki 要做很久，这期间别的 wiki 的自动更新排在它后面。
 """
 
 from __future__ import annotations
@@ -74,6 +82,7 @@ from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.db import Database
 from jianshanagent.core.embedding import EmbeddingProvider, EmbeddingSettings
 from jianshanagent.core.logging import get_logger
+from jianshanagent.core.manifest import clear_caches, downloaded_sites_dir, read_sites_state
 from jianshanagent.core.update import restart_needed
 from jianshanagent.core.wiki import load_wikis
 from jianshanagent.plugins.knowledge.changes import (
@@ -113,6 +122,7 @@ from jianshanagent.plugins.knowledge.pipeline import (
 )
 from jianshanagent.plugins.knowledge.report import write_outputs
 from jianshanagent.plugins.knowledge.settings import (
+    CACHE_DIRNAME,
     Settings,
     SyncSettings,
     is_primary,
@@ -133,6 +143,15 @@ logger = get_logger(__name__)
 STATE_FILE = "sync_state.json"
 LOCK_FILE = "sync.lock"
 HEARTBEAT_FILE = "sync_heartbeat"
+#: 「给这个 wiki 从头建知识库」的请求，放在它的知识库目录下（见本模块开头的「从头建」）
+BUILD_FILE = "build.json"
+#: ``--loop`` 两轮之间每隔多少秒看一眼有没有新的建库请求
+BUILD_POLL_SECONDS = 30.0
+#: 知识库的现状（:func:`kb_state`）
+KB_NONE = "none"  # 这台机器上没有它的文件
+KB_REQUESTED = "requested"  # 点了建知识库，自动更新还没接手
+KB_BUILDING = "building"  # 正在从头建（或者上一次没做完，等下一轮接着做）
+KB_READY = "ready"  # 有文件了，自动更新照常做增量
 #: 状态里留最近多少轮的记录（只记做了事或出了问题的轮次）
 ROUNDS_KEPT = 30
 #: ``--loop`` 每隔多少秒在心跳文件上点一下；容器的健康检查看它多久没动
@@ -153,6 +172,66 @@ RESULT_PROBLEM = "problem"  # 有步骤没做成（出错，或者被闸门拦�
 
 class Busy(RuntimeError):
     """另一轮自动更新还在跑。"""
+
+
+# ── 从头建的请求 ──────────────────────────────────────────────────────
+
+
+def read_build(wiki_dir: Path) -> dict[str, Any] | None:
+    """``wiki_dir``（一个 wiki 的知识库目录）下的建库请求；没有就是 None。"""
+    try:
+        data = json.loads((wiki_dir / BUILD_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_build(wiki_dir: Path, request: dict[str, Any]) -> None:
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+    path = wiki_dir / BUILD_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def request_build(wiki_dir: Path, *, now: float | None = None) -> None:
+    """请自动更新给这个 wiki 从头建知识库。已经请过了就不动（不把「正在建」改回「等着」）。"""
+    if read_build(wiki_dir) is None:
+        _write_build(wiki_dir, {"requested_at": now or time.time(), "started_at": 0.0})
+
+
+def cancel_build(wiki_dir: Path) -> bool:
+    """撤回建库请求。返回撤了没有；已经开始建的不撤（返回 False）。"""
+    request = read_build(wiki_dir)
+    if request is None or request.get("started_at"):
+        return False
+    (wiki_dir / BUILD_FILE).unlink(missing_ok=True)
+    return True
+
+
+def _has_files(wiki_dir: Path) -> bool:
+    """这台机器上有没有这个 wiki 的知识库文件（切片，和缓存里的页面清单）。"""
+    have_listing = DiskCache(wiki_dir / CACHE_DIRNAME).get_named("listing.json") is not None
+    return have_listing and (wiki_dir / CHUNKS_FILE).exists()
+
+
+def kb_state(wiki_dir: Path) -> dict[str, Any]:
+    """一个 wiki 的知识库在这台机器上的现状，给管理后台的「Wiki」页看的。只看文件，不发请求。"""
+    request = read_build(wiki_dir)
+    if _has_files(wiki_dir):
+        state = KB_READY
+    elif request is None:
+        state = KB_NONE
+    else:
+        state = KB_BUILDING if request.get("started_at") else KB_REQUESTED
+    saved = load_state(wiki_dir / CACHE_DIRNAME)
+    return {
+        "state": state,
+        "requested_at": _stamp(float((request or {}).get("requested_at") or 0)),
+        "started_at": _stamp(float((request or {}).get("started_at") or 0)),
+        # 上一轮没做成的原因（从头建到一半断了的，原因在这里）
+        "problem": (saved.kb_problem or saved.check_problem) if state != KB_NONE else "",
+    }
 
 
 # ── 状态 ──────────────────────────────────────────────────────────────
@@ -737,20 +816,62 @@ def _first_run_since(cache: DiskCache, cfg: SyncSettings, now: float) -> str:
     return _wiki_stamp(max(fetched_at, now - cfg.lookback_days * 86400))
 
 
-def _ready(env: SyncEnv) -> str:
-    """这台机器能不能做自动更新：不能的话返回原因。不发请求。"""
+def _ready(env: SyncEnv, *, building: bool = False) -> str:
+    """这台机器能不能做自动更新：不能的话返回原因。不发请求。``building``：这一轮是从头建。"""
     settings = env.settings
     if env.provider is None:
         return "没有配置嵌入接口（core.embedding.yaml 的 enabled 是 false），新内容没法算向量"
-    have_listing = DiskCache(settings.cache_dir).get_named("listing.json") is not None
-    if not have_listing or not (settings.output_dir / CHUNKS_FILE).exists():
+    if not building and not _has_files(settings.output_dir):
         return (
             f"这台机器上还没有知识库的文件（{settings.output_dir} 下的 chunks.jsonl "
             "和缓存里的页面清单）。自动更新只做增量，不会自己从头全量取数："
-            "先把开发机的知识库目录拷过来（deploy/scripts/release.sh kb-seed），"
+            "在管理后台的「Wiki」页里点「建知识库」，"
+            "或者把开发机的知识库目录拷过来（deploy/scripts/release.sh kb-seed），"
             "或者手动跑一次 run、embed、load"
         )
     return ""
+
+
+async def _build(
+    env: SyncEnv, fetcher: WikiFetcher, state: SyncState, request: dict[str, Any], now: float
+) -> dict[str, Any]:
+    """从头建：全量取数、切片；站点插件管图库的，图片记录也生成。
+
+    向量和导入由这一轮后面照常的步骤做。做成了把请求删掉；中途断了（抛出去）请求留着。
+    """
+    settings = env.settings
+    out = settings.output_dir
+    if not request.get("started_at"):
+        _write_build(out, {**request, "started_at": now})
+    logger.warning("kb_build_started", wiki=settings.wiki.id)
+    result = await run_pipeline(settings, JsonlSink(out), fetcher=fetcher)
+    write_outputs(out, result, settings)
+    # 个别页面没取下来不算没建成：先不在库里，下一轮接着取（和平常一样）
+    failed = sum(1 for r in result.records if r.get("status") == STATUS_FETCH_FAILED)
+    built: dict[str, Any] = {
+        "documents": sum(1 for r in result.records if r.get("status") == STATUS_OK),
+        "chunks": len(result.chunks),
+        "failed": failed,
+    }
+    state.kb_pending = bool(result.stats["run"]["stale"]) or failed > 0
+    state.embed_pending = True
+    state.full_at = now  # 刚全部取过一遍：不用马上再全部重取
+    if env.images is not None and settings.sites.has_images:
+        source = WikiSource(fetcher, DiskCache(settings.cache_dir), settings)
+        catalog = await collect_catalog(source, settings)
+        if catalog is not None and not catalog.problem:
+            write_images(out / IMAGES_FILE, catalog.images)
+            (out / IMAGES_STATS_FILE).write_text(
+                json.dumps(catalog.stats, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            state.images_embed_pending, state.images_at = True, now
+            built["images"] = len(catalog.images)
+        elif catalog is not None:
+            state.images_problem = f"{catalog.problem}，图库没有建"
+    (out / BUILD_FILE).unlink(missing_ok=True)
+    save_state(settings.cache_dir, state)
+    logger.warning("kb_build_collected", wiki=settings.wiki.id, **built)
+    return built
 
 
 async def sync_once(
@@ -802,18 +923,34 @@ async def _sync_once(env: SyncEnv, *, force: bool, full: bool, plan_only: bool) 
         log("kb_sync_round", **{k: v for k, v in record.items() if k != "at"})
         return record
 
-    state.check_problem = _ready(env)
+    # 有人点了「建知识库」、这台机器上又确实没有它的文件：这一轮从头建
+    request = read_build(out)
+    building = request is not None and not _has_files(out)
+    if request is not None and not building and not plan_only:
+        (out / BUILD_FILE).unlink(missing_ok=True)  # 文件已经有了（拷过来的）：用不着建
+    state.check_problem = _ready(env, building=building)
     if state.check_problem:
         return await finish()
+    if building:
+        force = True  # 向量、图片全是新的，闸门拦的正是这个
 
     fetcher = WikiFetcher(
         settings.wiki,
         settings.fetch,
         transport=env.wiki_transport,
-        budget=cfg.max_requests,
+        budget=None if building else cfg.max_requests,
         give_up_after=_GIVE_UP_AFTER,
     )
     try:
+        if building and request is not None:
+            if plan_only:
+                record["plan"] = ["从头建知识库：全量取数、切片、算向量、导入"]
+                return await finish()
+            try:
+                record["build"] = await _build(env, fetcher, state, request, now)
+            except (FetchError, Held, OSError) as exc:
+                state.kb_problem = f"从头建知识库没做完，下一轮接着做：{exc}"[:500]
+                return await finish()
         # 1. wiki 改了什么
         try:
             feed = await read_changes(
@@ -883,6 +1020,7 @@ async def _sync_once(env: SyncEnv, *, force: bool, full: bool, plan_only: bool) 
             for part in (kb, images)
             for key in ("added", "removed", "upserted", "deleted", "embedded")
         )
+        changed = changed or "build" in record
         if changed:
             record["result"] = RESULT_UPDATED
         elif kb or images:
@@ -1044,8 +1182,9 @@ async def run_once(
 async def run_loop(config_dir: str | None = None) -> int:
     """一直跑到收到停止信号，轮流给挂着的每个 wiki 做。
 
-    每一轮重新读配置，所以管理后台里改的配置下一轮就生效。各个 wiki 多久做一轮、开没开
-    读的是它自己那一份配置的 ``sync`` 段。
+    每一轮重新读配置、重新找插件，所以管理后台里改的配置、加的 wiki、下载的站点插件下一轮就生效。
+    各个 wiki 多久做一轮、开没开读的是它自己那一份配置的 ``sync`` 段。两轮之间每隔一会儿看一眼
+    有没有新的建库请求（见本模块开头的「从头建」），有就不等了。
     """
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1066,12 +1205,33 @@ async def run_loop(config_dir: str | None = None) -> int:
     #: 各个 wiki 上一轮是什么时候开始的
     last: dict[str, float] = {}
     logger.info("kb_sync_loop_started", version=running_version())
+    root: Path | None = None
+    #: 这个进程第一次看到各个下载的站点插件时它们的版本；后来变了就是在管理后台里更新过
+    site_versions: dict[str, str] = {}
+    site_updated = False
+
+    def build_waiting() -> bool:
+        """有没有还没接手的建库请求。"""
+        if root is None or not root.is_dir():
+            return False
+        return any(
+            not (read_build(child) or {"started_at": 1}).get("started_at")
+            for child in root.iterdir()
+            if child.is_dir()
+        )
+
     try:
         while not stop.is_set():
             round_started = time.monotonic()
             try:
+                clear_caches()  # 管理后台里刚下载的站点插件：重新找一遍才看得到
                 config = load_config(config_dir)
-                heartbeat = kb_root(config) / HEARTBEAT_FILE
+                root = kb_root(config)
+                heartbeat = root / HEARTBEAT_FILE
+                sites_dir = downloaded_sites_dir(config.root.parent)
+                for site_id, item in (read_sites_state(sites_dir) if sites_dir else {}).items():
+                    version = str(item.get("version") or "")
+                    site_updated |= site_versions.setdefault(site_id, version) != version
                 due: list[str] = []
                 intervals: list[float] = []
                 for entry in config.wikis:
@@ -1086,7 +1246,12 @@ async def run_loop(config_dir: str | None = None) -> int:
                     intervals.append(cfg.interval_seconds)
                     # 留一秒的余量：这一轮和上一轮的间隔本来就是按它算的，差几毫秒不该再等一整轮
                     since = round_started - last.get(entry.id, float("-inf"))
-                    if since >= cfg.interval_seconds - 1:
+                    waiting = read_build(root / entry.id)
+                    fresh = waiting is not None and not waiting.get("started_at")
+                    if fresh and waiting is not None:
+                        # 记成「接手了」：这一轮没做成的话按平常的间隔再试，不是一看到请求就再来一轮
+                        _write_build(root / entry.id, {**waiting, "started_at": time.time()})
+                    if since >= cfg.interval_seconds - 1 or fresh:
                         due.append(entry.id)
                 interval = min(intervals, default=SyncSettings().interval_seconds)
                 last |= dict.fromkeys(due, round_started)
@@ -1094,11 +1259,16 @@ async def run_loop(config_dir: str | None = None) -> int:
                     await run_wikis(config, due, keep_going=True, forget_others=True)
             except Exception:  # 配置写坏了、磁盘满了……：记下来，下一轮再试，不退出
                 logger.exception("kb_sync_round_crashed")
-            wait = max(60.0, interval - (time.monotonic() - round_started))
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), wait)
-            if not stop.is_set() and restart_needed():
-                # 机器人那边换了核心的版本（管理后台里点的更新）：这个进程也换过去
+            until = time.monotonic() + max(60.0, interval - (time.monotonic() - round_started))
+            while not stop.is_set() and time.monotonic() < until:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        stop.wait(), min(BUILD_POLL_SECONDS, max(0.1, until - time.monotonic()))
+                    )
+                if build_waiting():
+                    break
+            if not stop.is_set() and (restart_needed() or site_updated):
+                # 机器人那边换了核心或者某个站点插件的版本（管理后台里点的更新）：这个进程也换过去
                 logger.warning("kb_sync_restarting_for_update")
                 beating.cancel()
                 os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])

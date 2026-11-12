@@ -33,9 +33,8 @@ T = TypeVar("T")
 
 class WikiQueryHub:
     def __init__(self, clients: Sequence[WikiQueryClient]):
-        if not clients:
-            raise ValueError("至少要有一个 wiki 的查询客户端")
-        #: 各个 wiki 的客户端，按 ``core.wiki.yaml`` 里的顺序（排第一的是主 wiki）
+        #: 各个 wiki 的客户端，按 ``core.wiki.yaml`` 里的顺序（排第一的是主 wiki）。
+        #: 一个都没挂时是空的：什么都查不到
         self.clients: tuple[WikiQueryClient, ...] = tuple(clients)
 
     async def aclose(self) -> None:

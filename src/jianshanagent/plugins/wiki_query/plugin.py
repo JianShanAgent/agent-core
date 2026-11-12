@@ -82,7 +82,13 @@ class WikiQueryPlugin:
     def register(self, ctx: PluginContext) -> None:
         cfg = ctx.plugin_config()
         # 挂着哪些 wiki 在 core.wiki.yaml；请求头名在那里，密钥在 secrets.yaml（不入库）
-        hub = WikiQueryHub([build_client(ctx, wiki) for wiki in load_wikis(ctx.config)])
+        # 一个都没挂也能起来（新的实例）：/查 查不到东西，在管理后台的「Wiki」页里添加第一个
+        wikis = load_wikis(ctx.config) if ctx.config.wikis else ()
+        if not wikis:
+            logger.warning(
+                "wiki_query_no_wiki", hint="在管理后台的「Wiki」页里添加，或写进 core.wiki.yaml"
+            )
+        hub = WikiQueryHub([build_client(ctx, wiki) for wiki in wikis])
         ctx.register_service("wiki_query", hub)
 
         fmt = cfg.get("format") or {}

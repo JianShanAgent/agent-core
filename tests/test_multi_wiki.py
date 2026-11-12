@@ -91,17 +91,14 @@ def write_deployment(tmp_path: Path, wiki: dict[str, Any]) -> Path:
 
 
 def two_site_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """两个平台上各有同一个题材的站：``huiji_game`` 和 ``bwiki_game``，各补各的配置。"""
-    huiji = write_site(
-        site_packages(tmp_path, monkeypatch, "jianshanagent_site_huiji"),
-        manifest={"id": "huiji"},
-        capabilities=("extend",),
-        config={"extend": {"plugin.knowledge": {"clean": {"remove_classes": ["huiji-nav"]}}}},
-    )
+    """两个平台上各有同一个题材的站：``huiji_game`` 和 ``bwiki_game``。
+
+    平台的那一份是核心带着的：灰机约定的清洗规则，BWiki 的取数速率和它的清洗规则。
+    """
     write_site(
         site_packages(tmp_path, monkeypatch, "jianshanagent_site_huiji_game"),
         manifest={"id": "huiji_game"},
-        parent="huiji",
+        platform="huiji",
         capabilities=("extend",),
         config={
             "extend": {
@@ -111,30 +108,13 @@ def two_site_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         },
     )
     write_site(
-        site_packages(tmp_path, monkeypatch, "jianshanagent_site_bwiki"),
-        manifest={"id": "bwiki"},
-        capabilities=("extend",),
-        config={
-            "extend": {
-                "plugin.knowledge": {
-                    "clean": {"remove_classes": ["bwiki-ad"]},
-                    "fetch": {"requests_per_second": 0.5},
-                }
-            }
-        },
-    )
-    write_site(
         site_packages(tmp_path, monkeypatch, "jianshanagent_site_bwiki_game"),
         manifest={"id": "bwiki_game"},
-        parent="bwiki",
+        platform="bwiki",
     )
-    assert huiji.name == "jianshanagent_site_huiji"
     register_plugins(
         monkeypatch,
-        sites={
-            name: f"jianshanagent_site_{name}"
-            for name in ("huiji", "huiji_game", "bwiki", "bwiki_game")
-        },
+        sites={name: f"jianshanagent_site_{name}" for name in ("huiji_game", "bwiki_game")},
     )
 
 
@@ -153,8 +133,9 @@ def test_each_wiki_reads_the_shared_config_plus_its_own_site_plugins(
     config = load_config(config_dir, overrides)
 
     assert [entry.id for entry in config.wikis] == ["huiji", "bwiki"]
-    # 用到的站点插件：两个 wiki 各自的那一串，上级在前
-    assert config.sites == ["huiji", "huiji_game", "bwiki", "bwiki_game"]
+    # 两个 wiki 各在各的平台上、各用各的站点插件：先加载平台的那一份，再加载站点插件
+    assert config.platforms == ["huiji", "bwiki"]
+    assert config.sites == ["huiji_game", "bwiki_game"]
     assert [m.id for m in config.wiki("bwiki").chain] == ["bwiki", "bwiki_game"]
     with pytest.raises(ValueError, match="没有叫「nope」的 wiki（挂着的有：huiji、bwiki）"):
         config.for_wiki("nope")
@@ -165,10 +146,10 @@ def test_each_wiki_reads_the_shared_config_plus_its_own_site_plugins(
     assert huiji.plugin("wiki_query")["wiki"]["search_ranking"] == "popular"
     assert bwiki.plugin("wiki_query")["wiki"].get("search_ranking") != "popular"
     # 各补各的，互不串：灰机的清洗规则不会用到 BWiki 的页面上
-    assert "huiji-nav" in huiji.plugin("knowledge")["clean"]["remove_classes"]
-    assert "bwiki-ad" not in huiji.plugin("knowledge")["clean"]["remove_classes"]
-    assert "bwiki-ad" in bwiki.plugin("knowledge")["clean"]["remove_classes"]
-    assert "huiji-nav" not in bwiki.plugin("knowledge")["clean"]["remove_classes"]
+    assert "kb-ignore" in huiji.plugin("knowledge")["clean"]["remove_classes"]
+    assert "navigation-not-searchable" not in huiji.plugin("knowledge")["clean"]["remove_classes"]
+    assert "navigation-not-searchable" in bwiki.plugin("knowledge")["clean"]["remove_classes"]
+    assert "kb-ignore" not in bwiki.plugin("knowledge")["clean"]["remove_classes"]
     assert bwiki.plugin("knowledge")["fetch"]["requests_per_second"] == 0.5
     assert huiji.plugin("knowledge")["sync"]["interval_seconds"] == 600
     # 和 wiki 无关的配置只有一份
@@ -191,7 +172,7 @@ def test_each_wiki_reads_the_shared_config_plus_its_own_site_plugins(
         "clean": {
             **edited["clean"],
             "remove_classes": [
-                *(c for c in edited["clean"]["remove_classes"] if c != "huiji-nav"),
+                *(c for c in edited["clean"]["remove_classes"] if c != "kb-ignore"),
                 "added-on-the-web",
             ],
         },
@@ -201,8 +182,9 @@ def test_each_wiki_reads_the_shared_config_plus_its_own_site_plugins(
     for view in (config, config.for_wiki("huiji"), config.for_wiki("bwiki")):
         assert view.plugin("knowledge")["retrieval"]["top_k"] == 11
         assert "added-on-the-web" in view.plugin("knowledge")["clean"]["remove_classes"]
-    assert "huiji-nav" not in config.plugin("knowledge")["clean"]["remove_classes"]
-    assert "bwiki-ad" in config.for_wiki("bwiki").plugin("knowledge")["clean"]["remove_classes"]
+    assert "kb-ignore" not in config.plugin("knowledge")["clean"]["remove_classes"]
+    bwiki_clean = config.for_wiki("bwiki").plugin("knowledge")["clean"]
+    assert "navigation-not-searchable" in bwiki_clean["remove_classes"]
     assert config.for_wiki("bwiki").plugin("knowledge")["fetch"]["requests_per_second"] == 0.5
 
 

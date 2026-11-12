@@ -1,10 +1,11 @@
-"""查询这一摊的站点插件接口：这个站有哪几类自己的条目、别名怎么查、另有什么命令和工具。
+"""查询这一摊开给平台和站点插件的接口：这个站有哪几类自己的条目、别名怎么查、另有什么命令和工具。
 
 通用的查询只懂 MediaWiki 的页面（按标题找、全文搜索、取摘要）。一个站常常另有结构化的数据——
 阴阳师 wiki 的式神、御魂存在灰机的 Data 命名空间里，``/查 山风`` 要的是稀有度、技能，不是页面摘要。
 这类东西由站点插件接进来（扩展点 ``wiki``）：清单的 ``capabilities`` 里写 ``wiki``，
 包里的 ``wiki`` 模块有 ``create(setup)``，返回一个 :class:`WikiProvider`
-（规范见 ``core/manifest.py``、``core/sites.py``）。
+（规范见 ``core/manifest.py``、``core/sites.py``）。核心带着的平台（``jianshanagent/platforms/``）
+也是这么接的：它把平台的接口备好（灰机的 Data 查询、BWiki 的语义查询），给那个平台上的站点插件用。
 
 每个方法都有什么都不做的默认实现，用到哪个覆盖哪个。发请求、放缓存用
 :class:`~jianshanagent.plugins.wiki_query.client.WikiQueryClient` 的 ``get_json`` / ``api`` /
@@ -42,9 +43,9 @@ class ProviderContext:
 
 
 class WikiProvider:
-    """站点插件的基类。"""
+    """平台、站点插件接查询的基类。"""
 
-    #: 插件的 id，和清单里的一样
+    #: 平台、插件的 id，和清单里的一样
     id: str = ""
     #: 这个插件认得的条目种类：代号 → 给人看的名字（``{"character": "式神"}``）。
     #: 代号会出现在搜索结果的 ``kind`` 里，取内容时凭它找回这个插件

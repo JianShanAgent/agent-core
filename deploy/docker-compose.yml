@@ -37,6 +37,8 @@ services:
       JIANSHANAGENT_RELEASE: ${JIANSHANAGENT_RELEASE:-dev}
       # 知识库的文件（切片、向量、取数缓存）在数据盘上的位置；在这个容器里手动跑 load 之类的命令时用得上
       JIANSHANAGENT_KB_DIR: /data/kb
+      # 在管理后台的「Wiki」页里下载的站点插件放在这里（数据盘上，换发布还在）
+      JIANSHANAGENT_SITES_DIR: /data/sites
       JIANSHANAGENT_POSTGRES_DSN: postgresql://jianshanagent:${POSTGRES_PASSWORD:?请在 .env 里设置 POSTGRES_PASSWORD}@postgres:5432/jianshanagent
       JIANSHANAGENT_REDIS_URL: redis://redis:6379/0
       TZ: Asia/Shanghai
@@ -73,8 +75,9 @@ services:
     # 管理后台里能改、能看状态）。和机器人是同一个镜像，跑的是另一个入口。
     # 单独一个容器：重算切片要占几秒 CPU、四百多兆内存，放在机器人进程里会卡住收发消息；它出了问题也不影响机器人。
     # 挂了几个 wiki 就轮流更新几个，各自的文件在 /data/kb/<wiki 的 id>/。
-    # 数据盘上没有某个 wiki 的知识库文件时它不会自己从头全量取数，只在日志和管理后台里说明，
-    # 等 deploy/scripts/release.sh kb-seed 把开发机的文件拷过来。
+    # 数据盘上没有某个 wiki 的知识库文件时它不会自己从头全量取数，只在日志和管理后台里说明：
+    # 要么在管理后台的「Wiki」页里点「建知识库」让它从头建，要么用 deploy/scripts/release.sh kb-seed
+    # 把开发机上做好的文件拷过来。
     image: jianshanagent-qqbot:${JIANSHANAGENT_RELEASE:-dev}
     restart: unless-stopped
     stop_grace_period: 30s
@@ -85,6 +88,8 @@ services:
       # 和机器人读同一份覆写：管理后台里改了知识库的配置，下一轮就按新的来
       JIANSHANAGENT_CONFIG_OVERRIDES_DIR: /data/config
       JIANSHANAGENT_KB_DIR: /data/kb
+      # 和机器人看同一个目录：后台下载的站点插件，它的 wiki 也要更新
+      JIANSHANAGENT_SITES_DIR: /data/sites
       JIANSHANAGENT_LOG_JSON: "1"
       # 和机器人一样带着发布号：按发布流程部署的，用哪个版本由发布决定，不用后台装的更新包
       JIANSHANAGENT_RELEASE: ${JIANSHANAGENT_RELEASE:-dev}

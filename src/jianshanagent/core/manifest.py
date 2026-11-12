@@ -22,22 +22,29 @@
 配置叫 ``plugin.<id>``。功能插件可以开出「扩展点」（清单里的 ``extension_points``），
 让站点插件往里接东西。
 
-**站点插件**（``kind: site``）——某个 wiki 平台、某个站特有的东西。通用的代码只懂 MediaWiki。
-站点插件是一棵树：平台在上（``huiji`` = 灰机），具体的站在它下面（``huiji_yys`` = 灰机上的
-阴阳师 wiki），清单里用 ``parent`` 写明上级。站的 id 以上级的 id 开头（``<上级>_<站>``）：
-同一个题材在两个平台上各有一个站时（``huiji_yys``、``bwiki_yys``），它们能装在一起、挂在同一个
-部署上。核心不带任何站点插件，每个都是独立的包，登记到 ``jianshanagent.sites`` 这个
-entry points 组::
+**站点插件**（``kind: site``）——某一个站特有的东西。通用的代码只懂 MediaWiki；各个 wiki 平台
+在 MediaWiki 之上多出来的东西是核心自带的（见下面的「平台」），一个具体的站的东西才由站点插件
+带进来：``huiji_yys`` = 灰机上的阴阳师 wiki。清单里用 ``platform`` 写明它是哪个平台上的站，
+id 以平台的 id 开头（``<平台>_<站>``）：同一个题材在两个平台上各有一个站时
+（``huiji_yys``、``bwiki_yys``），它们能装在一起、挂在同一个部署上。自己架的 MediaWiki 站
+不在哪个平台上，不写 ``platform``（就是 ``mediawiki``），id 直接用站名。
 
-    jianshanagent_site_huiji/          平台（仓库 site-huiji）
-      plugin.yaml  config.yaml  knowledge.py  wiki.py
-    jianshanagent_site_huiji_yys/      这个平台上的一个站（仓库 site-huiji-yys）
-      plugin.yaml（parent: huiji）  config.yaml  knowledge/  wiki.py
+核心不带任何站点插件，每个都是独立的包（``jianshanagent_site_<id>``）。它们有三个来处：
+
+- 装在 Python 环境里、登记到 ``jianshanagent.sites`` 这个 entry points 组的；
+- 在管理后台里从站点目录下载的（见 ``core/catalog.py``），放在数据目录的 ``sites/`` 下。
+  环境里已经装着同一个 id 的，用环境里的；
+- 实例目录下的 ``sites/<id>/``：自己写的，免打包直接加载。
+
+::
+
+    jianshanagent_site_huiji_yys/      灰机上的一个站（仓库 site-huiji-yys）
+      plugin.yaml（platform: huiji）  config.yaml  knowledge/  wiki.py
 
 一个部署挂哪几个 wiki 写在 ``core.wiki.yaml`` 的 ``wikis`` 里，每个 wiki 用哪个站点插件写在它的
-``site`` 里：只写最末一级的 id（``site: huiji_yys``），上级顺着清单自动带出来，从上到下依次加载；
-不写就是纯 MediaWiki。没登记的包也能用：``site`` 写它的包路径（``mypkg.mysite``）。
-一个包也可以把下级放在自己的 ``sites/`` 目录里一起带上。配置叫 ``site.<id>``。
+``site`` 里（``site: huiji_yys``），是哪个平台跟着站点插件走。没有站点插件的 wiki 写
+``platform``（``platform: huiji``），只用平台的那一份；都不写就是纯 MediaWiki。
+没登记的包也能用：``site`` 写它的包路径（``mypkg.mysite``）。配置叫 ``site.<id>``。
 
 站点插件的能力（清单里的 ``capabilities``）只有这几种，写了哪种就得有哪种：
 
@@ -48,6 +55,17 @@ entry points 组::
   （配置名 → 要并进去的内容），读配置时就并进去了：名单合在一起，单个值以站点插件给的为准
   （见 ``core/config.py``）。
   这个站的清洗规则、提示词里的说法、人设都走这里。
+
+**平台**——一个 wiki 平台在 MediaWiki 之上多出来的东西：灰机的 Data 命名空间，
+BWiki 的语义查询和取数的速率。平台不是插件，是核心自带的，在 ``jianshanagent/platforms/<id>/``::
+
+    jianshanagent/platforms/huiji/
+      platform.yaml  config.yaml  knowledge.py  wiki.py
+
+``platform.yaml`` 里有 ``id``、``name``、``description``、``capabilities``，能力和站点插件的是
+同一套、接法也一样；配置叫 ``platform.<id>``。挂着的 wiki 先加载它的平台，再加载它的站点插件，
+站点插件要用平台的东西（阴阳师要用灰机的 Data 接口）：``setup.platform(平台的类)``。
+现在有 ``huiji``、``bwiki``，和什么都不多带的 ``mediawiki``。兼容一个新平台是改核心的事。
 
 **部署插件**（``kind: deploy``）——和机器人一起部署、但机器人离了它照样跑的服务。现在有 ``logs``
 （运行日志：Loki + Alloy + Grafana）。它不在 Python 包里，在仓库的 ``deploy/plugins/<id>/``::
@@ -71,7 +89,7 @@ entry points 组::
 命名（各层的仓库、发行包、Python 包、id 怎么取，见 ``docs/插件规范.md`` 的表）::
 
     功能插件   仓库 plugin-<id>            包 jianshanagent_plugin_<id>
-    站点插件   仓库 site-<平台>[-<站>]      包 jianshanagent_site_<id>           id 是 <平台>[_<站>]
+    站点插件   仓库 site-<平台>-<站>        包 jianshanagent_site_<id>           id 是 <平台>_<站>
     部署插件   目录 deploy/plugins/<id>/
 
 清单的格式（不认识的键会报错，免得写错了键名却以为生效了）::
@@ -81,7 +99,7 @@ entry points 组::
     name: 阴阳师 wiki           # 给人看的名字
     description: …             # 一两句话说明它管什么
     # 只有站点插件有：
-    parent: huiji              # 上级；最上面一级不写
+    platform: huiji            # 它是哪个平台上的站；自己架的 MediaWiki 站不写
     capabilities: [wiki, knowledge, extend]
     # 只有功能插件有：
     after: [knowledge]         # 这些插件也启用时，要排在它们后面
@@ -96,6 +114,8 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.util
+import json
+import os
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
@@ -105,29 +125,48 @@ from typing import Any
 import yaml
 
 MANIFEST_FILE = "plugin.yaml"
+#: 平台的清单（平台是核心自带的，不是插件）
+PLATFORM_FILE = "platform.yaml"
 CONFIG_FILE = "config.yaml"
 EXTRA_CONFIGS_DIR = "configs"
 KIND_FEATURE = "feature"
 KIND_SITE = "site"
 KIND_DEPLOY = "deploy"
+KIND_PLATFORM = "platform"
 #: 部署插件的 Compose 片段、上线前的准备脚本
 COMPOSE_FILE = "compose.yaml"
 INIT_FILE = "init.sh"
 FEATURES_PACKAGE = "jianshanagent.plugins"
+PLATFORMS_PACKAGE = "jianshanagent.platforms"
+#: 不在哪个平台上的 MediaWiki 站算在这个平台上：它什么都不多带
+DEFAULT_PLATFORM = "mediawiki"
 #: 别的发行包登记插件用的 entry points 组：名字 = 插件 id，值 = 插件的包路径
 ENTRY_POINTS = {KIND_FEATURE: "jianshanagent.plugins", KIND_SITE: "jianshanagent.sites"}
-#: 站点插件的下级放在它目录里的这个子目录下
-CHILDREN_DIR = "sites"
+#: 实例目录下放自己写的站点插件的子目录
+LOCAL_SITES_DIR = "sites"
+#: 在管理后台里下载的站点插件放在哪（不设就是实例目录的 data/sites）
+SITES_DIR_ENV = "JIANSHANAGENT_SITES_DIR"
+#: 那个目录里记着「装了哪些、各是哪个版本」的文件，和它的格式号
+SITES_STATE_FILE = "state.json"
+SITES_STATE_FORMAT = 1
 #: 站点插件的能力里不是扩展点的那一种：对通用配置的补充
 CAPABILITY_EXTEND = "extend"
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 _KEYS = {
     KIND_FEATURE: {"id", "kind", "name", "description", "after", "extension_points"},
-    KIND_SITE: {"id", "kind", "name", "description", "parent", "capabilities"},
+    KIND_SITE: {"id", "kind", "name", "description", "platform", "capabilities"},
     KIND_DEPLOY: {"id", "kind", "name", "description", "services"},
+    KIND_PLATFORM: {"id", "name", "description", "capabilities"},
 }
-_CONFIG_PREFIX = {KIND_FEATURE: "plugin.", KIND_SITE: "site."}
+_CONFIG_PREFIX = {KIND_FEATURE: "plugin.", KIND_SITE: "site.", KIND_PLATFORM: "platform."}
+_MANIFEST_FILES = {KIND_PLATFORM: PLATFORM_FILE}
+_WHAT = {
+    KIND_FEATURE: "功能插件",
+    KIND_SITE: "站点插件",
+    KIND_DEPLOY: "部署插件",
+    KIND_PLATFORM: "平台",
+}
 
 
 class PluginError(ValueError):
@@ -146,9 +185,9 @@ class Manifest:
     path: Path
     #: 插件的包路径（``jianshanagent_site_huiji_yys``）；部署插件没有
     package: str
-    #: 站点插件的上级（id，或者别人写的插件的包路径）；最上面一级是空的
-    parent: str = ""
-    #: 站点插件的能力
+    #: 站点插件是哪个平台上的站（平台的 id）
+    platform: str = ""
+    #: 站点插件、平台的能力
     capabilities: tuple[str, ...] = ()
     #: 功能插件：这些插件也启用时，要排在它们后面
     after: tuple[str, ...] = ()
@@ -159,13 +198,18 @@ class Manifest:
 
     @property
     def config_name(self) -> str:
-        """这个插件的配置叫什么：``plugin.chat`` / ``site.huiji_yys``。
+        """这个插件的配置叫什么：``plugin.chat`` / ``site.huiji_yys``；平台的叫 ``platform.huiji``。
 
         部署插件没有配置文件（它的参数是 Compose 变量）。
         """
         if self.kind not in _CONFIG_PREFIX:
             raise PluginError(f"{self.kind} 插件「{self.id}」没有配置文件，参数写在部署的 .env 里")
         return f"{_CONFIG_PREFIX[self.kind]}{self.id}"
+
+    @property
+    def what(self) -> str:
+        """报错、提示里怎么称呼它：「站点插件「huiji_yys」」/「平台「huiji」」。"""
+        return f"{_WHAT[self.kind]}「{self.id}」"
 
     @property
     def compose_path(self) -> Path:
@@ -195,17 +239,23 @@ def read_manifest(directory: Path, package: str, kind: str, plugin_id: str = "")
 
     ``plugin_id``：这个插件是按什么名字登记的（entry points 里的名字）；不给就是目录名。
     """
-    where = directory / MANIFEST_FILE
+    file = _MANIFEST_FILES.get(kind, MANIFEST_FILE)
+    where = directory / file
     try:
         raw = yaml.safe_load(where.read_text(encoding="utf-8"))
     except OSError as exc:
-        raise PluginError(f"{directory} 里没有插件清单（{MANIFEST_FILE}）") from exc
+        raise PluginError(f"{directory} 里没有清单（{file}）") from exc
     except yaml.YAMLError as exc:
         raise PluginError(f"{where} 不是合法的 YAML：{exc}") from exc
     if not isinstance(raw, dict):
         raise PluginError(f"{where} 要写成键值结构")
-    if raw.get("kind") != kind:
+    if kind != KIND_PLATFORM and raw.get("kind") != kind:
         raise PluginError(f"{where} 的 kind 应该是 {kind}，现在是「{raw.get('kind')}」")
+    if kind == KIND_SITE and "parent" in raw:
+        raise PluginError(
+            f"{where} 的 parent 不用了：平台是核心自带的，站点插件只有一层。"
+            f"改成 platform: {raw.get('parent')}（它是哪个平台上的站）"
+        )
     unknown = sorted(set(raw) - _KEYS[kind])
     if unknown:
         raise PluginError(f"{where} 里有不认识的项：{'、'.join(unknown)}")
@@ -217,7 +267,7 @@ def read_manifest(directory: Path, package: str, kind: str, plugin_id: str = "")
     if not name:
         raise PluginError(f"{where} 没有写 name（给人看的名字）")
     capabilities = _names(raw, "capabilities", where)
-    if kind == KIND_SITE:
+    if kind in (KIND_SITE, KIND_PLATFORM):
         allowed = {*extension_points(), CAPABILITY_EXTEND}
         wrong = [item for item in capabilities if item not in allowed]
         if wrong:
@@ -232,12 +282,37 @@ def read_manifest(directory: Path, package: str, kind: str, plugin_id: str = "")
         description=" ".join(str(raw.get("description") or "").split()),
         path=directory,
         package=package,
-        parent=str(raw.get("parent") or ""),
+        platform=_platform_of(plugin_id, raw, where) if kind == KIND_SITE else "",
         capabilities=capabilities,
         after=_names(raw, "after", where),
         extension_points=_names(raw, "extension_points", where),
         services=_services(raw, where) if kind == KIND_DEPLOY else (),
     )
+
+
+def _platform_of(site_id: str, raw: dict[str, Any], where: Path) -> str:
+    """站点插件清单里的 ``platform``：得是核心带着的平台，id 要照平台取。"""
+    known = platforms()
+    name = str(raw.get("platform") or DEFAULT_PLATFORM)
+    if name not in known:
+        raise PluginError(
+            f"{where} 的 platform 写的是「{name}」，核心里没有这个平台"
+            f"（现在有 {'、'.join(known)}；自己架的 MediaWiki 站不写 platform）"
+        )
+    if name != DEFAULT_PLATFORM:
+        if not site_id.startswith(f"{name}_") or site_id == f"{name}_":
+            raise PluginError(
+                f"{where}：它是「{name}」平台上的站，id 要以平台的 id 开头："
+                f"{name}_<这个站的名字>（如 {name}_{site_id.rpartition('_')[2] or 'mysite'}）"
+            )
+        return name
+    taken = next((other for other in known if site_id.startswith(f"{other}_")), "")
+    if taken and taken != DEFAULT_PLATFORM:
+        raise PluginError(
+            f"{where} 的 id（{site_id}）以平台「{taken}」的 id 开头，"
+            f"清单里却没有写 platform: {taken}"
+        )
+    return name
 
 
 def _services(raw: dict[str, Any], where: Path) -> tuple[str, ...]:
@@ -281,11 +356,11 @@ def deploy_manifests(directory: Path) -> dict[str, Manifest]:
     return found
 
 
-def _plugin_dirs(directory: Path) -> list[Path]:
+def _plugin_dirs(directory: Path, file: str = MANIFEST_FILE) -> list[Path]:
     """``directory`` 下面带清单的子目录，按名字排。"""
     if not directory.is_dir():
         return []
-    return sorted(child for child in directory.iterdir() if (child / MANIFEST_FILE).is_file())
+    return sorted(child for child in directory.iterdir() if (child / file).is_file())
 
 
 def _package_dir(package: str, what: str) -> Path:
@@ -382,82 +457,152 @@ def extension_points() -> frozenset[str]:
     )
 
 
-def _check_placement(manifest: Manifest, parent: str) -> None:
-    """放在「parent」下面（空的 = 最上面一级）的插件，清单里写的上级得是它。"""
-    if manifest.parent != parent:
-        expected = f"parent: {parent}" if parent else "不写 parent"
-        raise PluginError(
-            f"{manifest.path / MANIFEST_FILE}：它放在「{parent or '最上面一级'}」下面，"
-            f"清单里应该{expected}，现在是「{manifest.parent or '没写'}」"
-        )
+@lru_cache(maxsize=1)
+def platforms() -> dict[str, Manifest]:
+    """核心带着的平台：id → 清单。"""
+    found: dict[str, Manifest] = {}
+    for directory in _plugin_dirs(_PACKAGE_ROOT / "platforms", PLATFORM_FILE):
+        package = f"{PLATFORMS_PACKAGE}.{directory.name}"
+        found[directory.name] = read_manifest(directory, package, KIND_PLATFORM)
+    if DEFAULT_PLATFORM not in found:
+        where = _PACKAGE_ROOT / "platforms"
+        raise PluginError(f"核心里少了「{DEFAULT_PLATFORM}」这个平台（{where}）")
+    return found
 
 
-def _scan_sites(directory: Path, package: str, parent: str, found: dict[str, Manifest]) -> None:
-    for child in _plugin_dirs(directory):
-        manifest = read_manifest(child, f"{package}.{child.name}", KIND_SITE)
-        _check_placement(manifest, parent)
-        if manifest.id in found:
-            raise PluginError(
-                f"站点插件的 id「{manifest.id}」重了：{found[manifest.id].path} 和 {child}"
-            )
-        found[manifest.id] = manifest
-        _scan_sites(child / CHILDREN_DIR, f"{manifest.package}.{CHILDREN_DIR}", manifest.id, found)
+def platform(name: str) -> Manifest:
+    """叫 ``name`` 的平台；空的就是什么都不多带的 MediaWiki。没有就报错。"""
+    known = platforms()
+    name = name.strip() or DEFAULT_PLATFORM
+    if name not in known:
+        raise PluginError(f"核心里没有叫「{name}」的平台（现在有 {'、'.join(known)}）")
+    return known[name]
 
 
 def _local_sites(workspace_root: Path | None) -> dict[str, Manifest]:
-    """实例目录下的 ``sites/<id>/``：用户自写的站点插件（``parent`` 可指向上级包或同目录上级）。"""
+    """实例目录下的 ``sites/<id>/``：用户自己写的站点插件，免打包直接加载。"""
     if workspace_root is None:
         return {}
-    sites_dir = workspace_root / CHILDREN_DIR
-    if not sites_dir.is_dir():
-        return {}
-    dirs = _plugin_dirs(sites_dir)
+    dirs = _plugin_dirs(workspace_root / LOCAL_SITES_DIR)
     if not dirs:
         return {}
     _ensure_sys_path(workspace_root)
+    return {
+        child.name: read_manifest(child, f"{LOCAL_SITES_DIR}.{child.name}", KIND_SITE)
+        for child in dirs
+    }
+
+
+def downloaded_sites_dir(workspace_root: Path | None) -> Path | None:
+    """在管理后台里下载的站点插件放在哪；找不到实例目录、也没设环境变量时是 None。"""
+    explicit = os.environ.get(SITES_DIR_ENV, "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return workspace_root / "data" / "sites" if workspace_root is not None else None
+
+
+def read_sites_state(directory: Path) -> dict[str, dict[str, Any]]:
+    """下载目录里记着的「装了哪些」：id → ``{"version": …, "repo": …, "installed_at": …}``。
+
+    没有、读不了、格式不认识，都是空的。
+    """
+    try:
+        data = json.loads((directory / SITES_STATE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("format") != SITES_STATE_FORMAT:
+        return {}
+    sites = data.get("sites")
+    if not isinstance(sites, dict):
+        return {}
+    return {str(key): value for key, value in sites.items() if isinstance(value, dict)}
+
+
+def downloaded_site_dir(directory: Path, site_id: str, version: str) -> Path:
+    """下载的站点插件解在哪：这个目录里是它的包（``jianshanagent_site_<id>/``）。"""
+    return directory / site_id / version
+
+
+def site_package(site_id: str) -> str:
+    """照命名规范，站点插件的包叫什么。"""
+    return f"jianshanagent_site_{site_id}"
+
+
+def _downloaded_sites(workspace_root: Path | None, skip: set[str]) -> dict[str, Manifest]:
+    """在管理后台里下载的站点插件：id → 清单。``skip`` 里的（别处已经有的）不看。
+
+    哪一个坏了（目录没了、清单读不出来）就跳过它：下载的东西坏了不该拦住机器人启动，
+    用到它的 wiki 那里会说找不到这个插件。
+    """
+    directory = downloaded_sites_dir(workspace_root)
+    if directory is None:
+        return {}
     found: dict[str, Manifest] = {}
-    for child in dirs:
-        manifest = read_manifest(child, f"{CHILDREN_DIR}.{child.name}", KIND_SITE)
-        found[manifest.id] = manifest
-        _scan_sites(child / CHILDREN_DIR, f"{manifest.package}.{CHILDREN_DIR}", manifest.id, found)
+    for site_id, entry in sorted(read_sites_state(directory).items()):
+        if site_id in skip:
+            continue
+        root = downloaded_site_dir(directory, site_id, str(entry.get("version") or ""))
+        package = site_package(site_id)
+        try:
+            manifest = read_manifest(root / package, package, KIND_SITE, plugin_id=site_id)
+        except PluginError:
+            continue
+        _ensure_sys_path(root)
+        found[site_id] = manifest
     return found
 
 
 @lru_cache(maxsize=1)
 def _installed_package_sites() -> dict[str, Manifest]:
-    """这个环境里登记了的站点插件，连同它们放在自己 ``sites/`` 里的下级：id → 清单。"""
-    found = _registered(KIND_SITE)
-    for manifest in list(found.values()):
-        _scan_sites(
-            manifest.path / CHILDREN_DIR, f"{manifest.package}.{CHILDREN_DIR}", manifest.id, found
-        )
-    return found
+    """这个环境里登记了的站点插件：id → 清单。"""
+    return _registered(KIND_SITE)
 
 
 @lru_cache(maxsize=8)
 def installed_sites(workspace_root: Path | None = None) -> dict[str, Manifest]:
-    """环境里登记的站点插件，连同 ``sites/`` 下的下级及实例目录内的 ``sites/``：id → 清单。"""
-    base = _installed_package_sites()
-    if workspace_root is None:
-        return base
-    found = dict(base)
-    for name, manifest in _local_sites(workspace_root.resolve()).items():
+    """能用的站点插件（环境里登记的、实例目录下 ``sites/`` 里的、在管理后台里下载的）：id → 清单。
+
+    下载的和别处的重了，用别处的：环境里装的那一份是发布定下来的，自己写的是正在改的。
+    """
+    found = dict(_installed_package_sites())
+    root = workspace_root.resolve() if workspace_root is not None else None
+    for name, manifest in _local_sites(root).items():
         if name in found:
             raise PluginError(f"站点插件的 id「{name}」重了：{found[name].path} 和 {manifest.path}")
         found[name] = manifest
+    found |= _downloaded_sites(root, set(found))
     return found
+
+
+def site_source(manifest: Manifest, workspace_root: Path | None = None) -> str:
+    """一个站点插件是哪来的。
+
+    ``environment``（环境里装的）/ ``local``（实例的 ``sites/`` 下的）/ ``downloaded``
+    （在管理后台里下载的）/ ``path``（按包路径写的）。
+    """
+    if _installed_package_sites().get(manifest.id) == manifest:
+        return "environment"
+    directory = downloaded_sites_dir(workspace_root)
+    if directory is not None and directory.resolve() in manifest.path.resolve().parents:
+        return "downloaded"
+    if workspace_root is not None and manifest.path.parent == workspace_root / LOCAL_SITES_DIR:
+        return "local"
+    return "path"
 
 
 def clear_caches() -> None:
     """忘掉已经找到的插件（装了、卸了插件以后，或者测试里换了登记的插件以后）。"""
+    importlib.invalidate_caches()  # 刚下载下来的包：导入系统记着的目录内容是旧的
     _installed_package_features.cache_clear()
     feature_manifests.cache_clear()
     extension_points.cache_clear()
+    platforms.cache_clear()
     _installed_package_sites.cache_clear()
     installed_sites.cache_clear()
 
 
-def _site(name: str, workspace_root: Path | None = None) -> Manifest:
+def site(name: str, workspace_root: Path | None = None) -> Manifest:
+    """叫 ``name`` 的站点插件：装着的写 id，没登记的包写包路径。没有就报错。"""
     if "." in name:
         # 没登记的包：按包路径找
         if workspace_root is not None:
@@ -467,42 +612,27 @@ def _site(name: str, workspace_root: Path | None = None) -> Manifest:
     if name not in installed:
         raise PluginError(
             f"没有叫「{name}」的站点插件（装着的有：{'、'.join(installed) or '无'}；"
+            "做好了的站点插件可以在管理后台的「Wiki」页里一键添加，"
             "没登记的包要写包路径，如 mypkg.mysite，或放在实例的 sites/<id>/ 下）"
         )
     return installed[name]
 
 
-def _parent_of(manifest: Manifest, workspace_root: Path | None = None) -> Manifest | None:
-    # 放在上级插件目录的 sites/ 里的：上级就是外面那一层，清单里写的得是它
-    enclosing = manifest.path.parent.parent
-    if manifest.path.parent.name == CHILDREN_DIR and (enclosing / MANIFEST_FILE).is_file():
-        _check_placement(manifest, enclosing.name)
-        known = installed_sites(workspace_root).get(manifest.parent)
-        if known is not None and known.path == enclosing:
-            return known
-        outer = manifest.package.rpartition(f".{CHILDREN_DIR}.")[0]
-        return read_manifest(enclosing, outer, KIND_SITE)
-    return _site(manifest.parent, workspace_root) if manifest.parent else None
+def wiki_plugins(
+    platform_name: str, site_name: str, workspace_root: Path | None = None
+) -> tuple[Manifest, Manifest | None]:
+    """一个 wiki 在 ``core.wiki.yaml`` 里写的 ``platform`` 和 ``site`` →（它的平台，它的站点插件）。
 
-
-def site_chain(name: str, workspace_root: Path | None = None) -> tuple[Manifest, ...]:
-    """一个 wiki 的 ``site``（``core.wiki.yaml``）→ 要加载的站点插件，从最上面一级到写的那一级。
-
-    ``name`` 是最末一级：已登记或实例 ``sites/`` 下的写 id，未登记的包写包路径；空表示不用。
+    写了 ``site`` 的，平台跟着站点插件走（两样都写了就得对得上）；没写 ``site`` 的没有站点插件，
+    平台是 ``platform`` 写的那个，也没写就是什么都不多带的 MediaWiki。
     """
-    name = name.strip()
-    if not name:
-        return ()
-    chain = [_site(name, workspace_root)]
-    while (parent := _parent_of(chain[0], workspace_root)) is not None:
-        if any(parent.id == manifest.id for manifest in chain):
-            names = " → ".join(manifest.id for manifest in (parent, *chain))
-            raise PluginError(f"站点插件的上级绕成了圈：{names}")
-        chain.insert(0, parent)
-    for parent, child in zip(chain, chain[1:], strict=False):
-        if not child.id.startswith(f"{parent.id}_") or child.id == f"{parent.id}_":
-            raise PluginError(
-                f"站点插件「{child.id}」的上级是「{parent.id}」，它的 id 要以上级的 id 开头："
-                f"{parent.id}_<这个站的名字>（如 {parent.id}_{child.id.rpartition('_')[2]}）"
-            )
-    return tuple(chain)
+    platform_name, site_name = platform_name.strip(), site_name.strip()
+    if not site_name:
+        return platform(platform_name), None
+    manifest = site(site_name, workspace_root)
+    if platform_name and platform_name != manifest.platform:
+        raise PluginError(
+            f"站点插件「{manifest.id}」是「{manifest.platform}」平台上的站，"
+            f"platform 却写的是「{platform_name}」（写了 site 就不用再写 platform）"
+        )
+    return platform(manifest.platform), manifest

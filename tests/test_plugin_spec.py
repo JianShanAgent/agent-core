@@ -1,9 +1,9 @@
 """插件规范（``core/manifest.py``、``core/sites.py``，说明在 ``docs/插件规范.md``）。
 
 - 核心自带的功能插件都合规范：有清单，清单说的和代码里有的对得上，配置在插件自己的目录里；
-- 核心不带站点插件。别的包登记了（entry points）就能按 id 用；站点插件是一棵树，配置里只写最末一级，
-  上级顺着清单带出来；
-- 一个部署可以挂好几个 wiki，各用各的站点插件，站点插件的补充只对它那个 wiki 生效；
+- 核心带着平台（灰机、BWiki，和什么都不多带的 MediaWiki），不带站点插件。站点插件只有一层：
+  别的包登记了（entry points）就能按 id 用，清单里写明它是哪个平台上的站，平台跟着它加载；
+- 一个部署可以挂好几个 wiki，各有各的平台和站点插件，它们的补充只对那个 wiki 生效；
 - 默认配置随包走，部署目录里只放和默认值不一样的地方；
 - 不合规范的清单、接不上的扩展点、不照规矩取的名字，报错要说得清是哪里不对。
 """
@@ -20,17 +20,23 @@ import yaml
 
 from jianshanagent.core.config import DEFAULTS_DIR, AppConfig, load_config
 from jianshanagent.core.manifest import (
+    DEFAULT_PLATFORM,
     KIND_FEATURE,
+    KIND_PLATFORM,
     PluginError,
     extension_points,
     feature_manifests,
     installed_sites,
+    platforms,
     read_manifest,
-    site_chain,
+    site,
+    wiki_plugins,
 )
 from jianshanagent.core.plugin import PluginHost
 from jianshanagent.core.sites import EXTENSION_KNOWLEDGE, EXTENSION_WIKI, SiteSetup, load_sites
 from jianshanagent.core.wiki import WikiSite, load_wikis
+from jianshanagent.platforms.huiji.knowledge import HuijiKnowledge
+from jianshanagent.platforms.huiji.wiki import HuijiData
 from jianshanagent.plugins.wiki_query.provider import WikiProvider
 from jianshanagent.testing.conformance import check_plugin
 from jianshanagent.testing.sites import one_wiki, register_plugins, site_packages, write_site
@@ -43,6 +49,31 @@ WIKI = WikiSite(api_url=f"{SITE}/api.php", site_base=SITE, id="main")
 
 def config_for(site: str, **files: dict[str, Any]) -> AppConfig:
     return AppConfig(root=Path("."), files={"core.wiki": one_wiki(site), **files}, secrets={})
+
+
+def test_the_core_ships_the_platforms() -> None:
+    found = platforms()
+    assert set(found) == {"huiji", "bwiki", DEFAULT_PLATFORM}
+    packages = {p.parent.name for p in (SOURCE / "platforms").glob("*/platform.yaml")}
+    assert packages == set(found)  # platforms/ 下面的每个目录都有清单
+    for manifest in found.values():
+        assert manifest.kind == KIND_PLATFORM and manifest.name and manifest.description
+        assert manifest.path == SOURCE / "platforms" / manifest.id
+        assert manifest.config_name == f"platform.{manifest.id}"
+        assert manifest.what == f"平台「{manifest.id}」"
+        # 清单里说的能力，目录里都有：接扩展点的模块有 create(setup)，补充写在配置的 extend 段里
+        for capability in manifest.capabilities:
+            if capability == "extend":
+                extend = yaml.safe_load(manifest.config_path.read_text("utf-8"))["extend"]
+                assert extend, manifest.id
+            else:
+                module = importlib.import_module(f"{manifest.package}.{capability}")
+                assert callable(module.create), (manifest.id, capability)
+    # 什么都不多带的那个：自己架的 MediaWiki 站算在它上面
+    assert found[DEFAULT_PLATFORM].capabilities == ()
+    assert not found[DEFAULT_PLATFORM].config_path.exists()
+    assert found["huiji"].capabilities == ("wiki", "knowledge", "extend")
+    assert found["bwiki"].capabilities == ("wiki", "extend")
 
 
 def write_wikis(directory: Path, *wikis: dict[str, Any], **top: Any) -> None:
@@ -89,7 +120,7 @@ def test_every_shipped_feature_plugin_is_a_directory_with_a_manifest_config_and_
     for manifest in features.values():
         for earlier in manifest.after:
             assert enabled.index(earlier) < enabled.index(manifest.id)
-    # 扩展点：查询和知识库各开一个，站点插件的能力只能是这两个加上「对通用配置的补充」
+    # 扩展点：查询和知识库各开一个，平台、站点插件的能力只能是这两个加上「对通用配置的补充」
     assert features["wiki_query"].extension_points == (EXTENSION_WIKI,)
     assert features["knowledge"].extension_points == (EXTENSION_KNOWLEDGE,)
     assert extension_points() == {EXTENSION_WIKI, EXTENSION_KNOWLEDGE}
@@ -104,6 +135,8 @@ def test_defaults_ship_with_the_package_and_a_deployment_only_writes_what_differ
     for name, path in config.sources.items():
         if name.startswith("plugin."):
             assert path.name == "config.yaml" and SOURCE / "plugins" in path.parents, name
+        elif name.startswith("platform."):
+            assert path.name == "config.yaml" and SOURCE / "platforms" in path.parents, name
         elif name.startswith("persona/"):
             assert SOURCE / "plugins" / "chat" / "configs" in path.parents  # 人设跟着对话插件
         else:
@@ -111,7 +144,9 @@ def test_defaults_ship_with_the_package_and_a_deployment_only_writes_what_differ
     assert {"app", "core.wiki", "core.plugins", "core.llm", "gateway.qq"} <= set(config.sources)
     wiki = config.get("core.wiki")
     assert wiki["wikis"] == [] and config.wikis == () and config.sites == []
-    assert site_chain("") == ()
+    assert config.platforms == []
+    plain, nothing = wiki_plugins("", "")  # 什么都不写：纯 MediaWiki，没有站点插件
+    assert plain.id == DEFAULT_PLATFORM and nothing is None
     with pytest.raises(ValueError, match="不知道是哪个 wiki"):
         load_wikis(config)
 
@@ -128,11 +163,12 @@ def test_defaults_ship_with_the_package_and_a_deployment_only_writes_what_differ
     assert mine.get("core.llm") == config.get("core.llm")
     # 默认值写在哪：还是包里的那个文件（部署目录里的是对它的改动）
     assert mine.source_path("core.wiki") == DEFAULTS_DIR / "core.wiki.yaml"
-    (site,) = load_wikis(mine)
-    assert (site.id, site.label, site.site_base, site.user_agent) == (
+    (only,) = load_wikis(mine)
+    assert (only.id, only.label, only.site_base, only.user_agent) == (
         "main", "main", SITE, wiki["user_agent"],
     )  # fmt: skip
-    assert site.page_url("某 页") == f"{SITE}/wiki/%E6%9F%90_%E9%A1%B5"
+    assert only.page_url("某 页") == f"{SITE}/wiki/%E6%9F%90_%E9%A1%B5"
+    assert mine.platforms == [DEFAULT_PLATFORM] and mine.sites == []
 
 
 def test_the_plugin_host_only_loads_plugins_that_follow_the_spec() -> None:
@@ -245,69 +281,63 @@ def test_a_manifest_that_breaks_the_format_is_rejected_with_the_reason(
 ) -> None:
     sites = site_packages(tmp_path, monkeypatch, "bad_sites")
 
-    def chain_of(name: str) -> None:
-        site_chain(f"bad_sites.{name}")
+    def read(name: str) -> None:
+        site(f"bad_sites.{name}")
 
     write_site(sites / "renamed", manifest={"id": "another"})
     with pytest.raises(PluginError, match="id（another）要和目录名（renamed）一样"):
-        chain_of("renamed")
+        read("renamed")
     write_site(sites / "typo", manifest={"capabilites": ["wiki"]})  # 键名写错了
     with pytest.raises(PluginError, match="有不认识的项：capabilites"):
-        chain_of("typo")
+        read("typo")
     write_site(sites / "unknown", capabilities=("wiki", "search"))
     with pytest.raises(PluginError, match="不认识的能力：search（现在有 extend、knowledge、wiki）"):
-        chain_of("unknown")
+        read("unknown")
     write_site(sites / "feature", manifest={"kind": "feature"})
     with pytest.raises(PluginError, match="kind 应该是 site"):
-        chain_of("feature")
+        read("feature")
     write_site(sites / "nameless", manifest={"name": ""})
     with pytest.raises(PluginError, match="没有写 name"):
-        chain_of("nameless")
+        read("nameless")
     (sites / "empty").mkdir()
     (sites / "empty" / "__init__.py").write_text("", encoding="utf-8")
-    with pytest.raises(PluginError, match="没有插件清单（plugin.yaml）"):
-        chain_of("empty")
+    with pytest.raises(PluginError, match=r"没有清单（plugin\.yaml）"):
+        read("empty")
     with pytest.raises(PluginError, match="找不到站点插件「bad_sites.gone」"):
-        chain_of("gone")
-    # 上级写了一个不存在的插件
-    write_site(sites / "orphan", parent="nobody")
-    with pytest.raises(PluginError, match="没有叫「nobody」的站点插件"):
-        chain_of("orphan")
-    # 上级绕成了圈
-    write_site(sites / "ping", parent="bad_sites.pong")
-    write_site(sites / "pong", parent="bad_sites.ping")
-    with pytest.raises(PluginError, match="绕成了圈"):
-        chain_of("ping")
+        read("gone")
+    # 写了一个核心里没有的平台
+    write_site(sites / "nowhere_x", platform="nowhere")
+    with pytest.raises(
+        PluginError, match="platform 写的是「nowhere」，核心里没有这个平台（现在有 bwiki、huiji"
+    ):
+        read("nowhere_x")
+    # 站的 id 里没带平台：两个平台上同一个题材的站就没法装在一起了
+    write_site(sites / "other", platform="huiji")
+    with pytest.raises(PluginError, match="id 要以平台的 id 开头：huiji_<这个站的名字>"):
+        read("other")
+    # id 带着平台，清单里却没写它是那个平台上的
+    write_site(sites / "bwiki_lost")
+    with pytest.raises(PluginError, match="以平台「bwiki」的 id 开头，清单里却没有写 platform"):
+        read("bwiki_lost")
+    # 以前的写法（平台也是插件，站点插件写上级）：说清楚现在怎么写
+    write_site(sites / "huiji_old", manifest={"parent": "huiji"})
+    with pytest.raises(PluginError, match="parent 不用了：.*改成 platform: huiji"):
+        read("huiji_old")
     # 功能插件的清单是另一套键
-    write_site(sites / "mixed", manifest={"kind": "feature", "parent": "x", "capabilities": []})
+    write_site(sites / "mixed", manifest={"kind": "feature", "platform": "x", "capabilities": []})
     with pytest.raises(PluginError, match="有不认识的项"):
         read_manifest(sites / "mixed", "bad_sites.mixed", KIND_FEATURE)
 
 
-# ---------- 站点插件的树，和接扩展点 ----------
-
-PLATFORM = """
-from jianshanagent.plugins.wiki_query.provider import WikiProvider
-
-
-class PlatData(WikiProvider):
-    id = "plat"
-
-    def __init__(self, namespace):
-        self.namespace = namespace
-
-
-def create(setup):
-    return PlatData(setup.raw["data_namespace"])
-"""
+# ---------- 站点插件和它的平台，接扩展点 ----------
 
 STATION = """
+from jianshanagent.platforms.huiji.wiki import HuijiData
 from jianshanagent.plugins.wiki_query.provider import WikiProvider
-from jianshanagent_site_plat.wiki import PlatData
 
 
 class Station(WikiProvider):
-    id = "plat_station"
+    id = "huiji_station"
     kinds = {"hero": "英雄"}
 
     def __init__(self, data, label):
@@ -315,95 +345,105 @@ class Station(WikiProvider):
 
 
 def create(setup):
-    # 上级（平台）在查询这个扩展点上的实例：读平台的数据用
-    return Station(setup.parent(PlatData), setup.raw.get("label"))
+    # 平台在查询这个扩展点上的实例：读灰机的 Data 用
+    return Station(setup.platform(HuijiData), setup.raw.get("label"))
 """
 
 
-def platform_and_station(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    """两个独立的包：一个平台，和这个平台上的一个站（``plat_station``，``parent: plat``）。"""
-    plat = write_site(
-        site_packages(tmp_path, monkeypatch, "jianshanagent_site_plat"),
-        manifest={"id": "plat", "description": "一个平台。"},
-        capabilities=("wiki", "extend"),
-        config={
-            "data_namespace": 3500,
-            "extend": {"plugin.knowledge": {"clean": {"remove_classes": ["plat-ignore"]}}},
-        },
-        wiki=PLATFORM,
-    )
-    station = write_site(
-        site_packages(tmp_path, monkeypatch, "jianshanagent_site_plat_station"),
-        manifest={"id": "plat_station", "description": "平台上的一个站。"},
-        parent="plat",
+def station(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """一个独立的包：灰机上的一个站（``huiji_station``，``platform: huiji``）。"""
+    return write_site(
+        site_packages(tmp_path, monkeypatch, "jianshanagent_site_huiji_station"),
+        manifest={"id": "huiji_station", "description": "灰机上的一个站。"},
+        platform="huiji",
         capabilities=("wiki", "extend"),
         config={"label": "某个站", "extend": {"plugin.wiki_query": {"format": {"max_chars": 500}}}},
         wiki=STATION,
     )
-    return plat, station
 
 
 def test_a_registered_site_is_named_by_its_id_and_brings_its_platform(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plat, station = platform_and_station(tmp_path, monkeypatch)
-    register_plugins(
-        monkeypatch,
-        sites={
-            "plat": "jianshanagent_site_plat",
-            "plat_station": "jianshanagent_site_plat_station",
-        },
-    )
-    assert list(installed_sites()) == ["plat", "plat_station"]
-    chain = site_chain("plat_station")
-    assert [m.id for m in chain] == ["plat", "plat_station"]
-    assert chain[0] is installed_sites()["plat"]
-    assert [m.id for m in site_chain("plat")] == ["plat"]
+    directory = station(tmp_path, monkeypatch)
+    register_plugins(monkeypatch, sites={"huiji_station": "jianshanagent_site_huiji_station"})
+    assert list(installed_sites()) == ["huiji_station"]
+    platform, mine = wiki_plugins("", "huiji_station")
+    assert mine is installed_sites()["huiji_station"] and mine.platform == "huiji"
+    assert platform is platforms()["huiji"]  # 平台跟着站点插件走
+    assert wiki_plugins("huiji", "huiji_station") == (platform, mine)  # 两样都写也行，得对得上
+    with pytest.raises(PluginError, match="是「huiji」平台上的站，platform 却写的是「bwiki」"):
+        wiki_plugins("bwiki", "huiji_station")
 
-    write_wikis(tmp_path / "config", *one_wiki("plat_station")["wikis"])
+    write_wikis(tmp_path / "config", *one_wiki("huiji_station")["wikis"])
     config = load_config(tmp_path / "config", with_overrides=False)
-    assert config.sites == ["plat", "plat_station"]
-    assert config.site("plat_station")["label"] == "某个站"
-    assert config.source_path("site.plat_station") == station / "config.yaml"
-    assert config.source_path("site.plat") == plat / "config.yaml"
+    assert (config.platforms, config.sites) == (["huiji"], ["huiji_station"])
+    assert [m.id for m in config.wiki("main").chain] == ["huiji", "huiji_station"]
+    assert config.site("huiji_station")["label"] == "某个站"
+    assert config.source_path("site.huiji_station") == directory / "config.yaml"
+    assert config.source_path("platform.huiji") == SOURCE / "platforms" / "huiji" / "config.yaml"
     assert config.plugin("wiki_query")["format"]["max_chars"] == 500  # 站的补充并进去了
-    assert "plat-ignore" in config.plugin("knowledge")["clean"]["remove_classes"]  # 平台的也在
+    assert "kb-ignore" in config.plugin("knowledge")["clean"]["remove_classes"]  # 平台的也在
 
-    platform, mine = load_sites(config, EXTENSION_WIKI, WIKI)
-    assert isinstance(mine, WikiProvider) and mine.data is platform  # type: ignore[attr-defined]
-    assert platform.namespace == 3500 and mine.label == "某个站"  # type: ignore[attr-defined]
-    # 它们都没接知识库这个扩展点
-    assert load_sites(config, EXTENSION_KNOWLEDGE, WIKI) == []
-    # 两个包的名字都照规范：前缀 + id（站的 id 里带着平台）
-    assert check_plugin("jianshanagent_site_plat").id == "plat"
-    assert check_plugin("jianshanagent_site_plat_station").parent == "plat"
+    data, loaded = load_sites(config, EXTENSION_WIKI, WIKI)
+    assert isinstance(data, HuijiData) and isinstance(loaded, WikiProvider)
+    assert loaded.data is data and loaded.label == "某个站"  # type: ignore[attr-defined]
+    # 知识库这个扩展点上只有平台：这个站没接
+    (knowledge,) = load_sites(config, EXTENSION_KNOWLEDGE, WIKI)
+    assert isinstance(knowledge, HuijiKnowledge) and knowledge.data_namespace == 3500
+    # 包名照规范：前缀 + id（站的 id 里带着平台）
+    assert check_plugin("jianshanagent_site_huiji_station").platform == "huiji"
 
-    # 没登记的包也能用，写包路径；它的上级可以是登记了的插件
+    # 没有站点插件的 wiki：写它在哪个平台上，只加载平台的那一份
+    write_wikis(tmp_path / "config", {"id": "main", "api_url": f"{SITE}/api.php",
+                                      "platform": "huiji"})  # fmt: skip
+    bare = load_config(tmp_path / "config", with_overrides=False)
+    assert (bare.platforms, bare.sites) == (["huiji"], [])
+    assert [type(p) for p in load_sites(bare, EXTENSION_WIKI, WIKI)] == [HuijiData]
+    assert "kb-ignore" in bare.plugin("knowledge")["clean"]["remove_classes"]
+    assert bare.plugin("wiki_query")["format"]["max_chars"] != 500
+    write_wikis(tmp_path / "config", {"id": "main", "api_url": f"{SITE}/api.php",
+                                      "platform": "wikia"})  # fmt: skip
+    with pytest.raises(PluginError, match="核心里没有叫「wikia」的平台（现在有 bwiki、huiji"):
+        load_config(tmp_path / "config", with_overrides=False)
+
+    # 没登记的包也能用，写包路径
     their = site_packages(tmp_path, monkeypatch, "their_sites")
-    extra = write_site(their / "plat_other", parent="plat")
-    assert [m.id for m in site_chain("their_sites.plat_other")] == ["plat", "plat_other"]
-    assert extra.name == "plat_other"
-    with pytest.raises(
-        PluginError, match="没有叫「nowhere」的站点插件（装着的有：plat、plat_station"
-    ):
-        site_chain("nowhere")
-    # 站的 id 里没带平台：两个平台上同一个题材的站就没法装在一起了
-    write_site(their / "other", parent="plat")
-    with pytest.raises(PluginError, match="它的 id 要以上级的 id 开头：plat_<这个站的名字>"):
-        site_chain("their_sites.other")
+    extra = write_site(their / "huiji_other", platform="huiji")
+    assert [m.id for m in wiki_plugins("", "their_sites.huiji_other")] == ["huiji", "huiji_other"]
+    assert extra.name == "huiji_other"
+    with pytest.raises(PluginError, match="没有叫「nowhere」的站点插件（装着的有：huiji_station"):
+        site("nowhere")
 
     # 包名和 id 对不上：规范自检指出该叫什么
     write_site(
         site_packages(tmp_path, monkeypatch, "jianshanagent_site_lonely"),
-        manifest={"id": "plat_lonely", "description": "x"},
-        parent="plat",
+        manifest={"id": "huiji_lonely", "description": "x"},
+        platform="huiji",
     )
-    register_plugins(
-        monkeypatch,
-        sites={"plat": "jianshanagent_site_plat", "plat_lonely": "jianshanagent_site_lonely"},
-    )
-    with pytest.raises(PluginError, match="照命名规范应该叫「jianshanagent_site_plat_lonely」"):
+    register_plugins(monkeypatch, sites={"huiji_lonely": "jianshanagent_site_lonely"})
+    with pytest.raises(PluginError, match="照命名规范应该叫「jianshanagent_site_huiji_lonely」"):
         check_plugin("jianshanagent_site_lonely")
+
+
+def test_a_site_on_no_platform_is_plain_mediawiki(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ok = "class P:\n    id = 'thwiki'\n\n\ndef create(setup):\n    return P()\n"
+    write_site(
+        site_packages(tmp_path, monkeypatch, "jianshanagent_site_thwiki"),
+        manifest={"id": "thwiki", "description": "自己架的站。"},
+        capabilities=("wiki",),
+        wiki=ok,
+    )
+    register_plugins(monkeypatch, sites={"thwiki": "jianshanagent_site_thwiki"})
+    platform, mine = wiki_plugins("", "thwiki")
+    assert (platform.id, mine.platform if mine else "") == (DEFAULT_PLATFORM, DEFAULT_PLATFORM)
+    config = config_for("thwiki")
+    assert (config.platforms, config.sites) == ([DEFAULT_PLATFORM], ["thwiki"])
+    (loaded,) = load_sites(config, EXTENSION_WIKI, WIKI)  # 平台什么都不多带，只有它自己
+    assert loaded.id == "thwiki"
+    assert check_plugin("jianshanagent_site_thwiki").id == "thwiki"
 
 
 def test_an_extension_point_that_cannot_be_wired_is_explained(
@@ -413,8 +453,8 @@ def test_an_extension_point_that_cannot_be_wired_is_explained(
     (sites / "base.py").write_text("class Data:\n    pass\n", "utf-8")
     ok = "class P:\n    id = '{id}'\n\n\ndef create(setup):\n    return P()\n"
 
-    def load(name: str) -> list[Any]:
-        return load_sites(config_for(f"wired_sites.{name}"), EXTENSION_WIKI, WIKI)
+    def load(name: str, extension: str = EXTENSION_WIKI) -> list[Any]:
+        return load_sites(config_for(f"wired_sites.{name}"), extension, WIKI)
 
     # 清单里写了，包里没有那个模块
     write_site(sites / "hollow", capabilities=("wiki",))
@@ -436,24 +476,26 @@ def test_an_extension_point_that_cannot_be_wired_is_explained(
     with pytest.raises(ModuleNotFoundError, match="not_installed_anywhere"):
         load("broken")
 
-    # 下级要用上级的东西，上级却没接这个扩展点：统一在 setup.parent 这里报错
-    top = write_site(sites / "top")
-    child = (
-        "from wired_sites.base import Data\n\n\ndef create(setup):\n    return setup.parent(Data)\n"
+    # 站点插件要用平台的东西，平台却没接这个扩展点（BWiki 不管知识库）：
+    # 统一在 setup.platform 这里报错
+    wants = (
+        "from wired_sites.base import Data\n\n\n"
+        "def create(setup):\n    return setup.platform(Data)\n"
     )
-    write_site(top / "sites" / "top_leaf", parent="top", capabilities=("wiki",), wiki=child)
-    with pytest.raises(PluginError, match="「top_leaf」要用它上级的 Data，但没找到"):
-        load("top.sites.top_leaf")
-    # 放在上级的 sites/ 里，清单里的上级却写的是别人
-    write_site(top / "sites" / "stray", parent="elsewhere")
-    with pytest.raises(PluginError, match="它放在「top」下面，清单里应该parent: top"):
-        site_chain("wired_sites.top.sites.stray")
+    write_site(sites / "bwiki_leaf", platform="bwiki", capabilities=("knowledge",), knowledge=wants)
+    with pytest.raises(
+        PluginError, match="站点插件「bwiki_leaf」要用平台的 Data，但没找到：它清单里写的平台是"
+    ):
+        load("bwiki_leaf", EXTENSION_KNOWLEDGE)
+    # 平台在这个扩展点上有东西，但不是要的那个类
+    write_site(sites / "huiji_leaf", platform="huiji", capabilities=("wiki",), wiki=wants)
+    with pytest.raises(PluginError, match="「huiji_leaf」要用平台的 Data，但没找到"):
+        load("huiji_leaf")
 
     setup = SiteSetup(
-        manifest=site_chain("wired_sites.top")[0], config=config_for(""), raw={}, wiki=WIKI,
-        parents={},
-    )  # fmt: skip
-    assert setup.id == "top"
+        manifest=site("wired_sites.undeclared"), config=config_for(""), raw={}, wiki=WIKI
+    )
+    assert setup.id == "undeclared" and setup.above is None
 
 
 def test_instance_local_sites_and_plugins_load_without_packaging(
@@ -461,17 +503,15 @@ def test_instance_local_sites_and_plugins_load_without_packaging(
 ) -> None:
     """实例目录下的 sites/<id>/ 和 plugins/<id>/ 免打包直接加载，随实例仓库同步。"""
     monkeypatch.syspath_prepend(str(tmp_path))
-    plat, _ = platform_and_station(tmp_path / "pkgs", monkeypatch)
-    register_plugins(monkeypatch, sites={"plat": "jianshanagent_site_plat"})
 
-    # 1. 实例目录下直接放 sites/plat_mysite/（上级指向已安装的平台插件 plat）
+    # 1. 实例目录下直接放 sites/huiji_mysite/（灰机上的站：平台是核心带着的）
     write_site(
-        tmp_path / "sites" / "plat_mysite",
-        manifest={"id": "plat_mysite", "description": "实例目录内的站点插件。"},
-        parent="plat",
+        tmp_path / "sites" / "huiji_mysite",
+        manifest={"id": "huiji_mysite", "description": "实例目录内的站点插件。"},
+        platform="huiji",
         capabilities=("wiki", "extend"),
         config={"label": "自写站", "extend": {"plugin.wiki_query": {"format": {"max_chars": 600}}}},
-        wiki=STATION.replace("plat_station", "plat_mysite"),
+        wiki=STATION.replace("huiji_station", "huiji_mysite"),
     )
 
     # 2. 实例目录下直接放 plugins/hello/
@@ -492,18 +532,17 @@ def test_instance_local_sites_and_plugins_load_without_packaging(
     )
 
     cfg_dir = tmp_path / "config"
-    write_wikis(cfg_dir, *one_wiki("plat_mysite")["wikis"])
+    write_wikis(cfg_dir, *one_wiki("huiji_mysite")["wikis"])
     (cfg_dir / "core.plugins.yaml").write_text(yaml.safe_dump({"enabled": ["hello"]}), "utf-8")
 
     config = load_config(cfg_dir, with_overrides=False)
-    assert config.sites == ["plat", "plat_mysite"]
+    assert (config.platforms, config.sites) == (["huiji"], ["huiji_mysite"])
     assert config.plugin("wiki_query")["format"]["max_chars"] == 600
     assert config.plugin("hello") == {"word": "你好"}
 
     _, loaded_site = load_sites(config, EXTENSION_WIKI, WIKI)
-    assert loaded_site.id == "plat_mysite" and loaded_site.label == "自写站"
+    assert loaded_site.id == "huiji_mysite" and loaded_site.label == "自写站"
 
     host = PluginHost(config)
     host.load()
     assert host.services["hello_word"] == "你好"
-    assert plat.name == "jianshanagent_site_plat"

@@ -1,0 +1,27 @@
+# BWiki 平台的默认配置（配置名 platform.bwiki）：BWiki（wiki.biligame.com）在 MediaWiki 之上多出来的东西。
+# core.wiki.yaml 里哪个 wiki 在 BWiki 上（platform 写的是 bwiki，或者它的站点插件是 BWiki 上的站，如 bwiki_yys），就对那个 wiki 生效。
+# 某个部署要改：在实例的 config/platform.bwiki.yaml 里只写要改的项。
+
+# 语义查询（Semantic MediaWiki 的 action=ask，wiki.py 里用）
+ask:
+  page_size: 500                   # 一次请求要多少条结果（阴阳师站的 288 个式神一次取完）
+  max_results: 5000                # 一次查询最多翻到多少条
+
+# 对通用配置的补充（配置名 → 要并进去的内容）：名单和通用的合在一起，单个值以这里写的为准。
+# 这一段读配置时就并进去了，不能在管理后台里改（要改这些项，去改它们所在的那份配置）
+extend:
+  plugin.knowledge:
+    fetch:
+      # BWiki 在腾讯云 EdgeOne 的防护后面，请求密了会被拦下：返回 HTTP 567 和一页「请求已被站点的安全策略拦截」，
+      # 过几分钟才放开。2026-11-12 在开发机上试的：0.7 秒一个连发十几个之后开始被拦；2 秒一个连发 16 个没有被拦
+      max_concurrency: 1
+      requests_per_second: 0.5
+      max_retries: 6               # 被拦下以后多等几轮（每轮隔得越来越久，最长 30 秒）
+    clean:
+      remove_classes:
+        - navigation-not-searchable   # MediaWiki 的约定：导航性的内容，不进站内搜索——也不进知识库。BWiki 的面包屑、页面底部的导航表带着它
+      # 标签页：BWiki 用的是 MediaWiki 的 Tabber 扩展。页面上没有按钮（按钮是浏览器里的脚本生成的），
+      # 每个标签页的名字写在它的内容块的 title 属性上：提成对应内容的小标题
+      tabber_class: "tabber"
+      tabber_item_class: "tabbertab"
+      tabber_label_attribute: "title"

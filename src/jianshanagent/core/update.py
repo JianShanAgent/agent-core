@@ -131,12 +131,15 @@ class Release:
         }
 
 
-def wheel_name(version: str) -> str:
-    return f"{PACKAGE}-{version}-py3-none-any.whl"
+def wheel_name(version: str, package: str = PACKAGE) -> str:
+    return f"{package}-{version}-py3-none-any.whl"
 
 
-def parse_release(data: dict[str, Any]) -> Release:
-    """GitHub 接口返回的一个 Release → :class:`Release`。标签认不出版本号就报错。"""
+def parse_release(data: dict[str, Any], package: str = PACKAGE) -> Release:
+    """GitHub 接口返回的一个 Release → :class:`Release`。标签认不出版本号就报错。
+
+    ``package``：要的是哪个包的安装包（站点插件的下载也走这里，见 ``core/catalog.py``）。
+    """
     tag = str(data.get("tag_name") or "")
     parsed = _bootstrap.parse_version(tag)
     if parsed is None:
@@ -144,7 +147,7 @@ def parse_release(data: dict[str, Any]) -> Release:
     version = ".".join(str(part) for part in parsed)
     assets = [item for item in data.get("assets") or [] if isinstance(item, dict)]
     by_name = {str(item.get("name") or ""): item for item in assets}
-    wheel = by_name.get(wheel_name(version)) or {}
+    wheel = by_name.get(wheel_name(version, package)) or {}
     digest = str(wheel.get("digest") or "")
     return Release(
         version=version,
@@ -177,6 +180,37 @@ def _python_ok(spec: str) -> bool:
         if match and sys.version_info[:2] < (int(match.group(1)), int(match.group(2))):
             return False
     return True
+
+
+async def download(client: httpx.AsyncClient, url: str, target: Path) -> str:
+    """下到 ``target``，返回它的 sha256。超过大小上限就停。"""
+    digest = hashlib.sha256()
+    size = 0
+    async with client.stream("GET", url) as response:
+        response.raise_for_status()
+        with target.open("wb") as handle:
+            async for piece in response.aiter_bytes():
+                size += len(piece)
+                if size > MAX_WHEEL_BYTES:
+                    raise UpdateError("安装包大得不正常，没有装")
+                digest.update(piece)
+                handle.write(piece)
+    return digest.hexdigest()
+
+
+async def expected_sha256(client: httpx.AsyncClient, release: Release) -> str:
+    """这个版本的安装包应该是什么校验和：Release 的接口里给了就用它，不然去校验和清单里找。"""
+    if release.sha256:
+        return release.sha256
+    if not release.sums_url:
+        raise UpdateError(f"{release.tag} 这个版本没有带校验和，不装来路核对不了的包")
+    response = await client.get(release.sums_url)
+    response.raise_for_status()
+    for line in response.text[:MAX_SUMS_BYTES].splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == release.asset_name:
+            return parts[0].lower()
+    raise UpdateError(f"校验和清单里没有 {release.asset_name}")
 
 
 def install_wheel(wheel: Path, version: str, directory: Path) -> Path:
@@ -382,32 +416,6 @@ class Updater:
 
     # ---- 装 ----
 
-    async def _download(self, client: httpx.AsyncClient, url: str, target: Path) -> str:
-        """下到 ``target``，返回它的 sha256。超过大小上限就停。"""
-        digest = hashlib.sha256()
-        size = 0
-        async with client.stream("GET", url) as response:
-            response.raise_for_status()
-            with target.open("wb") as handle:
-                async for piece in response.aiter_bytes():
-                    size += len(piece)
-                    if size > MAX_WHEEL_BYTES:
-                        raise UpdateError("安装包大得不正常，没有装")
-                    digest.update(piece)
-                    handle.write(piece)
-        return digest.hexdigest()
-
-    async def _expected_sha256(self, client: httpx.AsyncClient, release: Release) -> str:
-        if release.sha256:
-            return release.sha256
-        response = await client.get(release.sums_url)
-        response.raise_for_status()
-        for line in response.text[:MAX_SUMS_BYTES].splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[1].lstrip("*") == release.asset_name:
-                return parts[0].lower()
-        raise UpdateError(f"校验和清单里没有 {release.asset_name}")
-
     async def apply(self) -> str:
         """把最新的版本装成更新包，记成待确认。返回装的版本；之后要重启机器人才用上。"""
         if self._lock.locked():
@@ -428,8 +436,8 @@ class Updater:
             try:
                 tmp.mkdir(parents=True, exist_ok=True)
                 async with self._client(settings) as client:
-                    expected = await self._expected_sha256(client, release)
-                    actual = await self._download(
+                    expected = await expected_sha256(client, release)
+                    actual = await download(
                         client, settings.download_prefix + release.asset_url, wheel
                     )
                 if actual != expected:

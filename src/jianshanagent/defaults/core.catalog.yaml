@@ -1,0 +1,23 @@
+# 站点目录：做好了的站点插件有哪些。管理后台的「Wiki」页从这里列出来，按平台筛选，点一下就把那个 wiki 挂上。
+#
+# 目录是 JianShanAgent 组织里的一个文件（catalog 仓库的 sites.yaml），每一项写着：它是哪个平台上的哪个站、
+# 站点插件在哪个仓库、wiki 的接口地址。新做好一个站点插件，往目录里加一项就行，不用发核心的版本。
+#
+# 点「添加」做的事：环境里没有那个站点插件就先下载——从它的仓库最新的 Release 取安装包，核对校验和，
+# 检查它用不用得到这个环境里（纯 Python、核心的版本够新），解到数据目录下
+# （data/sites/<id>/<版本>/，容器里是 /data/sites）；然后把那个 wiki 记进覆写目录的 core.wiki.yaml
+# （wikis_added），重新装配，/查 马上能用。知识库不会自动建，要在同一页里另外点「建知识库」。
+# 做法见 src/jianshanagent/core/catalog.py。
+enabled: true                     # false = 不读站点目录，「Wiki」页里只看得到已经挂着的
+
+# 目录在哪、从哪里下载。这几项不能在管理后台里改：它们决定机器人去下载并运行谁的代码、把请求发到哪里。
+# 目录里的站点插件只认和目录同一个组织下的仓库。
+repo: "JianShanAgent/catalog"     # 目录所在的仓库（GitHub 上的 <组织>/<仓库>）
+path: "sites.yaml"                # 仓库里的哪个文件
+ref: "main"                       # 哪个分支
+api_url: "https://api.github.com" # GitHub 的接口地址
+# 下载安装包时加在下载地址前面的镜像前缀（和 core.update.yaml 的同一项一个意思）。不用镜像就留空。
+download_prefix: ""
+
+cache_minutes: 10                 # 读到的目录在内存里留多久；页面上点「刷新」会马上重读
+timeout_seconds: 15               # 读一次、下载一次各自最多等多久

@@ -67,14 +67,15 @@ _DATA_TABLES = (
     ("core.embedding", "providers"),
     ("core.llm", "profiles"),
     ("plugin.knowledge", "clean"),
-    # 站点插件对通用配置的补充（读配置时并进去）：清洗规则；人设卡片
+    # 平台、站点插件对通用配置的补充（读配置时并进去）：清洗规则；人设卡片
     # （persona/ 下的文件不在这条检查里）
-    ("site.huiji", "extend", "plugin.knowledge", "clean"),
+    ("platform.huiji", "extend", "plugin.knowledge", "clean"),
+    ("platform.bwiki", "extend", "plugin.knowledge", "clean"),
     ("site.huiji_yys", "extend", "plugin.knowledge", "clean"),
     ("site.huiji_yys", "extend", "persona/persona.default"),
     ("site.huiji_yys", "knowledge", "datasets"),
 )
-#: 站点插件配置里的这一段，下面一层的键是「要补充的那份配置的名字」
+#: 平台、站点插件配置里的这一段，下面一层的键是「要补充的那份配置的名字」
 _EXTEND = "extend"
 
 
@@ -108,7 +109,7 @@ def test_every_key_in_the_config_files_is_read_by_the_code() -> None:
         for keys in _keys(data):
             if _is_data(name, keys):
                 continue
-            if name.startswith("site.") and len(keys) == 2 and keys[0] == _EXTEND:
+            if name.startswith(("site.", "platform.")) and len(keys) == 2 and keys[0] == _EXTEND:
                 # 补充的是哪份配置：得真有这份配置
                 if keys[1] not in sources:
                     unread.append(f"{name}: {'.'.join(keys)}（没有这份配置）")

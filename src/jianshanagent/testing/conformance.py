@@ -28,7 +28,6 @@ from jianshanagent.core.manifest import (
     PluginError,
     feature_manifests,
     installed_sites,
-    site_chain,
 )
 
 #: 各种插件的包名前缀
@@ -36,7 +35,7 @@ PACKAGE_PREFIX = {KIND_FEATURE: "jianshanagent_plugin_", KIND_SITE: "jianshanage
 
 
 def expected_package(manifest: Manifest) -> str:
-    """照命名规范，这个插件的包该叫什么：前缀 + id（站的 id 里已经带着它的各级上级）。"""
+    """照命名规范，这个插件的包该叫什么：前缀 + id（站的 id 里已经带着它的平台）。"""
     return PACKAGE_PREFIX[manifest.kind] + manifest.id
 
 
@@ -49,7 +48,7 @@ def check_plugin(package: str) -> Manifest:
     if not kind:
         raise PluginError(
             f"包名「{package}」不照规范：功能插件叫 {PACKAGE_PREFIX[KIND_FEATURE]}<id>，"
-            f"站点插件叫 {PACKAGE_PREFIX[KIND_SITE]}<id>（id 是 <平台>[_<站>]）"
+            f"站点插件叫 {PACKAGE_PREFIX[KIND_SITE]}<id>（id 是 <平台>_<站>）"
         )
     # 每次现问（测试会换掉登记表）
     entries = manifest_module._entry_points(ENTRY_POINTS[kind])
@@ -63,8 +62,7 @@ def check_plugin(package: str) -> Manifest:
     if kind == KIND_FEATURE:
         manifest = feature_manifests()[plugin_id]
     else:
-        manifest = installed_sites()[plugin_id]
-        site_chain(plugin_id)  # 上级找不到、绕成圈、id 没带上级，在这里报
+        manifest = installed_sites()[plugin_id]  # 平台没写对、id 没带平台，读清单时就报了
     wanted = expected_package(manifest)
     if package != wanted:
         raise PluginError(f"插件「{plugin_id}」的包叫「{package}」，照命名规范应该叫「{wanted}」")

@@ -1,0 +1,8 @@
+# 平台的清单（格式见 core/manifest.py）
+id: huiji
+name: 灰机 wiki
+description: 灰机 wiki（huijiwiki.com）在 MediaWiki 之上多出来的东西：Data 命名空间和它的查询接口、灰机约定的清洗规则。
+capabilities:
+  - wiki        # 查询：读 Data 文档的接口，给站点插件用
+  - knowledge   # 知识库：取 Data 文档、认 Data 的改动
+  - extend      # 对通用配置的补充：灰机约定的清洗规则

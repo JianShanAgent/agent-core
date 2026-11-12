@@ -1,0 +1,7 @@
+# 平台的清单（格式见 core/manifest.py）
+id: bwiki
+name: BWiki
+description: BWiki（wiki.biligame.com）在 MediaWiki 之上多出来的东西：语义查询接口（Semantic MediaWiki）、取数的速率和平台组件的清洗规则。
+capabilities:
+  - wiki        # 查询：语义查询的接口，给站点插件用
+  - extend      # 对通用配置的补充：取数的速率、BWiki 约定的清洗规则

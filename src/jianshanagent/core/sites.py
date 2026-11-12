@@ -1,37 +1,36 @@
-"""站点插件的加载：功能插件开出扩展点，站点插件往里接东西。
+"""平台和站点插件的加载：功能插件开出扩展点，平台、站点插件往里接东西。
 
-插件长什么样、清单怎么写见 ``core/manifest.py``。这里是运行时的那一半，所有扩展点共用一套：
+它们长什么样、清单怎么写见 ``core/manifest.py``。这里是运行时的那一半，所有扩展点共用一套：
 
-- 开出扩展点的功能插件对挂着的每个 wiki 调一次 :func:`load_sites`，拿到这个 wiki 用到的
-  各级站点插件在这个扩展点上的实例，从上到下。
-- 站点插件在清单的 ``capabilities`` 里写了哪个扩展点，包里就要有同名的模块，模块里有
+- 开出扩展点的功能插件对挂着的每个 wiki 调一次 :func:`load_sites`，拿到这个 wiki 的平台和站点插件
+  在这个扩展点上的实例，平台在前。
+- 清单的 ``capabilities`` 里写了哪个扩展点，包里就要有同名的模块，模块里有
   ``create(setup)``，返回那个扩展点的基类的实例。基类在开出扩展点的功能插件里：
   ``plugins/wiki_query/provider.py`` 的 ``WikiProvider``、
   ``plugins/knowledge/site.py`` 的 ``SitePlugin``。
-- 下级要用上级的东西（阴阳师要用灰机的 Data 接口）：``setup.parent(上级的类)``。
-  上级没有接这个扩展点，在这里统一报错。
+- 站点插件要用平台的东西（阴阳师要用灰机的 Data 接口）：``setup.platform(平台的类)``。
+  平台没有接这个扩展点，在这里统一报错。
 """
 
 from __future__ import annotations
 
 import importlib
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from jianshanagent.core.manifest import Manifest, PluginError
+from jianshanagent.core.manifest import KIND_PLATFORM, Manifest, PluginError
 
 if TYPE_CHECKING:
     from jianshanagent.core.config import AppConfig
     from jianshanagent.core.wiki import WikiSite
 
-#: 站点插件接扩展点的模块里，入口函数叫这个名字
+#: 接扩展点的模块里，入口函数叫这个名字
 ENTRY = "create"
 #: 现在有的两个扩展点（名字和开出它的功能插件的清单里写的一样）
 EXTENSION_WIKI = "wiki"
 EXTENSION_KNOWLEDGE = "knowledge"
 
-#: 站点插件装不上：找不到、不合规范、缺上级
+#: 平台、站点插件装不上：找不到、不合规范
 SiteError = PluginError
 
 T = TypeVar("T")
@@ -42,40 +41,42 @@ class SiteSetup:
     """``create(setup)`` 拿到的东西。"""
 
     manifest: Manifest
-    #: 这个 wiki 的那一份配置（通用的配置加上它的站点插件的补充）
+    #: 这个 wiki 的那一份配置（通用的配置加上它的平台、站点插件的补充）
     config: AppConfig
-    #: 这个插件自己的配置（它目录里的 ``config.yaml``，加上后台改过的），没有就是空的
+    #: 自己的配置（目录里的 ``config.yaml``，加上后台改过的），没有就是空的
     raw: dict[str, Any]
-    #: 这个插件是为哪个 wiki 加载的
+    #: 是为哪个 wiki 加载的
     wiki: WikiSite
-    #: 各级上级在同一个扩展点上的实例：id → 实例（没接这个扩展点的上级不在里面）
-    parents: Mapping[str, Any] = field(default_factory=dict)
+    #: 这个 wiki 的平台在同一个扩展点上的实例；平台没接这个扩展点（或者自己就是平台）是 None
+    above: Any = None
 
     @property
     def id(self) -> str:
         return self.manifest.id
 
-    def parent(self, kind: type[T]) -> T:
-        """上级里 ``kind`` 这个类的实例。
-        没有就报错：要么清单里没写对上级，要么上级没接这个扩展点。"""
-        for instance in reversed(list(self.parents.values())):
-            if isinstance(instance, kind):
-                return instance
-        above = self.manifest.parent or "（没写）"
+    def platform(self, kind: type[T]) -> T:
+        """平台在这个扩展点上的实例（``kind`` 是它的类）。
+
+        没有就报错：要么清单里的 ``platform`` 没写对，要么那个平台没接这个扩展点。
+        """
+        if isinstance(self.above, kind):
+            return self.above
         raise SiteError(
-            f"站点插件「{self.id}」要用它上级的 {kind.__name__}，但没找到："
-            f"它清单里写的上级是「{above}」，上级要在 capabilities 里接同一个扩展点"
+            f"{self.manifest.what}要用平台的 {kind.__name__}，但没找到："
+            f"它清单里写的平台是「{self.manifest.platform or '（没写）'}」，"
+            "那个平台要在这个扩展点上提供它"
         )
 
 
 def load_sites(config: AppConfig, extension: str, wiki: WikiSite) -> list[Any]:
-    """``wiki`` 这个 wiki 用到的各级站点插件在 ``extension`` 这个扩展点上的实例，从上到下。
+    """``wiki`` 这个 wiki 的平台和站点插件在 ``extension`` 这个扩展点上的实例，平台在前。
 
-    没接这个扩展点的那几级跳过。插件拿到的配置是这个 wiki 的那一份。
+    没接这个扩展点的跳过。拿到的配置是这个 wiki 的那一份。
     """
-    loaded: dict[str, Any] = {}
+    loaded: list[Any] = []
     chain = config.wiki(wiki.id).chain
     config = config.for_wiki(wiki.id)
+    above: Any = None
     for manifest in chain:
         if extension not in manifest.capabilities:
             continue
@@ -85,25 +86,26 @@ def load_sites(config: AppConfig, extension: str, wiki: WikiSite) -> list[Any]:
         except ModuleNotFoundError as exc:
             if exc.name == path:
                 raise SiteError(
-                    f"站点插件「{manifest.id}」的清单里写了 {extension}，"
-                    f"包里却没有这个模块（{path}）"
+                    f"{manifest.what}的清单里写了 {extension}，包里却没有这个模块（{path}）"
                 ) from exc
             raise  # 模块找到了，是它里面要用的别的东西没装
         factory = getattr(module, ENTRY, None)
         if not callable(factory):
-            raise SiteError(f"站点插件「{manifest.id}」的 {path} 里没有 {ENTRY}(setup)")
+            raise SiteError(f"{manifest.what}的 {path} 里没有 {ENTRY}(setup)")
         setup = SiteSetup(
             manifest=manifest,
             config=config,
-            raw=config.site(manifest.id),
+            raw=config.get(manifest.config_name),
             wiki=wiki,
-            parents=dict(loaded),
+            above=above,
         )
         instance = factory(setup)
         if getattr(instance, "id", None) != manifest.id:
             raise SiteError(
-                f"站点插件「{manifest.id}」的 {path}.{ENTRY} 返回的对象 id 是"
+                f"{manifest.what}的 {path}.{ENTRY} 返回的对象 id 是"
                 f"「{getattr(instance, 'id', None)}」，要和清单里的 id 一样"
             )
-        loaded[manifest.id] = instance
-    return list(loaded.values())
+        loaded.append(instance)
+        if manifest.kind == KIND_PLATFORM:
+            above = instance
+    return loaded

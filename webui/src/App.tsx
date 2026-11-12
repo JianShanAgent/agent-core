@@ -20,6 +20,7 @@ const Logs = lazy(() => import("@/pages/Logs"));
 const Config = lazy(() => import("@/pages/Config"));
 const Models = lazy(() => import("@/pages/Models"));
 const Plugins = lazy(() => import("@/pages/Plugins"));
+const Wikis = lazy(() => import("@/pages/Wikis"));
 const Knowledge = lazy(() => import("@/pages/Knowledge"));
 const Sessions = lazy(() => import("@/pages/Sessions"));
 const ChatLog = lazy(() => import("@/pages/ChatLog"));
@@ -87,6 +88,7 @@ export function App() {
           <Route path="config/*" element={<Config />} />
           <Route path="models" element={<Models />} />
           <Route path="plugins" element={<Plugins />} />
+          <Route path="wikis" element={<Wikis />} />
           <Route path="knowledge" element={<Knowledge />} />
           <Route path="sessions" element={<Sessions />} />
           <Route path="sessions/:key" element={<Sessions />} />

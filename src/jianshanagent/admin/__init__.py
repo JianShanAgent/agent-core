@@ -22,6 +22,7 @@ from jianshanagent.admin import (
     routes_data,
     routes_system,
     routes_traces,
+    routes_wikis,
 )
 from jianshanagent.admin.auth import Auth, load_token, sessions_file
 from jianshanagent.admin.core import STATIC_DIR, Admin, AdminSettings, guard, reply
@@ -95,7 +96,14 @@ def setup_admin(app: web.Application, runtime: Runtime) -> Admin:
     )
     admin = Admin(runtime, settings, auth, source)
     app.middlewares.append(guard(admin))
-    for module in (routes_system, routes_traces, routes_config, routes_chat, routes_data):
+    for module in (
+        routes_system,
+        routes_traces,
+        routes_config,
+        routes_chat,
+        routes_data,
+        routes_wikis,
+    ):
         app.add_routes(module.routes(admin))
     app.router.add_get("/{tail:.*}", _page)
     logger.info("admin_enabled", token_source=source, static=(STATIC_DIR / "index.html").is_file())

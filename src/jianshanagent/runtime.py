@@ -25,6 +25,7 @@ from typing import Any
 
 from aiohttp import web
 
+from jianshanagent.core.catalog import CatalogSettings, SiteCatalog
 from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.conversation import MemoryConversationStore, PostgresConversationStore
 from jianshanagent.core.db import Database
@@ -169,6 +170,8 @@ class Runtime:
         self._maintenance: asyncio.Task[None] | None = None
         #: 查主仓库有没有新版本、装更新包（见 core/update.py）。每次用的时候现读配置
         self.updater = Updater(lambda: UpdateSettings.from_config(self.config))
+        #: 读站点目录、下载站点插件（见 core/catalog.py）。同样每次现读配置
+        self.catalog = SiteCatalog(lambda: CatalogSettings.from_config(self.config))
         self._update_check: asyncio.Task[None] | None = None
 
     # ---- 装配 ----

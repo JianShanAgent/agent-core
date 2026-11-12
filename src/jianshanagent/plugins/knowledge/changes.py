@@ -10,7 +10,7 @@
   没了的会从库里去掉。
 - 模板、模块改了：用到它们的页面的 ``touched`` 会跟着变，重新列页面时就看得出来（见 sources.py）。
 - 别的命名空间：核心不认识，挨个问站点插件（``change_classifier``，后加载的先问——站点插件比
-  平台插件更清楚一份文档是什么）。插件认得的，在 :class:`Plan` 上记下要做什么：
+  平台更清楚一份文档是什么）。插件认得的，在 :class:`Plan` 上记下要做什么：
 
   - 要重跑管线（它自己入库的内容有新修订）；
   - 某个页面要按源码现渲染（页面的内容来自的那份数据改了，页面自己没有新修订）；
@@ -152,7 +152,7 @@ def plan_changes(
     ctx = ctx or ChangeContext(settings)
     plan = Plan()
     counts: Counter[str] = Counter()
-    # 后加载的先问：站点插件排在平台插件后面，它更清楚一份文档是什么
+    # 后加载的先问：站点插件排在平台后面，它更清楚一份文档是什么
     classifiers = [
         classify
         for site in reversed(tuple(settings.sites))

@@ -4,6 +4,7 @@ import {
   Activity,
   BookOpen,
   Cpu,
+  Globe,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -62,6 +63,7 @@ const NAV: { title?: string; items: NavItem[] }[] = [
       { to: "/config", label: "机器人配置", icon: Settings },
       { to: "/models", label: "模型管理", icon: Cpu },
       { to: "/plugins", label: "插件", icon: Puzzle },
+      { to: "/wikis", label: "Wiki", icon: Globe },
     ],
   },
   {
