@@ -7,7 +7,7 @@
 - ``<br>`` 是换行；连续两个换行是分段。``white-space: pre*`` 的元素里，源码里的换行也算换行。
 - 相邻的两个「带 class 的 span」或链接之间没有文字时补一个空格：这个站大量用并排的 span
   摆放「名称 数值」「标签 标签」，直接连起来会粘成一串。
-- 表格见 :mod:`tables`；含嵌套表格的表按排版表格展开，逐格处理。
+- 表格见 :mod:`tables`；含嵌套表格的表、只有一列的表按排版表格展开，逐格处理。
 - 紧挨在表格前面的短句（不以句末标点结尾）当作表题并进表格，拆表时随表头一起重复。
 """
 
@@ -34,6 +34,7 @@ from jianshanagent.plugins.knowledge.tables import (
     FORM_TABLE,
     TableStats,
     build_table,
+    is_single_column,
     one_line,
 )
 
@@ -391,10 +392,15 @@ class BlockBuilder:
     # ── 表格 ──────────────────────────────────────────────────────────
 
     def _table(self, el: HtmlElement, pre: bool) -> None:
-        if any(_tag(d) == "table" for d in el.iterdescendants()):
-            # 嵌套表格：外层是排版用的，逐格当容器处理，内层表格各自转换
+        nested = any(_tag(d) == "table" for d in el.iterdescendants())
+        if nested or is_single_column(el):
+            # 排版用的表格，逐格当容器处理。嵌套表格：外层是排版用的，内层表格各自转换；
+            # 只有一列的表格：给一段内容加的框，表头成了它前面的一行
             self.table_stats.total += 1
-            self.table_stats.nested += 1
+            if nested:
+                self.table_stats.nested += 1
+            else:
+                self.table_stats.single_column += 1
             for cell in el.iter("caption", "td", "th"):
                 owner = next((a for a in cell.iterancestors() if _tag(a) == "table"), None)
                 if owner is el:

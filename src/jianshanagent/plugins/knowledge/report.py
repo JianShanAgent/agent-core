@@ -514,7 +514,7 @@ def build_report(result: ProcessResult, settings: Settings) -> str:
     add(f"- 含嵌套表格、外层按排版表格逐格展开的：{tables['nested']} 张")
     add(f"- 没有表头行、把第一行当表头的（三列及以上）：{tables['headerless']} 张")
     add(f"- 没有表头行的两列表格，转成「名称：值」列表的：{tables['key_value']} 张")
-    add(f"- 没有表头行的一列表格，转成普通文字的：{tables['single_column']} 张")
+    add(f"- 只有一列的表格，转成普通文字的：{tables['single_column']} 张")
     add(f"- 清洗后没有内容、丢弃的：{tables['empty']} 张")
     add(f"- 因为整行只有占位值而去掉的表格行：{tables['placeholder_rows']} 行")
     add(

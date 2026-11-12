@@ -92,6 +92,8 @@ class CleanSettings:
     tabber_class: str = "tabber"
     tabber_item_class: str = "tabber-item"
     tabber_label_class: str = "tabber-filter-item"
+    #: 标签页的名字写在内容块的哪个属性上（MediaWiki 的 Tabber 扩展是 ``title``）；空 = 只认按钮
+    tabber_label_attribute: str = ""
     nav_block_min_links: int = 10
     nav_block_link_ratio: float = 0.8
     nav_block_max_share: float = 0.3
@@ -289,6 +291,9 @@ def clean_settings(c: dict[str, Any]) -> CleanSettings:
         tabber_class=str(c.get("tabber_class") or defaults.tabber_class),
         tabber_item_class=str(c.get("tabber_item_class") or defaults.tabber_item_class),
         tabber_label_class=str(c.get("tabber_label_class") or defaults.tabber_label_class),
+        tabber_label_attribute=str(
+            c.get("tabber_label_attribute") or defaults.tabber_label_attribute
+        ),
         nav_block_min_links=int(c.get("nav_block_min_links") or defaults.nav_block_min_links),
         nav_block_link_ratio=float(c.get("nav_block_link_ratio") or defaults.nav_block_link_ratio),
         nav_block_max_share=float(c.get("nav_block_max_share") or defaults.nav_block_max_share),

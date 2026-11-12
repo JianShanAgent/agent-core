@@ -121,7 +121,9 @@ clean:
   # （site.<id> 的 extend 段里 plugin.knowledge 的 clean）：名单合在一起，单个值以站点插件写的为准。
   # 能补充的项：remove_classes、heading_classes（class → 提成第几级小标题）、section_titles、
   # badge_texts、term_classes、inline_classes、prefix_classes、linked_cards、table_placeholders、
-  # tabber_class / tabber_item_class / tabber_label_class。各项的意思见 site.yys 里的例子。
+  # tabber_class / tabber_item_class / tabber_label_class / tabber_label_attribute。
+  # 各项的意思见 site.yys 里的例子。标签页的名字默认从按钮的文字取（tabber_label_class）；
+  # 名字写在内容块的属性上的（MediaWiki 的 Tabber 扩展写在 title 里），用 tabber_label_attribute 指明是哪个属性。
   # 按 class 整块移除（命中任意一个即移除）。下面这几样是 MediaWiki 通用的，代码里本来就有
   # （不写也会去掉），列在这里是为了看得见；要加别的接着往下写
   remove_classes:

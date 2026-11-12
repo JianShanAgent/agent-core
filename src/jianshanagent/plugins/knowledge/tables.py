@@ -3,7 +3,11 @@
 - 合并单元格（rowspan / colspan）：先展开成规整的网格。跨行的值在每一行都重复
   （每一行单独拿出来都要看得懂）；表头里跨列的值每列都重复，正文里跨列的值只留在第一格。
 - 多行表头：同一列自上而下用「 / 」连起来。
-- 没有表头行：一列的当作普通文字逐行输出；两列的当作「名称：值」列表；三列及以上把第一行当表头。
+- 没有表头行：两列的当作「名称：值」列表；三列及以上把第一行当表头；
+  去掉空列以后只剩一列的当作普通文字逐行输出。
+- 只有一列的表格（每一行都只有一格，:func:`is_single_column`）：由调用方处理。它没有「列」可言，
+  是给一段内容加的框（折叠框：表头是「全文」，下面一格是整章的对白）——逐格当普通内容处理，
+  转成一行表格的话，这一格多长都切不开。
 - 嵌套表格：由调用方处理（外层按排版用的表格展开，内层表格各自照常转换）。
 - 单元格里的换行、列表：用 ``<br>`` 连在一格里；``|`` 转义。
 """
@@ -32,7 +36,7 @@ class TableStats:
     nested: int = 0  # 含嵌套表格、外层按排版表格展开的个数
     headerless: int = 0  # 没有表头行、把第一行当表头的表格数
     key_value: int = 0  # 没有表头的两列表格，转成「名称：值」列表
-    single_column: int = 0  # 没有表头的一列表格，转成普通文字
+    single_column: int = 0  # 只有一列的表格，转成普通文字
     empty: int = 0  # 清洗后没有内容的表格
     multi_header: int = 0  # 表头不止一行的表格数
     markdown_tables: int = 0  # 最终输出成 Markdown 表格的个数
@@ -85,6 +89,15 @@ def _rows(table: HtmlElement) -> list[tuple[HtmlElement, bool]]:
                 if isinstance(tr.tag, str) and tr.tag.lower() == "tr"
             ]
     return rows
+
+
+def is_single_column(table: HtmlElement) -> bool:
+    """这张表是不是每一行都只有一格（没有单元格的行不算）。一格也没有的不是。"""
+    widths = {
+        sum(1 for c in tr if isinstance(c.tag, str) and c.tag.lower() in ("td", "th"))
+        for tr, _ in _rows(table)
+    }
+    return widths - {0} == {1}
 
 
 def _expand(

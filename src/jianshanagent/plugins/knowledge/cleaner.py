@@ -13,6 +13,8 @@
 - 标签页（``tabber``）：按钮文字提成小标题放到对应内容前面（如式神页的「传记一 … 传记五」），
   内容全是图片的标签页（皮肤立绘）只留下按钮文字的列表。按钮和内容数量对不上时
   （「活动一览」的「节日活动」没有内容），按两边共有的 ``data-*`` 属性配对。
+  有的标签页没有按钮，名字写在内容块的属性上（MediaWiki 的 Tabber 扩展写在 ``title`` 里，
+  按钮是浏览器里的脚本生成的）：配置了 ``tabber_label_attribute`` 就从那个属性取。
 - ``badge_texts``：只有图标的徽章（对局阵容里的「胜」）换成文字，接到它标注的名字后面。
 - ``heading_classes``：把本来就是小标题、但用 div 写的元素（技能名等）提成标题，切片路径能带上它。
 - ``term_classes`` / ``prefix_classes``：把「名称 + 说明」并成一行，
@@ -166,10 +168,13 @@ def _owning_tabber(el: HtmlElement, tabber_class: str) -> HtmlElement | None:
 
 
 def _mark_tab_labels(root: HtmlElement, settings: CleanSettings, stats: CleanStats) -> None:
-    """把每个标签页按钮的文字记到对应的内容块上（按钮和内容按出现顺序一一对应）。
+    """把每个标签页的名字记到对应的内容块上。
 
+    名字是按钮的文字（按钮和内容按出现顺序一一对应）；配置了 ``tabber_label_attribute``、
+    内容块上又带着这个属性的，名字是属性的值。
     必须在移除按钮之前做；真正插入小标题要等图片等噪声清掉之后（见 :func:`_promote_headings`）。
     """
+    attribute = settings.tabber_label_attribute
     tabbers = [el for el in root.iter() if isinstance(el.tag, str) and _is_tabber(el, settings)]
     for tabber in tabbers:
         items, labels = [], []
@@ -183,13 +188,16 @@ def _mark_tab_labels(root: HtmlElement, settings: CleanSettings, stats: CleanSta
                 items.append(el)
             elif settings.tabber_label_class in classes:
                 labels.append(el)
-        if items and len(items) != len(labels):
-            # 数量对不上（有的按钮没有对应内容）：改按按钮和内容共有的 data-* 属性配对
-            labels = _labels_by_attribute(items, labels)
-        if not items or len(items) != len(labels):
-            continue  # 对不上就不加小标题，内容照常保留
+        if attribute and any(item.get(attribute) for item in items):
+            texts = [" ".join((item.get(attribute) or "").split()) for item in items]
+        else:
+            if items and len(items) != len(labels):
+                # 数量对不上（有的按钮没有对应内容）：改按按钮和内容共有的 data-* 属性配对
+                labels = _labels_by_attribute(items, labels)
+            if not items or len(items) != len(labels):
+                continue  # 对不上就不加小标题，内容照常保留
+            texts = [" ".join(_label_text(label).split()) for label in labels]
         stats.tabbers += 1
-        texts = [" ".join(_label_text(label).split()) for label in labels]
         named = any(texts)
         for index, (item, text) in enumerate(zip(items, texts, strict=True)):
             if not text and named:
