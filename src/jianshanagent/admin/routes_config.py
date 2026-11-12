@@ -264,7 +264,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 "base_url_locked": is_locked("core.llm", ("base_url",)),
                 "default_profile": llm.get("default_profile"),
                 "timeout_seconds": llm.get("timeout_seconds"),
-                # 联网搜索不走大模型，是单独的搜索接口（core.websearch.yaml），这里只告诉页面开没开
+                # 联网搜索不用这里的档位，另有地址和密钥（core.websearch.yaml）；这里只说开没开
                 "web_search": bool(disk.files.get("core.websearch", {}).get("enabled", False)),
                 "profiles": [
                     {

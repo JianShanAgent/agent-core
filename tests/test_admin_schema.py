@@ -218,6 +218,11 @@ def test_items_that_cannot_be_changed_from_the_web_are_marked_locked() -> None:
         "core.storage": {"postgres.dsn_env", "redis.url_env"},
         # 从哪个仓库更新、下载走哪个镜像：决定机器人下载并运行谁的代码
         "core.update": {"repo", "api_url", "download_prefix"},
-        "core.websearch": {"base_url", "secret"},
+        "core.websearch": {
+            "providers.gitee_ai.base_url",
+            "providers.gitee_ai.secret",
+            "providers.mimo.base_url",
+            "providers.mimo.secret",
+        },
         "core.wiki": {"api_url", "site_base", "auth_header", "site"},
     }

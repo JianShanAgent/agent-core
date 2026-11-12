@@ -1012,7 +1012,7 @@ def test_plugin_builds_the_levels_that_are_available() -> None:
 
     # 打开而且有密钥：联网搜索是最后一级，客户端登记成服务（退出时由宿主关连接），游戏名从配置里来
     files["core.websearch"] = {**files["core.websearch"], "enabled": True}
-    for secrets in ({}, {"gitee_ai": {"api_key": "k"}}):  # 打开了但没填密钥：还是没有这一级
+    for secrets in ({}, {"mimo_search": {"api_key": "k"}}):  # 打开了但没填密钥：还是没有这一级
         config = AppConfig(root=Path("."), files=files, secrets=secrets)
         ctx = PluginContext("research", config, {"llm": llm, "knowledge": retriever})
         ResearchPlugin().register(ctx)
