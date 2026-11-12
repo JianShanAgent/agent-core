@@ -1,15 +1,21 @@
 """命令行入口。
 
+部署挂了几个 wiki，知识库就各建各的（文件在 ``data/kb/<wiki 的 id>/``）。下面的命令不指明是哪个
+wiki 时，挨个对每个 wiki 做一遍；只做一个的话在子命令前面加 ``--wiki <id>``::
+
+    python -m jianshanagent.plugins.knowledge --wiki bwiki run
+
 ::
 
-    # 全量（取数走缓存，中断后重跑会接着取；结果写到 data/kb/）
+    # 全量（取数走缓存，中断后重跑会接着取；结果写到 data/kb/<wiki 的 id>/）
     python -m jianshanagent.plugins.knowledge run
 
     # 不联网，只用缓存重新清洗、切片、出报告（调规则时用）
     python -m jianshanagent.plugins.knowledge run --offline
 
-    # 只跑指定页面或 Data 文档（结果写到 data/kb/debug/，不动全量结果）
-    python -m jianshanagent.plugins.knowledge run --print \\
+    # 只跑指定页面或 Data 文档（结果写到 data/kb/<wiki 的 id>/debug/，不动全量结果）。
+    # 挂了不止一个 wiki 时要指明是哪个 wiki 的页面
+    python -m jianshanagent.plugins.knowledge --wiki huiji run --print \\
         --only "为崽而战·浮世之航" --only "Data:Story/575.json"
 
     # 忽略缓存重新取（修订号没变但模板、模块、Data 改了的时候）
@@ -23,7 +29,9 @@
     python -m jianshanagent.plugins.knowledge embed --provider local    # 用本机模型（服务要先起来）
     python -m jianshanagent.plugins.knowledge embed --status            # 只看算了多少，不调接口
 
-    # 把切片和向量导入数据库（以切片文件为准整库对齐，没变的不动；机器人不用停）
+    # 把切片和向量导入数据库（以切片文件为准，一个 wiki 一个 wiki 地对齐，没变的不动；
+    # 机器人不用停）。
+    # 不指明 wiki 时，库里已经不在 core.wiki.yaml 里的 wiki 的切片会一并删掉
     python -m jianshanagent.plugins.knowledge load
     python -m jianshanagent.plugins.knowledge load --status             # 只看库里现在有什么
 
@@ -47,10 +55,11 @@ import logging
 import sys
 from pathlib import Path
 
-from jianshanagent.core.config import AppConfig
+from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.db import Database
 from jianshanagent.core.embedding import EmbeddingError, EmbeddingProvider, EmbeddingSettings
 from jianshanagent.core.logging import setup_logging
+from jianshanagent.core.wiki import load_wikis
 from jianshanagent.plugins.knowledge import image_cli, sync_cli
 from jianshanagent.plugins.knowledge.embed import (
     VectorStoreError,
@@ -58,12 +67,13 @@ from jianshanagent.plugins.knowledge.embed import (
     store_status,
     verify_store,
 )
+from jianshanagent.plugins.knowledge.image_store import PostgresImageStore
 from jianshanagent.plugins.knowledge.load import load_into
 from jianshanagent.plugins.knowledge.pipeline import ProcessResult, run_pipeline
 from jianshanagent.plugins.knowledge.report import write_outputs
-from jianshanagent.plugins.knowledge.settings import Settings, load_settings
+from jianshanagent.plugins.knowledge.settings import Settings, is_primary, load_settings
 from jianshanagent.plugins.knowledge.sink import CHUNKS_FILE, JsonlSink
-from jianshanagent.plugins.knowledge.store import PostgresKnowledgeStore
+from jianshanagent.plugins.knowledge.store import PostgresKnowledgeStore, StoreInfo
 
 #: 单独重算的向量和存下来的相似度低于这个值，就当作有问题
 VERIFY_MIN_SIMILARITY = 0.99
@@ -76,6 +86,11 @@ def _parser() -> argparse.ArgumentParser:
         "以及以图搜图用的图片索引（images）",
     )
     parser.add_argument("--config-dir", help="配置目录（默认仓库的 config/）")
+    parser.add_argument(
+        "--wiki",
+        metavar="ID",
+        help="只做这个 wiki（core.wiki.yaml 的 wikis 里的 id）；不写就挨个做每个 wiki",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="跑管线（默认全量；可断点续跑）")
     run.add_argument(
@@ -83,7 +98,7 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="标题",
-        help="只处理这个页面或 Data 文档，可重复；结果写到 <输出目录>/debug/",
+        help="只处理这个页面或 Data 文档，可重复；结果写到 <这个 wiki 的目录>/debug/",
     )
     run.add_argument("--offline", action="store_true", help="不发任何请求，只用本地缓存")
     run.add_argument("--refresh", action="store_true", help="忽略缓存，重新取原始内容")
@@ -93,7 +108,7 @@ def _parser() -> argparse.ArgumentParser:
         help="沿用上次的页面清单，只补清单里缺的数据集（不重新列页面）",
     )
     run.add_argument("--print", dest="show", action="store_true", help="把切片全文打印出来")
-    run.add_argument("--output-dir", help="输出目录（默认取配置里的 paths.output_dir）")
+    run.add_argument("--output-dir", help="输出目录（默认是知识库目录下这个 wiki 的那一层）")
 
     embed = sub.add_parser("embed", help="给切片算向量（可断点续跑）")
     embed.add_argument(
@@ -108,14 +123,16 @@ def _parser() -> argparse.ArgumentParser:
         help="算完后随机抽 N 片单独重算，和存下来的比对（默认 20；0 = 不比对）",
     )
     embed.add_argument("--status", action="store_true", help="只看算了多少，不调接口")
-    embed.add_argument("--output-dir", help="切片所在的目录（默认取配置里的 paths.output_dir）")
+    embed.add_argument(
+        "--output-dir", help="切片所在的目录（默认是知识库目录下这个 wiki 的那一层）"
+    )
 
     load = sub.add_parser("load", help="把切片和向量导入数据库（可反复跑）")
     load.add_argument(
         "--provider", help="用哪一家的向量（默认取 core.embedding.yaml 的 default_provider）"
     )
     load.add_argument("--status", action="store_true", help="只看库里现在有什么，不导入")
-    load.add_argument("--output-dir", help="切片所在的目录（默认取配置里的 paths.output_dir）")
+    load.add_argument("--output-dir", help="切片所在的目录（默认是知识库目录下这个 wiki 的那一层）")
     image_cli.add_parser(sub)
     sync_cli.add_parser(sub)
     return parser
@@ -150,7 +167,14 @@ def _provider_and_paths(
 
 
 async def _load_async(
-    dsn: str, provider: EmbeddingProvider, chunks_path: Path, store_dir: Path, status_only: bool
+    dsn: str,
+    provider: EmbeddingProvider,
+    chunks_path: Path,
+    store_dir: Path,
+    *,
+    wiki: str,
+    primary: bool,
+    status_only: bool,
 ) -> None:
     db = Database(dsn, pool_max=2)
     await db.connect()
@@ -158,7 +182,9 @@ async def _load_async(
         await db.migrate()
         store = PostgresKnowledgeStore(db)
         if not status_only:
-            report = await load_into(store, chunks_path, store_dir, provider)
+            report = await load_into(
+                store, chunks_path, store_dir, provider, wiki=wiki, replace_unlabelled=primary
+            )
             print(
                 f"导入完成：切片文件里 {report.total} 片，其中 {report.with_vectors} 片有向量；"
                 f"写入 {report.upserted} 片，没变 {report.unchanged} 片，删除 {report.deleted} 片；"
@@ -171,14 +197,31 @@ async def _load_async(
                     "不该算向量的切片本来就没有；其余的先跑 embed 补上再导入一次",
                     file=sys.stderr,
                 )
-        info = await store.info()
+        info = (await store.info()).wikis.get(wiki) or StoreInfo()
         print(
-            f"库里现在有 {info.chunks} 片，{info.with_vectors} 片有向量，"
+            f"库里这个 wiki 现在有 {info.chunks} 片，{info.with_vectors} 片有向量，"
             f"向量指纹 {info.fingerprint}，上次导入 {info.loaded_at}",
             file=sys.stderr,
         )
     finally:
         await db.close()
+
+
+async def _forget_other_wikis(dsn: str, wikis: list[str]) -> None:
+    """库里已经不在 ``core.wiki.yaml`` 里的 wiki 的切片和图片：删掉。"""
+    db = Database(dsn, pool_max=2)
+    await db.connect()
+    try:
+        await db.migrate()
+        chunks = await PostgresKnowledgeStore(db).keep_only(wikis)
+        images = await PostgresImageStore(db).keep_only(wikis)
+    finally:
+        await db.close()
+    if chunks or images:
+        print(
+            f"库里有已经不在 core.wiki.yaml 里的 wiki 的内容，删掉了：{chunks} 片、{images} 张图",
+            file=sys.stderr,
+        )
 
 
 def _load(args: argparse.Namespace, config: AppConfig, settings: Settings) -> int:
@@ -193,7 +236,17 @@ def _load(args: argparse.Namespace, config: AppConfig, settings: Settings) -> in
         )
         return 2
     try:
-        asyncio.run(_load_async(config.postgres_dsn, provider, chunks_path, store_dir, args.status))
+        asyncio.run(
+            _load_async(
+                config.postgres_dsn,
+                provider,
+                chunks_path,
+                store_dir,
+                wiki=settings.wiki.id,
+                primary=is_primary(config, settings),
+                status_only=args.status,
+            )
+        )
     except VectorStoreError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -247,23 +300,7 @@ def _embed(args: argparse.Namespace, config: AppConfig, settings: Settings) -> i
     return 0 if ok else 1
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    # 一直跑的那个是服务器上的容器，日志由 Loki 收，和机器人一样打成 JSON；其余是人在终端里跑的
-    setup_logging(json_logs=args.command == "sync" and args.loop)
-    logging.getLogger("httpx").setLevel(logging.WARNING)  # 不逐条打印请求
-    from jianshanagent.core.config import load_config
-
-    config = load_config(args.config_dir)
-    settings = load_settings(config)
-    if args.command == "embed":
-        return _embed(args, config, settings)
-    if args.command == "load":
-        return _load(args, config, settings)
-    if args.command == "images":
-        return image_cli.run(args, config, settings)
-    if args.command == "sync":
-        return sync_cli.run(args, config, settings)
+def _run(args: argparse.Namespace, settings: Settings) -> int:
     only = set(args.only) or None
     output_dir = Path(args.output_dir).resolve() if args.output_dir else settings.output_dir
     if only is not None and not args.output_dir:
@@ -289,3 +326,61 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     return 0
+
+
+def _one_wiki(args: argparse.Namespace, config: AppConfig, settings: Settings) -> int:
+    """对一个 wiki 做这条命令。站点插件的补充只对它那个 wiki 生效，
+    所以 ``config`` 是它那一份配置，``settings`` 是它的知识库设置。"""
+    if args.command == "embed":
+        return _embed(args, config, settings)
+    if args.command == "load":
+        return _load(args, config, settings)
+    if args.command == "images":
+        return image_cli.run(args, config, settings)
+    if args.command == "sync":
+        return sync_cli.run(args, config, settings)
+    return _run(args, settings)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    # 一直跑的那个是服务器上的容器，日志由 Loki 收，和机器人一样打成 JSON；其余是人在终端里跑的
+    setup_logging(json_logs=args.command == "sync" and args.loop)
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # 不逐条打印请求
+    config = load_config(args.config_dir)
+    if args.command == "sync" and (args.loop or args.health):
+        return sync_cli.run_service(args, config)  # 一个进程管全部 wiki
+    try:
+        wikis = [config.wiki(args.wiki).id] if args.wiki else [w.id for w in load_wikis(config)]
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    one_only = [
+        option
+        for option, given in (
+            ("--only", getattr(args, "only", None)),
+            ("--output-dir", getattr(args, "output_dir", None)),
+        )
+        if given
+    ]
+    if one_only and len(wikis) > 1:
+        print(
+            f"挂了不止一个 wiki（{'、'.join(wikis)}），用 {'、'.join(one_only)} 时"
+            "要在子命令前面加 --wiki <id> 指明是哪一个",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        settings = {wiki: load_settings(config, wiki) for wiki in wikis}
+    except ValueError as exc:  # 配置写得不对：说清楚哪里不对，不甩一屏调用栈
+        print(str(exc), file=sys.stderr)
+        return 2
+    codes: list[int] = []
+    for wiki in wikis:
+        if len(wikis) > 1:
+            print(f"── {wiki} ──", file=sys.stderr)
+        codes.append(_one_wiki(args, config.for_wiki(wiki), settings[wiki]))
+    loading = args.command == "load" or (args.command == "images" and args.images_command == "load")
+    if loading and not args.wiki and not getattr(args, "status", False) and config.postgres_dsn:
+        asyncio.run(_forget_other_wikis(config.postgres_dsn, wikis))
+    return max(codes)

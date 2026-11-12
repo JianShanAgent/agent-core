@@ -41,7 +41,7 @@ _GROUPS = (
     ("gateway.", "接入"),
     ("core.", "内核"),
     ("plugin.", "插件"),
-    ("site.", "站点"),  # 站点插件自己的配置（core.wiki 的 site 用到的那一串才生效）
+    ("site.", "站点"),  # 站点插件自己的配置（core.wiki 里挂的 wiki 用到的那几串才生效）
 )
 _TEST_PROMPT = "这是一次连通性测试。请只回复两个字：收到"
 _TEST_TIMEOUT_SECONDS = 90.0

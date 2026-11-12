@@ -232,9 +232,16 @@ def image_status(
 
 
 def read_image_records(
-    images_path: Path, vectors_dir: Path, provider: EmbeddingProvider, preprocess: str
+    images_path: Path,
+    vectors_dir: Path,
+    provider: EmbeddingProvider,
+    preprocess: str,
+    wiki: str = "",
 ) -> Iterator[ImageRecord]:
-    """逐张读出（图片，向量）。向量按「图片 ID + 原图哈希 + 预处理」对，对不上的当作没有。"""
+    """逐张读出（图片，向量）。向量按「图片 ID + 原图哈希 + 预处理」对，对不上的当作没有。
+
+    ``wiki``：这份记录是哪个 wiki 的，读出来的图片上标着它（入库的样子）。
+    """
     vectors = VectorStore(vectors_dir, provider, embedded=_EMBEDDED)
     has_vectors = (vectors_dir / INDEX_FILE).exists()
     if has_vectors:
@@ -244,7 +251,7 @@ def read_image_records(
         position = (
             vectors.row(image.image_id, embed_key(image, preprocess)) if has_vectors else None
         )
-        yield image, (vectors.vector(position) if position is not None else None)
+        yield image.of(wiki), (vectors.vector(position) if position is not None else None)
 
 
 async def load_images_into(
@@ -253,9 +260,15 @@ async def load_images_into(
     vectors_dir: Path,
     provider: EmbeddingProvider,
     preprocess: str,
+    *,
+    wiki: str = "",
+    replace_unlabelled: bool = False,
 ) -> ImageSyncReport:
+    """``replace_unlabelled``：库里没标出处的图片一起换掉（导入主 wiki 时用）。"""
     return await store.sync(
-        read_image_records(images_path, vectors_dir, provider, preprocess),
+        read_image_records(images_path, vectors_dir, provider, preprocess, wiki),
         fingerprint=provider.fingerprint,
         preprocess=preprocess,
+        wiki=wiki,
+        replace_unlabelled=replace_unlabelled,
     )

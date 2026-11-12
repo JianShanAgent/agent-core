@@ -491,6 +491,9 @@ async def test_session_and_chat_lists_only_read_a_recent_window(db: Database) ->
     assert await groups(days=0) == month  # 0 = 不限时间
 
 
+_ROW = {"chunk_id": "p1", "doc_key": "page:1", "type": "entry", "title": "千姬", "text": "千姬"}
+
+
 async def test_knowledge_browsing(db: Database) -> None:
     queries = AdminQueries(db)
     chunks = [
@@ -541,17 +544,27 @@ async def test_knowledge_browsing(db: Database) -> None:
             "式神头像": 1,
         }
 
-        # 自动更新的状态：没跑过是 None；跑过就是它写下的那一份（对账用的那一项不给页面）
-        assert await queries.kb_sync() is None
-        status = PostgresStatusStore(db)
+        # 自动更新的状态一个 wiki 一份：没跑过是 None；跑过就是它写下的那一份
+        # （对账用的那一项不给页面）
+        assert await queries.kb_sync("huiji") is None
+        status = PostgresStatusStore(db, "huiji")
         await status.write({"checked_at": "2026-11-11T22:20:11+0800", "loaded": {"kb": "某一版"}})
         try:
-            assert await queries.kb_sync() == {"checked_at": "2026-11-11T22:20:11+0800"}
+            assert await queries.kb_sync("huiji") == {"checked_at": "2026-11-11T22:20:11+0800"}
+            assert await queries.kb_sync("bwiki") is None
         finally:
-            await db.pool.execute("DELETE FROM kb_meta WHERE key = 'sync'")
+            await db.pool.execute("DELETE FROM kb_meta WHERE key = 'sync:huiji'")
 
         page = await queries.kb_chunks(limit=2, offset=0, kind="entry", search=None)
         assert page["total"] == 3 and [row["chunk_id"] for row in page["items"]] == ["c0", "c1"]
+        # 只看一个 wiki 的：库里的 id 前面带着它的名字
+        await knowledge.sync(
+            [(KbChunk.from_json(_ROW, "bwiki"), None)], fingerprint=FP, wiki="bwiki"
+        )
+        mine = await queries.kb_chunks(limit=5, offset=0, kind=None, search=None, wiki="bwiki")
+        assert [(row["chunk_id"], row["wiki"]) for row in mine["items"]] == [("bwiki:p1", "bwiki")]
+        await knowledge.sync([], fingerprint=FP, wiki="bwiki")
+        assert page["items"][0]["wiki"] == ""
         assert (
             page["items"][0]["preview"].startswith("千姬 > 档案") and page["items"][0]["chars"] > 0
         )

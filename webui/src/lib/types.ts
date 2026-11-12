@@ -475,6 +475,20 @@ export interface KbSummary {
   types: { type: string; chunks: number; docs: number; with_vectors: number; chars: number }[];
   image_kinds: { kind: string; images: number; with_vectors: number }[];
   settings: { top_k: number; keyword_slots: number } | null;
+  /** 这个部署挂着的各个 wiki（core.wiki 的 wikis），排第一的是主 wiki */
+  wikis: KbWiki[];
+}
+
+/** 挂着的一个 wiki：库里有它多少内容、它的自动更新跑得怎么样。 */
+export interface KbWiki {
+  id: string;
+  /** 标出处时怎么称呼它 */
+  label: string;
+  chunks: number;
+  with_vectors: number;
+  fingerprint: string | null;
+  loaded_at: string | null;
+  images: number;
   /** 自动更新的状态；服务器上的 kbsync 服务还没跑过（或者本机调试）时是 null */
   sync: KbSync | null;
 }
@@ -541,6 +555,8 @@ export interface KbSync {
 
 export interface KbChunkRow {
   chunk_id: string;
+  /** 出自哪个 wiki（core.wiki 里的 id）；分 wiki 之前导入的是空的 */
+  wiki: string;
   doc_key: string;
   type: string;
   title: string;
@@ -566,6 +582,7 @@ export interface KbChunk extends Omit<KbChunkRow, "preview" | "chars"> {
 
 export interface KbSearchHit {
   chunk_id: string;
+  wiki: string;
   type: string;
   title: string;
   section_path: string[];
@@ -589,6 +606,7 @@ export interface KbSearchResult {
 
 export interface KbImage {
   image_id: string;
+  wiki: string;
   kind: string;
   label: string;
   subject: string;
@@ -601,6 +619,7 @@ export interface KbImage {
 
 export interface ImageSearchHit {
   image_id: string;
+  wiki: string;
   label: string;
   kind: string;
   page_title: string;

@@ -2,19 +2,22 @@
 
 ::
 
-    # 选图、生成记录（data/kb/images.jsonl）、把原图下载到缓存（只下新增和变了的）
+    # 选图、生成记录（data/kb/<wiki 的 id>/images.jsonl）、把原图下载到缓存（只下新增和变了的）
     python -m jianshanagent.plugins.knowledge images collect
     python -m jianshanagent.plugins.knowledge images collect --offline   # 不联网，用缓存重做
 
     # 给图片算向量（中断后重跑会接着算，已经有的不重算；先试跑可以加 --limit 20）
     python -m jianshanagent.plugins.knowledge images embed
 
-    # 把记录和向量导入数据库（整库对齐，没变的不动；只读文件、写数据库，服务器容器里就能跑）
+    # 把记录和向量导入数据库（一个 wiki 一个 wiki 地对齐，没变的不动；
+    # 只读文件、写数据库，服务器容器里就能跑）
     python -m jianshanagent.plugins.knowledge images load
-    python -m jianshanagent.plugins.knowledge images load --output-dir /data/kb
 
     # 只看现状（记录、原图缓存、向量、数据库），不发请求
     python -m jianshanagent.plugins.knowledge images status
+
+部署挂了几个 wiki 时，不指明就挨个做；只做一个的话在 ``images`` 前面加 ``--wiki <id>``
+（见 cli.py）。没有站点插件管图库的 wiki 跳过。
 """
 
 from __future__ import annotations
@@ -45,10 +48,10 @@ from jianshanagent.plugins.knowledge.image_embed import (
     vectors_dirname,
     verify_image_vectors,
 )
-from jianshanagent.plugins.knowledge.image_store import PostgresImageStore
+from jianshanagent.plugins.knowledge.image_store import ImageStoreInfo, PostgresImageStore
 from jianshanagent.plugins.knowledge.images import ImageSettings
 from jianshanagent.plugins.knowledge.pipeline import append_fetch_log
-from jianshanagent.plugins.knowledge.settings import Settings
+from jianshanagent.plugins.knowledge.settings import Settings, is_primary
 from jianshanagent.plugins.knowledge.sources import WikiSource
 
 STATS_FILE = "images_stats.json"
@@ -62,7 +65,7 @@ def add_parser(sub: Any) -> None:
 
     collect = steps.add_parser("collect", help="选图、生成记录、下载原图（只下新增和变了的）")
     collect.add_argument("--offline", action="store_true", help="不发任何请求，用缓存重新生成记录")
-    collect.add_argument("--output-dir", help="输出目录（默认取配置里的 paths.output_dir）")
+    collect.add_argument("--output-dir", help="输出目录（默认是知识库目录下这个 wiki 的那一层）")
 
     embed = steps.add_parser("embed", help="给图片算向量（可断点续跑）")
     embed.add_argument("--limit", type=int, metavar="N", help="这次最多算 N 张（试跑用）")
@@ -79,7 +82,9 @@ def add_parser(sub: Any) -> None:
         parser.add_argument(
             "--provider", help="用哪一家（默认取 core.embedding.yaml 的 default_provider）"
         )
-        parser.add_argument("--output-dir", help="记录和向量所在的目录（默认取 paths.output_dir）")
+        parser.add_argument(
+            "--output-dir", help="记录和向量所在的目录（默认是知识库目录下这个 wiki 的那一层）"
+        )
 
 
 def _say(text: str) -> None:
@@ -106,7 +111,10 @@ def _provider_and_paths(
     output_dir = _output_dir(args, settings)
     images_path = output_dir / IMAGES_FILE
     if not images_path.exists():
-        _say(f"找不到图片记录 {images_path}，先跑 images collect")
+        if settings.sites.has_images:
+            _say(f"找不到图片记录 {images_path}，先跑 images collect")
+        else:
+            _say(f"「{settings.wiki.id}」没有站点插件管图库，没有图片记录")
         return None
     return provider, images_path, output_dir / "vectors" / vectors_dirname(provider)
 
@@ -119,10 +127,11 @@ async def _collect(args: argparse.Namespace, settings: Settings) -> int:
     output_dir = _output_dir(args, settings)
     if not settings.sites.has_images:
         _say(
-            "没有站点插件管图库：选哪些图、每张图是什么因站而异，要由站点插件来定"
-            "（用哪个站点插件见 core.wiki.yaml 的 site；怎么写见 site.py 的 image_catalog）"
+            f"「{settings.wiki.id}」没有站点插件管图库：选哪些图、每张图是什么因站而异，"
+            "要由站点插件来定（这个 wiki 用哪个站点插件见 core.wiki.yaml；"
+            "怎么写见 site.py 的 image_catalog）"
         )
-        return 2
+        return 0
     fetcher = None if args.offline else WikiFetcher(settings.wiki, settings.fetch)
     try:
         source = WikiSource(fetcher, DiskCache(settings.cache_dir), settings)
@@ -252,6 +261,8 @@ async def _database_part(
     store_dir: Path,
     preprocess: str,
     *,
+    wiki: str,
+    primary: bool,
     load: bool,
 ) -> None:
     db = Database(dsn, pool_max=2)
@@ -260,7 +271,15 @@ async def _database_part(
         await db.migrate()
         store = PostgresImageStore(db)
         if load:
-            report = await load_images_into(store, images_path, store_dir, provider, preprocess)
+            report = await load_images_into(
+                store,
+                images_path,
+                store_dir,
+                provider,
+                preprocess,
+                wiki=wiki,
+                replace_unlabelled=primary,
+            )
             _say(
                 f"导入完成：记录文件里 {report.total} 张，其中 {report.with_vectors} 张有向量；"
                 f"写入 {report.upserted} 张，没变 {report.unchanged} 张，删除 {report.deleted} 张；"
@@ -271,9 +290,9 @@ async def _database_part(
                     f"有 {report.total - report.with_vectors} 张没有向量（以图搜图找不到它们）："
                     "先跑 images embed 补上再导入一次"
                 )
-        info = await store.info()
+        info = (await store.info()).wikis.get(wiki) or ImageStoreInfo()
         _say(
-            f"库里现在有 {info.images} 张图，{info.with_vectors} 张有向量，"
+            f"库里这个 wiki 现在有 {info.images} 张图，{info.with_vectors} 张有向量，"
             f"向量指纹 {info.fingerprint}，预处理 {info.preprocess}，最近一次改动 {info.loaded_at}"
         )
     finally:
@@ -295,7 +314,14 @@ def _load(
     try:
         asyncio.run(
             _database_part(
-                config.postgres_dsn, provider, images_path, store_dir, images.preprocess, load=True
+                config.postgres_dsn,
+                provider,
+                images_path,
+                store_dir,
+                images.preprocess,
+                wiki=settings.wiki.id,
+                primary=is_primary(config, settings),
+                load=True,
             )
         )
     except VectorStoreError as exc:
@@ -331,7 +357,14 @@ def _status(
         return 0
     asyncio.run(
         _database_part(
-            config.postgres_dsn, provider, images_path, store_dir, images.preprocess, load=False
+            config.postgres_dsn,
+            provider,
+            images_path,
+            store_dir,
+            images.preprocess,
+            wiki=settings.wiki.id,
+            primary=False,
+            load=False,
         )
     )
     return 0

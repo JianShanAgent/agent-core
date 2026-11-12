@@ -5,6 +5,7 @@ chat 插件发现有这个服务时，对话模型就只负责判断「要不要
 配置在 plugin.research。
 
 需要大模型和知识库检索（knowledge 插件，要有数据库）；缺任何一个都不注册，chat 插件退回老办法。
+部署挂了不止一个 wiki 时，几个 wiki 的资料一起查，每条资料标着出自哪个 wiki。
 查别名要 wiki_query 插件，以图搜图要 knowledge 插件的图片索引，联网搜索要 core.websearch.yaml 打开；
 没有的话对应的那一步自动不做。
 
@@ -23,7 +24,7 @@ from jianshanagent.core.llm import LLMClient
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.plugin import PluginContext
 from jianshanagent.core.websearch import WebSearchClient, WebSearchSettings
-from jianshanagent.core.wiki import WikiSubject, wiki_subject
+from jianshanagent.core.wiki import WikiSubject, wiki_labels, wiki_subject
 from jianshanagent.plugins.knowledge.retrieval import Retriever
 from jianshanagent.plugins.research.analysis import DEFAULT_TOPICS, NameLookup, NameNote, Wording
 from jianshanagent.plugins.research.evidence import (
@@ -67,7 +68,10 @@ def wording_from(raw: dict[str, Any], subject: WikiSubject) -> Wording:
 
 
 def wiki_name_lookup(wiki: Any) -> NameLookup:
-    """用 wiki 的数据查名字的别名（站点插件登记的昵称、页面的重定向）。"""
+    """用 wiki 的数据查名字的别名（站点插件登记的昵称、页面的重定向）。
+
+    ``wiki`` 是 wiki_query 插件的服务（``WikiQueryHub``）：挂着的几个 wiki 都查。
+    """
 
     async def lookup(name: str) -> list[NameNote]:
         return [
@@ -75,7 +79,7 @@ def wiki_name_lookup(wiki: Any) -> NameLookup:
                 written=name,
                 title=match.title,
                 # 条目的种类给模型看的说法：站点插件认得的（式神、御魂……）用它的叫法，其余是页面
-                kind=wiki.kind_label(match.kind),
+                kind=wiki.kind_label(match.kind, wiki=match.wiki),
                 aliases=tuple(match.aliases),
                 exact=bool(match.exact),
             )
@@ -158,16 +162,19 @@ class ResearchPlugin:
             )
         timezone = ZoneInfo(str(ctx.config.app.get("timezone") or "Asia/Shanghai"))
 
+        # 挂了不止一个 wiki 时，资料上标出处；只有一个就不标
+        sources = wiki_labels(ctx.config)
+        kb_label = str(labels.get("kb") or "知识库")
         available: dict[str, EvidenceSource] = {
-            "kb": KnowledgeSource(retriever, label=str(labels.get("kb") or "知识库"))
+            "kb": KnowledgeSource(retriever, label=kb_label, sources=sources)
         }
-        wiki = ctx.services.get("wiki_query_client")  # wiki_query 插件启用时才有
+        wiki = ctx.services.get("wiki_query")  # wiki_query 插件启用时才有
         if wiki is not None:
             site = cfg.get("site") or {}
             fulltext = wiki.fulltext_titles
 
-            async def search(keywords: str, limit: int) -> list[str]:
-                titles: list[str] = await fulltext(keywords, limit=limit)
+            async def search(keywords: str, limit: int) -> dict[str, list[str]]:
+                titles: dict[str, list[str]] = await fulltext(keywords, limit=limit)
                 return titles
 
             available["site"] = SiteSearchSource(
@@ -178,6 +185,7 @@ class ResearchPlugin:
                 chunks=int(site.get("chunks") or 6),
                 timeout_seconds=float(site.get("timeout_seconds") or 5),
                 keywords_hint=site_keywords_hint(wording.keyword_nouns, wording.keyword_example),
+                sources=sources,
             )
         web_settings = WebSearchSettings.from_config(ctx.config)  # 没打开、没填密钥时是 None
         if web_settings is not None:
@@ -211,16 +219,18 @@ class ResearchPlugin:
             # 全量：挑中的页面一律给整页，不看挑中了几段、页面有多长
             page_filler = PageFiller(
                 retriever,
-                label=str(labels.get("kb") or "知识库"),
+                label=kb_label,
                 min_hits=1,
                 max_chars=sys.maxsize,
+                sources=sources,
             )
         elif whole_mode == WHOLE_EXCERPT:
             page_filler = PageFiller(
                 retriever,
-                label=str(labels.get("kb") or "知识库"),
+                label=kb_label,
                 min_hits=int(whole.get("min_hits") or 2),
                 max_chars=int(whole.get("max_chars") or 8000),
+                sources=sources,
             )
         workflow = ResearchWorkflow(
             llm,
@@ -230,11 +240,13 @@ class ResearchPlugin:
             name_lookup=wiki_name_lookup(wiki) if wiki is not None else None,
             entry_pages=EntryPages(
                 retriever,
-                label=str(labels.get("kb") or "知识库"),
+                label=kb_label,
                 per_name=int(analysis.get("entry_chunks_per_name") or 2),
                 total=int(analysis.get("entry_chunks") or 4),
+                sources=sources,
             ),
             image_search=image_search,
+            wiki_labels=sources,
             page_filler=page_filler,
         )
         ctx.register_service("research", workflow)

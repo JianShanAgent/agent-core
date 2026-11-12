@@ -54,8 +54,10 @@ from jianshanagent.plugins.research.analysis import (
 )
 from jianshanagent.plugins.research.evidence import (
     EXCERPT,
+    NO_SOURCES,
     Evidence,
     EvidenceSource,
+    Sources,
     image_evidence,
     render,
 )
@@ -320,8 +322,10 @@ class ResearchWorkflow:
         entry_pages: EntrySource | None = None,
         image_search: ImageSearcher | None = None,
         page_filler: PageSource | None = None,
+        wiki_labels: Sources = NO_SOURCES,
     ):
-        """``sources`` 是取证的各级，按先后排；一级可以是一个来源，也可以是一起查的几个来源。"""
+        """``sources`` 是取证的各级，按先后排；一级可以是一个来源，也可以是一起查的几个来源。
+        ``wiki_labels``：挂了不止一个 wiki 时各个 wiki 的叫法（以图搜图的资料上标出处用）。"""
         #: 取证的各级。一级里的几个来源一次查完（按顺序，后面的不重复取前面已经取到的），
         #: 查完才交给查证员；同一个来源可以出现在不止一级里
         self.levels: list[list[EvidenceSource]] = [
@@ -340,6 +344,7 @@ class ResearchWorkflow:
         self.entry_pages = entry_pages
         self.image_search = image_search
         self.page_filler = page_filler
+        self.wiki_labels = wiki_labels
 
     @staticmethod
     def _notes(lines: Sequence[str]) -> str:
@@ -550,7 +555,11 @@ class ResearchWorkflow:
                     logger.warning("research_image_search_failed", error=repr(exc)[:300])
                     hits = []
                 found += image_evidence(
-                    hits, origin=settings.image_label, number=number, total=len(images)
+                    hits,
+                    origin=settings.image_label,
+                    number=number,
+                    total=len(images),
+                    sources=self.wiki_labels,
                 )
                 identified += [hit for hit in hits[:1] if hit.sure]
                 logger.info(
@@ -626,6 +635,7 @@ class ResearchWorkflow:
                 {
                     "number": number,
                     "origin": item.origin,
+                    "source": item.source,
                     "kind": item.kind,
                     "title": item.title,
                     "url": item.url,

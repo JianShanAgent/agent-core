@@ -64,16 +64,19 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             "types": [],
             "image_kinds": [],
             "settings": None,
-            # 自动更新的状态（服务器上的 kbsync 服务写的）；它没跑过就是 None
-            "sync": None,
+            # 挂着的各个 wiki：库里各有多少、自动更新的状态
+            "wikis": [],
         }
         if not admin.has_database:
             return reply(result)
         summary = await admin.queries.kb_summary()
         result["types"], result["image_kinds"] = summary["types"], summary["image_kinds"]
-        result["sync"] = await admin.queries.kb_sync()
+        #: 各个 wiki 在库里的概况：wiki 的 id → 切片的、图片的
+        chunk_info: dict[str, Any] = {}
+        image_info: dict[str, Any] = {}
         if retriever is not None:
             info = await retriever.store.info()
+            chunk_info = info.wikis
             embedder = retriever.embedder
             fingerprint = embedder.provider.fingerprint if embedder is not None else None
             result["store"] = {
@@ -83,12 +86,13 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 "loaded_at": info.loaded_at,
                 "average_chars": info.average_chars,
                 "query_fingerprint": fingerprint,
-                "vectors_usable": fingerprint is not None and fingerprint == info.fingerprint,
+                "vectors_usable": fingerprint is not None and info.has_vectors_of(fingerprint),
             }
             settings = retriever.settings
             result["settings"] = {"top_k": settings.top_k, "keyword_slots": settings.keyword_slots}
         if image_search is not None:
             info = await image_search.store.info()
+            image_info = info.wikis
             result["images"] = {
                 "images": info.images,
                 "with_vectors": info.with_vectors,
@@ -99,6 +103,21 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 "sure_score": image_search.settings.sure_score,
                 "sure_margin": image_search.settings.sure_margin,
             }
+        for wiki in admin.config.wikis:
+            chunks, images = chunk_info.get(wiki.id), image_info.get(wiki.id)
+            result["wikis"].append(
+                {
+                    "id": wiki.id,
+                    "label": str(wiki.raw.get("label") or wiki.id),
+                    "chunks": chunks.chunks if chunks else 0,
+                    "with_vectors": chunks.with_vectors if chunks else 0,
+                    "fingerprint": chunks.fingerprint if chunks else None,
+                    "loaded_at": chunks.loaded_at if chunks else None,
+                    "images": images.images if images else 0,
+                    # 自动更新的状态（服务器上的 kbsync 服务写的）；它没跑过就是 None
+                    "sync": await admin.queries.kb_sync(wiki.id),
+                }
+            )
         return reply(result)
 
     async def kb_chunks(request: web.Request) -> web.Response:
@@ -108,6 +127,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 offset=int_param(request, "offset", 0, 0, 10**7),
                 kind=text_param(request, "type"),
                 search=text_param(request, "q"),
+                wiki=text_param(request, "wiki"),
             )
         )
 
@@ -137,6 +157,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 "hits": [
                     {
                         "chunk_id": hit.chunk.chunk_id,
+                        "wiki": hit.chunk.wiki,
                         "type": hit.chunk.kind,
                         "title": hit.chunk.title,
                         "section_path": list(hit.chunk.section_path),
@@ -160,6 +181,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 offset=int_param(request, "offset", 0, 0, 10**7),
                 kind=text_param(request, "kind"),
                 search=text_param(request, "q"),
+                wiki=text_param(request, "wiki"),
             )
         )
 
@@ -190,6 +212,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 "hits": [
                     {
                         "image_id": hit.image_id,
+                        "wiki": hit.wiki,
                         "label": hit.label,
                         "kind": hit.kind,
                         "page_title": hit.page_title,

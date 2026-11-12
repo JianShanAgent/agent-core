@@ -15,15 +15,21 @@
     # 只看现状，不发请求
     python -m jianshanagent.plugins.knowledge sync --status
 
-一轮做的事（:func:`sync_once`）：
+部署挂了几个 wiki 时，一个 wiki 一个 wiki 地做：各有各的游标、闸门和状态，互不耽误
+（一个 wiki 出了问题，别的照常更新）。``--loop`` 是一个进程轮流管全部 wiki；
+其余几种不指明就挨个做，只做一个的话在 ``sync`` 前面加 ``--wiki <id>``（见 cli.py）。
+
+一个 wiki 一轮做的事（:func:`sync_once`）：
 
 1. 读最近更改（changes.py），一个请求。没有相关的改动、也没有上一轮留下没做完的事，到此为止。
 2. 知识库：跑一遍管线（pipeline.py）。重新列页面（6 个请求上下），只取有新修订的、渲染结果失效了的、
    被点名现渲染的，其余全走缓存；清洗和切片整体重算（几秒钟）。切片的 ID 由内容决定，
-   没变的切片向量不用重算：只给新切片算向量，再整库对齐导入数据库（没变的行不动）。
+   没变的切片向量不用重算：只给新切片算向量，再把库里这个 wiki 的切片对齐成文件里的
+   （没变的行不动）。
    机器人不用停，每次查询都是直接读库的，导入完马上生效。
 3. 图库：重新列文件、生成记录；只给还没有向量的图片下载原图、算向量；导入数据库。
-4. 状态存盘（缓存目录下的 ``sync_state.json``），并写进数据库的 ``kb_meta``，管理后台从那里读。
+4. 状态存盘（这个 wiki 的缓存目录下的 ``sync_state.json``），并写进数据库的 ``kb_meta``
+   （``sync:<wiki 的 id>``），管理后台从那里读。
 
 全部重取（把渲染的页面不看缓存重取一遍，阴阳师 wiki 是 400 多个请求、三四分钟）是兜底：
 有的页面是拿页面以外的公共数据渲染的（灰机的 Data 数据集），数据改了，页面既没有新修订、
@@ -33,13 +39,13 @@
 
 没人盯着，所以每一步都有闸门（``sync.limits``）——宁可停下来等人看，也不把库改坏：
 
-- 这台机器上没有知识库的文件：不做。自动更新只做增量，不会自己从头全量取数。
+- 这台机器上没有这个 wiki 的知识库文件：不做。自动更新只做增量，不会自己从头全量取数。
 - 一轮向 wiki 发的请求有上限。到了上限还没取的页面沿用旧内容，下一轮接着取。
 - wiki 出故障（连着几个请求都没成）：这一轮不再发请求，没取的页面同样沿用旧内容，下一轮再说。
 - 页面取不下来：缓存里有旧内容就用旧的（sources.py），不让这一页从库里消失；
   连旧内容都没有的失败太多，或者文档数、切片数、图片数比上一次少了一截：结果不写出去。
 - 要新算向量的切片、要新下载的图片多得不正常（多半是向量文件没拷过来）：不算、不下、也不导入。
-- 库里向量的指纹和现在配置的嵌入接口不是同一种：不导入（导进去会把库里的向量清掉）。
+- 库里这个 wiki 的向量的指纹和现在配置的嵌入接口不是同一种：不导入（导进去会把库里的向量清掉）。
 
 被闸门拦下的事记在状态里（管理后台看得到），下一轮还会再试；确认拦得没道理就手动 ``--force`` 一次。
 """
@@ -56,7 +62,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -69,6 +75,7 @@ from jianshanagent.core.db import Database
 from jianshanagent.core.embedding import EmbeddingProvider, EmbeddingSettings
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.update import restart_needed
+from jianshanagent.core.wiki import load_wikis
 from jianshanagent.plugins.knowledge.changes import (
     ChangeContext,
     Cursor,
@@ -105,13 +112,20 @@ from jianshanagent.plugins.knowledge.pipeline import (
     run_pipeline,
 )
 from jianshanagent.plugins.knowledge.report import write_outputs
-from jianshanagent.plugins.knowledge.settings import Settings, SyncSettings, load_settings
+from jianshanagent.plugins.knowledge.settings import (
+    Settings,
+    SyncSettings,
+    is_primary,
+    kb_root,
+    load_settings,
+)
 from jianshanagent.plugins.knowledge.sink import CHUNKS_FILE, DOCUMENTS_FILE, JsonlSink
 from jianshanagent.plugins.knowledge.sources import WikiSource, wiki_time
 from jianshanagent.plugins.knowledge.store import (
     SYNC_STATUS_KEY,
     KnowledgeStore,
     PostgresKnowledgeStore,
+    meta_key,
 )
 
 logger = get_logger(__name__)
@@ -261,15 +275,14 @@ class MemoryStatusStore:
 
 
 class PostgresStatusStore:
-    """落在 ``kb_meta`` 表的 ``sync`` 这一行。"""
+    """落在 ``kb_meta`` 表里这个 wiki 的那一行（``sync:<wiki 的 id>``）。"""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, wiki: str = ""):
         self._db = db
+        self._key = meta_key(SYNC_STATUS_KEY, wiki)
 
     async def read(self) -> dict[str, Any]:
-        raw = await self._db.pool.fetchval(
-            "SELECT value FROM kb_meta WHERE key = $1", SYNC_STATUS_KEY
-        )
+        raw = await self._db.pool.fetchval("SELECT value FROM kb_meta WHERE key = $1", self._key)
         value = json.loads(raw) if raw else {}
         return value if isinstance(value, dict) else {}
 
@@ -277,7 +290,7 @@ class PostgresStatusStore:
         await self._db.pool.execute(
             "INSERT INTO kb_meta (key, value) VALUES ($1, $2::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            SYNC_STATUS_KEY,
+            self._key,
             json.dumps(status, ensure_ascii=False),
         )
 
@@ -296,6 +309,9 @@ class Targets:
 
 @dataclass(slots=True)
 class SyncEnv:
+    """给一个 wiki 做自动更新要用的东西。"""
+
+    #: 这个 wiki 的知识库设置
     settings: Settings
     #: 图库的设置；None = 不管图库
     images: ImageSettings | None
@@ -303,6 +319,8 @@ class SyncEnv:
     provider: EmbeddingProvider | None
     #: None = 没有数据库：只更新文件，不导入
     targets: Targets | None = None
+    #: 是不是主 wiki：库里没标出处的旧内容算它的，导入时一起换掉
+    primary: bool = True
     #: 下面几个只有测试会给
     wiki_transport: httpx.AsyncBaseTransport | None = None
     embed_transport: httpx.AsyncBaseTransport | None = None
@@ -310,13 +328,19 @@ class SyncEnv:
     clock: Callable[[], float] = time.time
 
 
-def build_env(config: AppConfig, settings: Settings | None = None) -> SyncEnv:
-    """按配置装出运行环境（不连数据库：``targets`` 由 :func:`run_once` 连上以后填）。"""
-    embedding = EmbeddingSettings.from_config(config)
+def build_env(config: AppConfig, settings: Settings | None = None, *, wiki: str = "") -> SyncEnv:
+    """按配置装出 ``wiki``（不写就是主 wiki）的运行环境。
+
+    不连数据库：``targets`` 由 :func:`run_wikis` 连上以后填。
+    """
+    settings = settings or load_settings(config, wiki)
+    view = config.for_wiki(settings.wiki.id) if settings.wiki.id else config
+    embedding = EmbeddingSettings.from_config(view)
     return SyncEnv(
-        settings=settings or load_settings(config),
-        images=ImageSettings.from_config(config.plugin("knowledge").get("images") or {}),
+        settings=settings,
+        images=ImageSettings.from_config(view.plugin("knowledge").get("images") or {}),
         provider=embedding.provider() if embedding is not None else None,
+        primary=is_primary(config, settings),
     )
 
 
@@ -517,20 +541,42 @@ async def _kb_vectors(
     return summary
 
 
+def _stored_fingerprint(env: SyncEnv, wikis: dict[str, Any]) -> str | None:
+    """库里这个 wiki 现有的向量的指纹（``wikis``：各个 wiki 的概况）；没有向量就是 None。
+
+    主 wiki 还没导入过带出处的内容时，看的是库里没标出处的那些（它们这次会被换掉）。
+    """
+    mine = wikis.get(env.settings.wiki.id) or (wikis.get("") if env.primary else None)
+    return mine.fingerprint if mine is not None else None
+
+
+def _unlabelled(env: SyncEnv, wikis: dict[str, Any]) -> bool:
+    """库里还有没标出处的内容、而且该由这个 wiki 换掉：文件没变也要导入一次，把出处标上。"""
+    return env.primary and bool(env.settings.wiki.id) and "" in wikis
+
+
 async def _kb_load(env: SyncEnv, loaded: dict[str, str], *, force: bool) -> dict[str, Any]:
     """文件比库新的话，导入数据库。"""
     assert env.provider is not None and env.targets is not None
     chunks_path, store_dir = _kb_paths(env)
-    if not _behind(env, loaded, "kb", chunks_path, store_dir):
+    wikis = (await env.targets.knowledge.info()).wikis
+    if not (_unlabelled(env, wikis) or _behind(env, loaded, "kb", chunks_path, store_dir)):
         return {}
     signature = file_signature(chunks_path, store_dir / INDEX_FILE)
-    info = await env.targets.knowledge.info()
-    if info.fingerprint and info.fingerprint != env.provider.fingerprint and not force:
+    stored = _stored_fingerprint(env, wikis)
+    if stored and stored != env.provider.fingerprint and not force:
         raise Held(
-            f"库里向量的指纹是「{info.fingerprint}」，现在配置的嵌入接口是「{env.provider.fingerprint}」，"
+            f"库里向量的指纹是「{stored}」，现在配置的嵌入接口是「{env.provider.fingerprint}」，"
             "不是同一种。导进去会把库里的向量清掉，所以没有导入"
         )
-    report = await load_into(env.targets.knowledge, chunks_path, store_dir, env.provider)
+    report = await load_into(
+        env.targets.knowledge,
+        chunks_path,
+        store_dir,
+        env.provider,
+        wiki=env.settings.wiki.id,
+        replace_unlabelled=env.primary,
+    )
     loaded["kb"] = signature
     return {
         "upserted": report.upserted,
@@ -626,17 +672,24 @@ async def _images_vectors(
 async def _images_load(env: SyncEnv, loaded: dict[str, str], *, force: bool) -> dict[str, Any]:
     assert env.images is not None and env.provider is not None and env.targets is not None
     images_path, store_dir = _image_paths(env)
-    if not _behind(env, loaded, "images", images_path, store_dir):
+    wikis = (await env.targets.images.info()).wikis
+    if not (_unlabelled(env, wikis) or _behind(env, loaded, "images", images_path, store_dir)):
         return {}
     signature = file_signature(images_path, store_dir / INDEX_FILE)
-    info = await env.targets.images.info()
-    if info.fingerprint and info.fingerprint != env.provider.fingerprint and not force:
+    stored = _stored_fingerprint(env, wikis)
+    if stored and stored != env.provider.fingerprint and not force:
         raise Held(
-            f"库里图片向量的指纹是「{info.fingerprint}」，现在配置的嵌入接口是"
+            f"库里图片向量的指纹是「{stored}」，现在配置的嵌入接口是"
             f"「{env.provider.fingerprint}」，不是同一种。导进去会把库里的向量清掉，所以没有导入"
         )
     report = await load_images_into(
-        env.targets.images, images_path, store_dir, env.provider, env.images.preprocess
+        env.targets.images,
+        images_path,
+        store_dir,
+        env.provider,
+        env.images.preprocess,
+        wiki=env.settings.wiki.id,
+        replace_unlabelled=env.primary,
     )
     loaded["images"] = signature
     return {
@@ -694,7 +747,7 @@ def _ready(env: SyncEnv) -> str:
         return (
             f"这台机器上还没有知识库的文件（{settings.output_dir} 下的 chunks.jsonl "
             "和缓存里的页面清单）。自动更新只做增量，不会自己从头全量取数："
-            "先把开发机的 data/kb 拷过来（deploy/scripts/release.sh kb-seed），"
+            "先把开发机的知识库目录拷过来（deploy/scripts/release.sh kb-seed），"
             "或者手动跑一次 run、embed、load"
         )
     return ""
@@ -910,36 +963,90 @@ def _describe(
 # ── 入口 ──────────────────────────────────────────────────────────────
 
 
-async def run_once(
-    config: AppConfig, *, force: bool = False, full: bool = False, plan_only: bool = False
-) -> dict[str, Any]:
-    """按配置做一轮：有数据库就连上、导入，没有（或者连不上）就只更新文件。"""
-    env = build_env(config)
-    db: Database | None = None
-    if config.postgres_dsn and not plan_only:
-        db = Database(config.postgres_dsn, pool_max=2)
-        try:
-            await asyncio.wait_for(db.connect(), _CONNECT_TIMEOUT_SECONDS)
-        except Exception as exc:
-            # 库连不上不耽误更新文件：文件比库新，下一轮连上了自然会导入
-            reason = f"{type(exc).__name__}: {exc}"[:300]
-            logger.warning("kb_sync_database_unavailable", error=reason)
-            db = None
-        else:
-            env.targets = Targets(
-                knowledge=PostgresKnowledgeStore(db),
-                images=PostgresImageStore(db),
-                status=PostgresStatusStore(db),
-            )
+async def _connect(config: AppConfig) -> Database | None:
+    """连数据库；没配、或者连不上就是 None（那就只更新文件）。"""
+    if not config.postgres_dsn:
+        return None
+    db = Database(config.postgres_dsn, pool_max=2)
     try:
-        return await sync_once(env, force=force, full=full, plan_only=plan_only)
+        await asyncio.wait_for(db.connect(), _CONNECT_TIMEOUT_SECONDS)
+    except Exception as exc:
+        # 库连不上不耽误更新文件：文件比库新，下一轮连上了自然会导入
+        reason = f"{type(exc).__name__}: {exc}"[:300]
+        logger.warning("kb_sync_database_unavailable", error=reason)
+        return None
+    return db
+
+
+async def run_wikis(
+    config: AppConfig,
+    wikis: Sequence[str],
+    *,
+    force: bool = False,
+    full: bool = False,
+    plan_only: bool = False,
+    keep_going: bool = False,
+    forget_others: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """按配置给 ``wikis`` 这几个 wiki 各做一轮：wiki 的 id → 这一轮的记录。
+
+    有数据库就连上、导入，没有（或者连不上）就只更新文件。``keep_going``：一个 wiki 这一轮
+    出了岔子（上一轮还没跑完、配置写坏了……）记下来接着做下一个，不抛出去。
+    ``forget_others``：库里已经不在 ``core.wiki.yaml`` 里的 wiki 的内容顺手删掉。
+    """
+    db = None if plan_only else await _connect(config)
+    records: dict[str, dict[str, Any]] = {}
+    try:
+        for wiki in wikis:
+            try:
+                env = build_env(config, wiki=wiki)
+                if db is not None:
+                    env.targets = Targets(
+                        knowledge=PostgresKnowledgeStore(db),
+                        images=PostgresImageStore(db),
+                        status=PostgresStatusStore(db, env.settings.wiki.id),
+                    )
+                records[wiki] = await sync_once(env, force=force, full=full, plan_only=plan_only)
+            except Busy:
+                if not keep_going:
+                    raise
+                logger.warning("kb_sync_busy", wiki=wiki)
+            except Exception:  # 配置写坏了、磁盘满了……：记下来，下一轮再试
+                if not keep_going:
+                    raise
+                logger.exception("kb_sync_round_crashed", wiki=wiki)
+        if db is not None and forget_others:
+            keep = [entry.id for entry in config.wikis]
+            chunks = await PostgresKnowledgeStore(db).keep_only(keep)
+            images = await PostgresImageStore(db).keep_only(keep)
+            if chunks or images:
+                logger.warning("kb_sync_forgot_removed_wikis", chunks=chunks, images=images)
     finally:
         if db is not None:
             await db.close()
+    return records
+
+
+async def run_once(
+    config: AppConfig,
+    *,
+    wiki: str = "",
+    force: bool = False,
+    full: bool = False,
+    plan_only: bool = False,
+) -> dict[str, Any]:
+    """按配置给 ``wiki``（不写就是主 wiki）做一轮，返回这一轮的记录。"""
+    wiki = wiki or load_wikis(config)[0].id
+    records = await run_wikis(config, [wiki], force=force, full=full, plan_only=plan_only)
+    return records[wiki]
 
 
 async def run_loop(config_dir: str | None = None) -> int:
-    """一直跑到收到停止信号。每一轮重新读配置，所以管理后台里改的配置下一轮就生效。"""
+    """一直跑到收到停止信号，轮流给挂着的每个 wiki 做。
+
+    每一轮重新读配置，所以管理后台里改的配置下一轮就生效。各个 wiki 多久做一轮、开没开
+    读的是它自己那一份配置的 ``sync`` 段。
+    """
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -956,21 +1063,35 @@ async def run_loop(config_dir: str | None = None) -> int:
 
     beating = loop.create_task(beat())
     interval = SyncSettings().interval_seconds
+    #: 各个 wiki 上一轮是什么时候开始的
+    last: dict[str, float] = {}
     logger.info("kb_sync_loop_started", version=running_version())
     try:
         while not stop.is_set():
             round_started = time.monotonic()
             try:
                 config = load_config(config_dir)
-                settings = load_settings(config)
-                heartbeat = settings.cache_dir / HEARTBEAT_FILE
-                interval = settings.sync.interval_seconds
-                if settings.sync.enabled:
-                    await run_once(config)
-                else:
-                    logger.info("kb_sync_disabled", hint="plugin.knowledge 的 sync.enabled")
-            except Busy:
-                logger.warning("kb_sync_busy")
+                heartbeat = kb_root(config) / HEARTBEAT_FILE
+                due: list[str] = []
+                intervals: list[float] = []
+                for entry in config.wikis:
+                    cfg = load_settings(config, entry.id).sync
+                    if not cfg.enabled:
+                        logger.info(
+                            "kb_sync_disabled",
+                            wiki=entry.id,
+                            hint="plugin.knowledge 的 sync.enabled",
+                        )
+                        continue
+                    intervals.append(cfg.interval_seconds)
+                    # 留一秒的余量：这一轮和上一轮的间隔本来就是按它算的，差几毫秒不该再等一整轮
+                    since = round_started - last.get(entry.id, float("-inf"))
+                    if since >= cfg.interval_seconds - 1:
+                        due.append(entry.id)
+                interval = min(intervals, default=SyncSettings().interval_seconds)
+                last |= dict.fromkeys(due, round_started)
+                if due:
+                    await run_wikis(config, due, keep_going=True, forget_others=True)
             except Exception:  # 配置写坏了、磁盘满了……：记下来，下一轮再试，不退出
                 logger.exception("kb_sync_round_crashed")
             wait = max(60.0, interval - (time.monotonic() - round_started))
@@ -987,10 +1108,10 @@ async def run_loop(config_dir: str | None = None) -> int:
     return 0
 
 
-def healthy(settings: Settings, *, now: float | None = None) -> bool:
-    """``--loop`` 还活着没有：心跳文件最近有没有被点过。"""
+def healthy(root: Path, *, now: float | None = None) -> bool:
+    """``--loop`` 还活着没有：知识库目录（``root``）下的心跳文件最近有没有被点过。"""
     try:
-        age = (now or time.time()) - (settings.cache_dir / HEARTBEAT_FILE).stat().st_mtime
+        age = (now or time.time()) - (root / HEARTBEAT_FILE).stat().st_mtime
     except OSError:
         return False
     return age < HEARTBEAT_STALE_SECONDS

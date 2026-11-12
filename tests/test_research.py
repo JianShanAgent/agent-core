@@ -650,7 +650,7 @@ async def test_wiki_name_lookup_translates_the_wiki_clients_matches() -> None:
     # 条目的种类给模型看的说法是站点插件定的
     labels = {"character": "式神", "soul": "御魂"}
     wiki = SimpleNamespace(
-        lookup_name=lookup_name, kind_label=lambda kind: labels.get(kind, "页面")
+        lookup_name=lookup_name, kind_label=lambda kind, wiki="": labels.get(kind, "页面")
     )
     notes = await wiki_name_lookup(wiki)("小小白")
     assert notes == [
@@ -786,9 +786,9 @@ async def test_site_search_takes_chunks_from_the_pages_it_finds() -> None:
     )
     asked: list[tuple[str, int]] = []
 
-    async def search(keywords: str, limit: int) -> list[str]:
+    async def search(keywords: str, limit: int) -> dict[str, list[str]]:
         asked.append((keywords, limit))
-        return ["协同斗技", "库里没有的页面"]
+        return {"": ["协同斗技", "库里没有的页面"]}
 
     retriever = Retriever(store, None, RetrievalSettings(max_df_ratio=1.0))
     source = SiteSearchSource(retriever, search, pages=3, chunks=5)
@@ -948,7 +948,7 @@ def test_plugin_builds_the_levels_that_are_available() -> None:
 
     wiki = SimpleNamespace(fulltext_titles=None)
     ctx = PluginContext(
-        "research", config, {"llm": llm, "knowledge": retriever, "wiki_query_client": wiki}
+        "research", config, {"llm": llm, "knowledge": retriever, "wiki_query": wiki}
     )
     ResearchPlugin().register(ctx)
     flow: ResearchWorkflow = ctx.services["research"]

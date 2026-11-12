@@ -13,14 +13,19 @@
   搜到的不是 wiki 的内容，只在前两级答不了时用。
 
 每一级查完以后，同一个页面挑中了好几片的，把这一页剩下的也补上（:class:`PageFiller`）。
+
+部署挂了不止一个 wiki 时，知识库里是几个 wiki 的内容，站内搜索也是几个 wiki 都搜。
+这时每条资料标着出自哪个 wiki（``Evidence.source``），给模型看的清单和回答后面的参考资料里都带着；
+只挂一个 wiki 时不标。
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import zip_longest
 from typing import Any, Protocol
 
 from jianshanagent.core.links import strip_unknown_links
@@ -44,6 +49,13 @@ class Evidence:
     key: str = ""
     #: 只是所在页面的一部分，页面上还有没给出来的内容（见 :class:`PageFiller`）
     excerpt: bool = False
+    #: 出自哪个 wiki，给人看的叫法；只挂一个 wiki 时、以及不是 wiki 上的内容（网页）时为空
+    source: str = ""
+
+
+#: 各个 wiki 给人看的叫法：``core.wiki.yaml`` 里的 id → 叫法。只挂一个 wiki 时是空的（不标出处）
+Sources = Mapping[str, str]
+NO_SOURCES: Sources = {}
 
 
 class EvidenceSource(Protocol):
@@ -69,6 +81,7 @@ def render(items: Sequence[Evidence]) -> str:
             part
             for part in (
                 item.origin,
+                f"出自 {item.source}" if item.source else "",
                 item.kind,
                 f"日期 {item.date}" if item.date else "",
                 EXCERPT if item.excerpt else "",
@@ -85,7 +98,14 @@ def render(items: Sequence[Evidence]) -> str:
     return "\n\n".join(blocks) if blocks else "（什么都没查到）"
 
 
-def image_evidence(hits: Sequence[Any], *, origin: str, number: int, total: int) -> list[Evidence]:
+def image_evidence(
+    hits: Sequence[Any],
+    *,
+    origin: str,
+    number: int,
+    total: int,
+    sources: Sources = NO_SOURCES,
+) -> list[Evidence]:
     """以图搜图的结果 → 资料。``hits`` 是 knowledge 插件 ``ImageSearch.search`` 返回的相似图片；
     ``number`` / ``total``：这是用户发的第几张图、一共几张。"""
     which = f"第 {number} 张图片" if total > 1 else "图片"
@@ -111,12 +131,13 @@ def image_evidence(hits: Sequence[Any], *, origin: str, number: int, total: int)
                 text="\n".join(lines),
                 kind=str(hit.kind),
                 key=f"image:{hit.image_id}",
+                source=sources.get(str(getattr(hit, "wiki", "")), ""),
             )
         )
     return found
 
 
-def _from_chunk(chunk: KbChunk, origin: str) -> Evidence:
+def _from_chunk(chunk: KbChunk, origin: str, sources: Sources = NO_SOURCES) -> Evidence:
     date = chunk.date or (f"{chunk.date_inferred}（推断）" if chunk.date_inferred else "")
     return Evidence(
         origin=origin,
@@ -126,6 +147,7 @@ def _from_chunk(chunk: KbChunk, origin: str) -> Evidence:
         kind=TYPE_NAMES.get(chunk.kind, chunk.kind),
         date=date,
         key=chunk.chunk_id,
+        source=sources.get(chunk.wiki, ""),
     )
 
 
@@ -133,13 +155,16 @@ class KnowledgeSource:
     name = "kb"
     keywords_hint = ""
 
-    def __init__(self, retriever: Retriever, *, label: str = "知识库"):
+    def __init__(
+        self, retriever: Retriever, *, label: str = "知识库", sources: Sources = NO_SOURCES
+    ):
         self.retriever = retriever
         self.label = label
+        self.sources = sources
 
     async def collect(self, question: str, keywords: str, have: Collection[str]) -> list[Evidence]:
         result = await self.retriever.search(question)
-        return [_from_chunk(hit.chunk, self.label) for hit in result.hits]
+        return [_from_chunk(hit.chunk, self.label, self.sources) for hit in result.hits]
 
 
 class EntryPages:
@@ -148,13 +173,21 @@ class EntryPages:
     分析问题时查到了名字对应的 wiki 条目（外号已经换成正式名），就从这些条目的页面里
     各挑几片和问题最接近的，排在资料的最前面——问「X 是什么」「X 的技能」时，
     X 自己的页面是最该先看的，光靠按意思检索容易先捞到别处提到 X 的内容。
+    几个 wiki 都有这个条目的话，是从它们的页面里一起挑。
     """
 
     def __init__(
-        self, retriever: Retriever, *, label: str = "知识库", per_name: int = 2, total: int = 4
+        self,
+        retriever: Retriever,
+        *,
+        label: str = "知识库",
+        per_name: int = 2,
+        total: int = 4,
+        sources: Sources = NO_SOURCES,
     ):
         self.retriever = retriever
         self.label = label
+        self.sources = sources
         self.per_name = per_name
         self.total = total
 
@@ -169,7 +202,7 @@ class EntryPages:
                 break
             chunks = await self.retriever.search_pages(question, [title], limit=room, exclude=seen)
             seen.update(chunk.chunk_id for chunk in chunks)
-            found += [_from_chunk(chunk, self.label) for chunk in chunks]
+            found += [_from_chunk(chunk, self.label, self.sources) for chunk in chunks]
         return found
 
 
@@ -189,9 +222,11 @@ class PageFiller:
         label: str = "知识库",
         min_hits: int = 2,
         max_chars: int = 8000,
+        sources: Sources = NO_SOURCES,
     ):
         self.retriever = retriever
         self.label = label
+        self.sources = sources
         self.min_hits = min_hits
         self.max_chars = max_chars
 
@@ -225,7 +260,7 @@ class PageFiller:
         for chunk in chunks:
             block, seq = plan.whole[chunk.chunk_id]
             origin = origins.get(block, self.label)
-            blocks.setdefault(block, []).append((seq, _from_chunk(chunk, origin)))
+            blocks.setdefault(block, []).append((seq, _from_chunk(chunk, origin, self.sources)))
 
         def in_page_order(block: str) -> list[Evidence]:
             return [item for _, item in sorted(blocks[block], key=lambda pair: pair[0])]
@@ -245,8 +280,8 @@ class PageFiller:
         return result
 
 
-#: 站内全文搜索：（搜索词，最多几个页面）→ 页面标题
-SiteSearch = Callable[[str, int], Awaitable[list[str]]]
+#: 站内全文搜索：（搜索词，每个 wiki 最多几个页面）→ 各个 wiki 搜到的页面标题（wiki 的 id → 标题）
+SiteSearch = Callable[[str, int], Awaitable[Mapping[str, Sequence[str]]]]
 
 
 def site_keywords_hint(nouns: str = "", example: str = "") -> str:
@@ -274,12 +309,14 @@ class SiteSearchSource:
         chunks: int = 6,
         timeout_seconds: float = 5.0,
         keywords_hint: str = "",
+        sources: Sources = NO_SOURCES,
     ):
         if keywords_hint:
             self.keywords_hint = keywords_hint
         self.retriever = retriever
         self.search = search
         self.label = label
+        self.sources = sources
         self.pages = pages
         self.chunks = chunks
         self.timeout_seconds = timeout_seconds
@@ -290,8 +327,16 @@ class SiteSearchSource:
         titles = await asyncio.wait_for(
             self.search(keywords.strip(), self.pages), self.timeout_seconds
         )
-        found = await self.retriever.search_pages(question, titles, limit=self.chunks, exclude=have)
-        return [_from_chunk(chunk, self.label) for chunk in found]
+        # 每个 wiki 搜到的页面各自挑，再轮着排：一个 wiki 的页面不会把另一个的挤出去
+        picked = [
+            await self.retriever.search_pages(
+                question, list(mine), limit=self.chunks, exclude=have, wiki=wiki
+            )
+            for wiki, mine in titles.items()
+            if mine
+        ]
+        found = [chunk for turn in zip_longest(*picked) for chunk in turn if chunk is not None]
+        return [_from_chunk(chunk, self.label, self.sources) for chunk in found[: self.chunks]]
 
 
 #: 搜一次网页：搜索词 → 网页列表（``WebSearchClient.search``）

@@ -494,6 +494,7 @@ class AdminQueries:
     # ---- 知识库 ----
 
     async def kb_summary(self) -> dict[str, Any]:
+        """库里的切片按类型、图片按种类各有多少（挂着的几个 wiki 合在一起数）。"""
         pool = self._db.pool
         types = await pool.fetch(
             "SELECT type, count(*) AS chunks, count(DISTINCT doc_key) AS docs, "
@@ -506,12 +507,15 @@ class AdminQueries:
         )
         return {"types": [_plain(row) for row in types], "image_kinds": [_plain(r) for r in kinds]}
 
-    async def kb_sync(self) -> dict[str, Any] | None:
-        """知识库自动更新（kbsync 服务）最近一轮写下的状态；它还没跑过就是 None。
+    async def kb_sync(self, wiki: str) -> dict[str, Any] | None:
+        """知识库自动更新（kbsync 服务）给 ``wiki`` 最近一轮写下的状态；还没跑过就是 None。
 
-        状态是 plugins/knowledge/sync.py 的 ``status_of`` 写进 ``kb_meta`` 表 ``sync`` 这一行的。
+        状态是 plugins/knowledge/sync.py 的 ``status_of`` 写进 ``kb_meta`` 表的，一个 wiki 一行
+        （``sync:<wiki 的 id>``）。
         """
-        raw = await self._db.pool.fetchval("SELECT value FROM kb_meta WHERE key = 'sync'")
+        raw = await self._db.pool.fetchval(
+            "SELECT value FROM kb_meta WHERE key = $1", f"sync:{wiki}"
+        )
         status = json.loads(raw) if raw else None
         if not isinstance(status, dict):
             return None
@@ -519,9 +523,17 @@ class AdminQueries:
         return status
 
     async def kb_chunks(
-        self, *, limit: int, offset: int, kind: str | None, search: str | None
+        self,
+        *,
+        limit: int,
+        offset: int,
+        kind: str | None,
+        search: str | None,
+        wiki: str | None = None,
     ) -> dict[str, Any]:
         where = Where()
+        if wiki:
+            where.add("wiki = {}", wiki)
         if kind:
             where.add("type = {}", kind)
         if search:
@@ -529,8 +541,8 @@ class AdminQueries:
         pool = self._db.pool
         total = await pool.fetchval(f"SELECT count(*) FROM kb_chunks {where.sql}", *where.params)
         rows = await pool.fetch(
-            "SELECT chunk_id, doc_key, type, title, section_path, seq, date, date_inferred, url, "
-            "source, length(text) AS chars, left(text, 240) AS preview, "
+            "SELECT chunk_id, wiki, doc_key, type, title, section_path, seq, date, date_inferred, "
+            "url, source, length(text) AS chars, left(text, 240) AS preview, "
             "(embedding IS NOT NULL) AS has_vector "
             f"FROM kb_chunks {where.sql} ORDER BY title, doc_key, seq "
             f"LIMIT {where.param(limit)} OFFSET {where.param(offset)}",
@@ -541,9 +553,9 @@ class AdminQueries:
     async def kb_chunk(self, chunk_id: str) -> dict[str, Any] | None:
         pool = self._db.pool
         row = await pool.fetchrow(
-            "SELECT chunk_id, doc_key, type, title, section_path, seq, text, url, source, date, "
-            "date_inferred, entities, meta, (embedding IS NOT NULL) AS has_vector, fingerprint, "
-            "updated_at FROM kb_chunks WHERE chunk_id = $1",
+            "SELECT chunk_id, wiki, doc_key, type, title, section_path, seq, text, url, source, "
+            "date, date_inferred, entities, meta, (embedding IS NOT NULL) AS has_vector, "
+            "fingerprint, updated_at FROM kb_chunks WHERE chunk_id = $1",
             chunk_id,
         )
         if row is None:
@@ -558,9 +570,17 @@ class AdminQueries:
         return found
 
     async def kb_images(
-        self, *, limit: int, offset: int, kind: str | None, search: str | None
+        self,
+        *,
+        limit: int,
+        offset: int,
+        kind: str | None,
+        search: str | None,
+        wiki: str | None = None,
     ) -> dict[str, Any]:
         where = Where()
+        if wiki:
+            where.add("wiki = {}", wiki)
         if kind:
             where.add("kind = {}", kind)
         if search:
@@ -574,7 +594,7 @@ class AdminQueries:
         pool = self._db.pool
         total = await pool.fetchval(f"SELECT count(*) FROM kb_images {where.sql}", *where.params)
         rows = await pool.fetch(
-            "SELECT image_id, kind, label, subject, page_title, url, image_url, text, "
+            "SELECT image_id, wiki, kind, label, subject, page_title, url, image_url, text, "
             "(embedding IS NOT NULL) AS has_vector "
             f"FROM kb_images {where.sql} ORDER BY page_title, image_id "
             f"LIMIT {where.param(limit)} OFFSET {where.param(offset)}",

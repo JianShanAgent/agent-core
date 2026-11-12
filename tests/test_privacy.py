@@ -70,9 +70,9 @@ _DATA_TABLES = (
     # 站点插件对通用配置的补充（读配置时并进去）：清洗规则；人设卡片
     # （persona/ 下的文件不在这条检查里）
     ("site.huiji", "extend", "plugin.knowledge", "clean"),
-    ("site.yys", "extend", "plugin.knowledge", "clean"),
-    ("site.yys", "extend", "persona/persona.default"),
-    ("site.yys", "knowledge", "datasets"),
+    ("site.huiji_yys", "extend", "plugin.knowledge", "clean"),
+    ("site.huiji_yys", "extend", "persona/persona.default"),
+    ("site.huiji_yys", "knowledge", "datasets"),
 )
 #: 站点插件配置里的这一段，下面一层的键是「要补充的那份配置的名字」
 _EXTEND = "extend"

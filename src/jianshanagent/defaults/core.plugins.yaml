@@ -1,6 +1,6 @@
 # 启用哪些功能插件（按顺序加载）。每个插件是 src/jianshanagent/plugins/ 下的一个目录：清单 plugin.yaml、
 # 默认配置 config.yaml、代码都在里面（规范见 src/jianshanagent/core/manifest.py）。
-# 站点插件（某个 wiki 平台、某个站特有的东西）不在这里，见 core.wiki.yaml 的 site。
+# 站点插件（某个 wiki 平台、某个站特有的东西）不在这里，见 core.wiki.yaml 里每个 wiki 的 site。
 enabled:
   - safety
   - wiki_query                     # /查 和给模型用的 wiki 查询；查哪个 wiki、用哪个站点插件见 core.wiki.yaml

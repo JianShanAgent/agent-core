@@ -202,6 +202,60 @@ function Tables({ data }: { data: KbSummary }) {
   );
 }
 
+/** 挂了不止一个 wiki 时：库里各有多少。 */
+function Wikis({ wikis }: { wikis: KbSummary["wikis"] }) {
+  return (
+    <Card>
+      <CardHeader>
+        <div>
+          <CardTitle>内容出自这几个 wiki</CardTitle>
+          <CardDescription>
+            它们的内容在同一个库里，检索时一起找，回答里标明出自哪一个；各更新各的
+          </CardDescription>
+        </div>
+      </CardHeader>
+      <Table>
+        <thead>
+          <tr>
+            <Th>wiki</Th>
+            <Th className="text-right">切片</Th>
+            <Th className="text-right">有向量的</Th>
+            <Th className="text-right">图片</Th>
+            <Th>上次导入</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {wikis.map((wiki) => (
+            <Tr key={wiki.id}>
+              <Td className="font-medium">
+                {wiki.label}
+                <code className="text-muted-foreground ml-2 font-mono text-[11px] font-normal">
+                  {wiki.id}
+                </code>
+              </Td>
+              <Td className="text-right tabular-nums">{formatNumber(wiki.chunks)}</Td>
+              <Td
+                className={cn(
+                  "text-right tabular-nums",
+                  wiki.with_vectors < wiki.chunks && "text-warning",
+                )}
+              >
+                {formatNumber(wiki.with_vectors)}
+              </Td>
+              <Td className="text-right tabular-nums">{formatNumber(wiki.images)}</Td>
+              <Td className="text-muted-foreground text-xs">
+                {wiki.loaded_at
+                  ? `${formatDateTime(wiki.loaded_at)}（${formatAgo(wiki.loaded_at)}）`
+                  : "还没导入过"}
+              </Td>
+            </Tr>
+          ))}
+        </tbody>
+      </Table>
+    </Card>
+  );
+}
+
 export function Overview({ onOpenTab }: { onOpenTab: (tab: "chunks" | "images") => void }) {
   const query = useKbSummary();
   const data = query.data;
@@ -325,7 +379,12 @@ export function Overview({ onOpenTab }: { onOpenTab: (tab: "chunks" | "images") 
         </Banner>
       ) : null}
 
-      <SyncStatus sync={data.sync} />
+      {data.wikis.length > 1 ? <Wikis wikis={data.wikis} /> : null}
+      {data.wikis.length > 1 ? (
+        data.wikis.map((wiki) => <SyncStatus key={wiki.id} sync={wiki.sync} wiki={wiki} />)
+      ) : (
+        <SyncStatus sync={data.wikis[0]?.sync ?? null} />
+      )}
 
       <Tables data={data} />
 

@@ -158,12 +158,24 @@ export const api = {
   savePlugins: (enabled: string[]) => put<SaveResult>("/api/plugins", { enabled }),
 
   kbSummary: () => get<KbSummary>("/api/kb/summary"),
-  kbChunks: (query: { q?: string; type?: string; limit?: number; offset?: number }) =>
+  kbChunks: (query: {
+    q?: string;
+    type?: string;
+    wiki?: string;
+    limit?: number;
+    offset?: number;
+  }) =>
     get<Paged<KbChunkRow>>("/api/kb/chunks", query),
   kbChunk: (id: string) => get<KbChunk>(`/api/kb/chunks/${seg(id)}`),
   kbSearch: (query: string, topK?: number) =>
     post<KbSearchResult>("/api/kb/search", { query, top_k: topK }),
-  kbImages: (query: { q?: string; kind?: string; limit?: number; offset?: number }) =>
+  kbImages: (query: {
+    q?: string;
+    kind?: string;
+    wiki?: string;
+    limit?: number;
+    offset?: number;
+  }) =>
     get<Paged<KbImage>>("/api/kb/images", query),
   kbImageSearch: (image: string, topK?: number) =>
     post<{ seconds: number; hits: ImageSearchHit[] }>("/api/kb/image-search", {

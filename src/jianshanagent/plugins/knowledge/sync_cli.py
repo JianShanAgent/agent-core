@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from jianshanagent.core.config import AppConfig
-from jianshanagent.plugins.knowledge.settings import Settings
+from jianshanagent.plugins.knowledge.settings import Settings, kb_root
 from jianshanagent.plugins.knowledge.sync import (
     RESULT_CHECKED,
     RESULT_PROBLEM,
@@ -139,17 +139,30 @@ def _print_status(settings: Settings) -> None:
         _say(f"  {record['at']} {result} {'；'.join(parts)}")
 
 
-def run(args: argparse.Namespace, config: AppConfig, settings: Settings) -> int:
+def run_service(args: argparse.Namespace, config: AppConfig) -> int:
+    """``--loop`` 和 ``--health``：一个进程管挂着的全部 wiki。"""
+    if args.wiki:
+        _say("--loop、--health 管的是全部 wiki，不能和 --wiki 一起用")
+        return 2
     if args.health:
-        return 0 if healthy(settings) else 1
+        return 0 if healthy(kb_root(config)) else 1
+    return asyncio.run(run_loop(args.config_dir))
+
+
+def run(args: argparse.Namespace, config: AppConfig, settings: Settings) -> int:
+    """给一个 wiki（``settings`` 是它的设置）看现状、看打算做什么，或者做一轮。"""
     if args.status:
         _print_status(settings)
         return 0
-    if args.loop:
-        return asyncio.run(run_loop(args.config_dir))
     try:
         record = asyncio.run(
-            run_once(config, force=args.force, full=args.full, plan_only=args.plan)
+            run_once(
+                config,
+                wiki=settings.wiki.id,
+                force=args.force,
+                full=args.full,
+                plan_only=args.plan,
+            )
         )
     except Busy as exc:
         _say(str(exc))

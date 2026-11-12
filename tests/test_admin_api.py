@@ -493,7 +493,7 @@ async def test_the_page_is_told_which_items_cannot_be_changed_from_the_web(env: 
             "providers.local.secret",
         },
         "plugin.wiki_query": set(),
-        "core.wiki": {"api_url", "site_base", "auth_header", "site"},
+        "core.wiki": {"wikis"},
         "core.storage": {"postgres.dsn_env", "redis.url_env"},
         "core.admin": {"enabled", "token_file"},
         "app": {"healthcheck"},

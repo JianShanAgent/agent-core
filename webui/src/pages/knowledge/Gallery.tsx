@@ -13,7 +13,7 @@ import { useDebounced } from "@/lib/hooks";
 import type { KbImage } from "@/lib/types";
 import { SearchBox, useOffset } from "@/pages/sessions/shared";
 
-import { ImageDialog, KbImg, useKbSummary } from "./shared";
+import { ImageDialog, KbImg, useKbSummary, useWikiNames, wikiOptions } from "./shared";
 
 const PAGE = 48;
 const GRID = "grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6";
@@ -21,20 +21,28 @@ const GRID = "grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-c
 export function Gallery() {
   const [text, setText] = useState("");
   const [kind, setKind] = useState("");
+  const [wiki, setWiki] = useState("");
   const [image, setImage] = useState<KbImage | null>(null);
   const top = useRef<HTMLDivElement>(null);
   const q = useDebounced(text.trim());
-  const [offset, setOffset] = useOffset(`${kind}\n${q}`);
+  const [offset, setOffset] = useOffset(`${kind}\n${wiki}\n${q}`);
 
   const summary = useKbSummary();
+  const wikiNames = useWikiNames();
   const query = useQuery({
-    queryKey: ["kb", "images", { q, kind, offset }],
+    queryKey: ["kb", "images", { q, kind, wiki, offset }],
     queryFn: () =>
-      api.kbImages({ q: q || undefined, kind: kind || undefined, limit: PAGE, offset }),
+      api.kbImages({
+        q: q || undefined,
+        kind: kind || undefined,
+        wiki: wiki || undefined,
+        limit: PAGE,
+        offset,
+      }),
     placeholderData: (previous) => previous,
   });
   const data = query.data;
-  const filtered = q !== "" || kind !== "";
+  const filtered = q !== "" || kind !== "" || wiki !== "";
   const kinds = (summary.data?.image_kinds ?? []).map((row) => ({
     value: row.kind,
     label: `${row.kind}（${formatNumber(row.images)}）`,
@@ -55,6 +63,9 @@ export function Gallery() {
           onChange={setKind}
           options={[{ value: "", label: "全部种类" }, ...kinds]}
         />
+        {wikiNames ? (
+          <SimpleSelect size="sm" value={wiki} onChange={setWiki} options={wikiOptions(wikiNames)} />
+        ) : null}
         <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
           {query.isFetching && data ? <Spinner className="size-3.5" /> : null}
           {data ? `${filtered ? "找到" : "共"} ${formatNumber(data.total)} 张` : ""}
@@ -95,6 +106,7 @@ export function Gallery() {
                     <div className="truncate text-xs font-medium">{item.label || item.image_id}</div>
                     <div className="text-muted-foreground truncate text-[11px]">
                       {item.kind}
+                      {wikiNames && item.wiki ? ` · ${wikiNames[item.wiki] ?? item.wiki}` : ""}
                       {item.has_vector ? "" : " · 没有向量"}
                     </div>
                   </div>

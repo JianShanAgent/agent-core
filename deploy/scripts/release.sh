@@ -10,7 +10,8 @@
 #   release.sh prune [留几个]        清理旧发布的目录和镜像（activate 成功后会自动做，默认留 5 个）
 #   release.sh secrets               上传 config/secrets.yaml 到 shared/（权限 600）
 #   release.sh list                  列出服务器上的发布、当前和上一个指向、最近几次切换
-#   release.sh kb-seed               把开发机的知识库文件（data/kb）拷到服务器，自动更新在它上面接着做
+#   release.sh kb-seed [wiki]        把开发机的知识库文件（data/kb）拷到服务器，自动更新在它上面接着做
+#                                    （写了 wiki 的 id 就只拷那一个 wiki 的）
 #   release.sh webui [提交]          只在本机构建管理后台的页面，看能不能构建（不上传、不碰服务器）
 #
 # 一个部署由几个仓库拼成：核心（jianshanagent，也带着部署工具 deploy/）、用到的插件、实例仓库自己
@@ -290,28 +291,41 @@ cmd_list() {
 }
 
 # 把开发机的 data/kb 拷到服务器的数据盘上（容器里的 /data/kb）。
+# data/kb 下面一个 wiki 一层（data/kb/<wiki 的 id>/）；写了 wiki 的 id 就只拷那一层，别的 wiki 在服务器上的文件不动。
 #
 # 服务器上的 kbsync 服务只做增量：它要有切片、向量和取数缓存（页面清单、各页面取下来的原始内容）
 # 才知道哪些已经有了；数据盘上没有这些文件时它什么都不做，不会自己从头把整个 wiki 取一遍。
-# 所以第一次上线自动更新之前要拷一次；以后一般不用再拷（服务器自己会跟着 wiki 更新）。
+# 所以第一次上线自动更新之前、以后每新挂一个 wiki 都要拷一次；别的时候一般不用再拷（服务器自己会跟着 wiki 更新）。
 # 再拷一次也没有坏处：服务器上的文件会回到开发机的那一版，下一轮自动更新再从那里追上来。
 #
 # 拷的是：切片和文档清单、图片记录、向量、取数缓存、自动更新读到哪里了（cache/sync_state.json）。
 # 不拷的是：原图缓存（1 个 G；已经有向量的图片用不着原图，新图服务器会自己下）、评测和调试的产物、日志。
 # 用 rsync -a：文件的修改时间要原样带过去——老的渲染缓存是拿它和页面的 touched 比来判断过没过时的。
 cmd_kb_seed() {
-  local src=data/kb data dest
-  [ -f "$src/chunks.jsonl" ] && [ -f "$src/cache/listing.json" ] \
-    || { echo "本机的 $src 里没有 chunks.jsonl 或 cache/listing.json，没有可拷的知识库" >&2; exit 1; }
+  local wiki=${1:-} src=data/kb data dest dir found=0
+  case "$wiki" in
+    *[!a-z0-9_]*) echo "wiki 的 id 只有小写字母、数字、下划线：$wiki" >&2; exit 2 ;;
+  esac
+  for dir in "$src"/${wiki:-*}/; do
+    [ -f "$dir/chunks.jsonl" ] && [ -f "$dir/cache/listing.json" ] && found=1
+  done
+  [ "$found" = 1 ] || {
+    echo "本机的 $src/${wiki:-<wiki 的 id>}/ 里没有 chunks.jsonl 或 cache/listing.json，没有可拷的知识库" >&2
+    exit 1
+  }
   data=$(remote "sed -n 's/^JIANSHANAGENT_DATA_DIR=//p' '$ROOT/shared/.env'")
   [ -n "$data" ] || { echo "服务器的 $ROOT/shared/.env 里没有 JIANSHANAGENT_DATA_DIR" >&2; exit 1; }
   dest="$data/bot/kb"
+  if [ -n "$wiki" ]; then
+    src="$src/$wiki"
+    dest="$dest/$wiki"
+  fi
   # 拷的时候不能让自动更新同时在写这些文件。当前发布里还没有这个服务（还没上线带自动更新的版本）就跳过
   remote "cd '$ROOT' && ./ctl stop kbsync" 2>/dev/null \
     || echo "（服务器上没有在跑的 kbsync 服务，直接拷）"
   remote "mkdir -p '$dest'"
   rsync -az --stats -e "ssh -o BatchMode=yes" \
-    --exclude 'cache/images/files/' --exclude 'cache/sync.lock' --exclude 'cache/sync_heartbeat' \
+    --exclude 'cache/images/files/' --exclude 'cache/sync.lock' --exclude 'sync_heartbeat' \
     --exclude 'eval/' --exclude 'logs/' --exclude 'debug/' --exclude 'export/' \
     --exclude 'backup-*/' --exclude '*.tmp' --exclude '.DS_Store' \
     "$src/" "$HOST:$dest/" | sed -n '/Number of files transferred/p; /Total transferred file size/p'
@@ -334,10 +348,10 @@ case "${1:-}" in
   prune) shift; cmd_prune "$@" ;;
   secrets) cmd_secrets ;;
   list) cmd_list ;;
-  kb-seed) cmd_kb_seed ;;
+  kb-seed) shift; cmd_kb_seed "$@" ;;
   webui) shift; cmd_webui "$@" ;;
   *)
-    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

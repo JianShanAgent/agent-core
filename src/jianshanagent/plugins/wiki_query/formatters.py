@@ -63,6 +63,11 @@ def format_wiki_page(
     )
 
 
+def format_source(label: str, markdown: bool = False) -> str:
+    """挂了不止一个 wiki 时，标在一个 wiki 的条目前面的出处。"""
+    return f"> 出自 {label}" if markdown else f"〔出自 {label}〕"
+
+
 def format_page(
     page: PageContent,
     *,

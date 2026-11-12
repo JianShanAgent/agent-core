@@ -35,10 +35,9 @@ from jianshanagent.core.manifest import (
 PACKAGE_PREFIX = {KIND_FEATURE: "jianshanagent_plugin_", KIND_SITE: "jianshanagent_site_"}
 
 
-def expected_package(manifest: Manifest, chain: tuple[Manifest, ...] = ()) -> str:
-    """照命名规范，这个插件的包该叫什么：前缀 + 从最上面一级到它自己的 id，用下划线连起来。"""
-    ids = [m.id for m in chain] if chain else [manifest.id]
-    return PACKAGE_PREFIX[manifest.kind] + "_".join(ids)
+def expected_package(manifest: Manifest) -> str:
+    """照命名规范，这个插件的包该叫什么：前缀 + id（站的 id 里已经带着它的各级上级）。"""
+    return PACKAGE_PREFIX[manifest.kind] + manifest.id
 
 
 def check_plugin(package: str) -> Manifest:
@@ -50,7 +49,7 @@ def check_plugin(package: str) -> Manifest:
     if not kind:
         raise PluginError(
             f"包名「{package}」不照规范：功能插件叫 {PACKAGE_PREFIX[KIND_FEATURE]}<id>，"
-            f"站点插件叫 {PACKAGE_PREFIX[KIND_SITE]}<平台>[_<站>]"
+            f"站点插件叫 {PACKAGE_PREFIX[KIND_SITE]}<id>（id 是 <平台>[_<站>]）"
         )
     # 每次现问（测试会换掉登记表）
     entries = manifest_module._entry_points(ENTRY_POINTS[kind])
@@ -63,11 +62,10 @@ def check_plugin(package: str) -> Manifest:
     plugin_id = registered[package]
     if kind == KIND_FEATURE:
         manifest = feature_manifests()[plugin_id]
-        chain: tuple[Manifest, ...] = ()
     else:
         manifest = installed_sites()[plugin_id]
-        chain = site_chain(plugin_id)  # 上级找不到、绕成圈，在这里报
-    wanted = expected_package(manifest, chain)
+        site_chain(plugin_id)  # 上级找不到、绕成圈、id 没带上级，在这里报
+    wanted = expected_package(manifest)
     if package != wanted:
         raise PluginError(f"插件「{plugin_id}」的包叫「{package}」，照命名规范应该叫「{wanted}」")
     if not manifest.description:

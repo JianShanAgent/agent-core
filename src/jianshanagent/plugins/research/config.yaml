@@ -43,10 +43,10 @@ analysis:
   entry_chunks_per_name: 2         # 每个条目最多几片
   entry_chunks: 4                  # 一个问题合计最多几片
   # topics：问题归哪一类（告诉查证员，也记进日志，方便以后看用户都在问什么）。因站而异，由站点插件给
-  # （阴阳师的在 site.yys 的 extend 段）；都没写时是：人物、事物、事件、规则机制、其它
+  # （阴阳师的在 site.huiji_yys 的 extend 段）；都没写时是：人物、事物、事件、规则机制、其它
 
 # 提示词里因站而异的说法。这里是对什么 wiki 都说得通的；站点插件在自己配置的 extend 段里换成那个站的
-# （阴阳师的在 site.yys）。这个 wiki 叫什么不在这里，在 core.wiki.yaml 的 name / about
+# （阴阳师的在 site.huiji_yys）。这个 wiki 叫什么不在这里，在 core.wiki.yaml 的 name / about
 wording:
   names: "条目、人物、事物、事件的名字或别称"   # 分析问题时要从问题里摘出来的名字都有哪些
   generic_words: []                # 泛指的词，不算名字（阴阳师：式神、活动、皮肤）

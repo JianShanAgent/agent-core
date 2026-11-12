@@ -72,7 +72,8 @@ services:
     # （做法见 src/jianshanagent/plugins/knowledge/sync.py，参数在 src/jianshanagent/plugins/knowledge/config.yaml 的 sync 段，
     # 管理后台里能改、能看状态）。和机器人是同一个镜像，跑的是另一个入口。
     # 单独一个容器：重算切片要占几秒 CPU、四百多兆内存，放在机器人进程里会卡住收发消息；它出了问题也不影响机器人。
-    # 数据盘上没有知识库的文件（/data/kb）时它不会自己从头全量取数，只在日志和管理后台里说明，
+    # 挂了几个 wiki 就轮流更新几个，各自的文件在 /data/kb/<wiki 的 id>/。
+    # 数据盘上没有某个 wiki 的知识库文件时它不会自己从头全量取数，只在日志和管理后台里说明，
     # 等 deploy/scripts/release.sh kb-seed 把开发机的文件拷过来。
     image: jianshanagent-qqbot:${JIANSHANAGENT_RELEASE:-dev}
     restart: unless-stopped

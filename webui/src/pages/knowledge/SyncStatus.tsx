@@ -95,11 +95,20 @@ function changesOf(round: KbSyncRound): string {
   return entries.length ? entries.map(([kind, count]) => `${kind} ${count}`).join("、") : "—";
 }
 
-export function SyncStatus({ sync }: { sync: KbSync | null }) {
+export function SyncStatus({
+  sync,
+  wiki,
+}: {
+  sync: KbSync | null;
+  /** 挂了不止一个 wiki 时：这是哪个 wiki 的（每个 wiki 各更新各的，各有一份状态） */
+  wiki?: { id: string; label: string };
+}) {
+  // 手动放行的命令：挂了不止一个 wiki 时指明是哪一个
+  const only = wiki ? `--wiki ${wiki.id} ` : "";
   if (!sync) {
     return (
       <div className="text-muted-foreground px-1 text-xs leading-relaxed">
-        自动更新还没有跑过。它是服务器上单独的一个服务（kbsync），每隔一段时间看 wiki
+        {wiki ? `「${wiki.label}」的` : ""}自动更新还没有跑过。它是服务器上单独的一个服务（kbsync），每隔一段时间看 wiki
         改了什么、只重做变了的部分；本机调试时没有这个服务。跑起来以后，这里会显示它上次什么时候看过
         wiki、更新了什么。
       </div>
@@ -141,7 +150,8 @@ export function SyncStatus({ sync }: { sync: KbSync | null }) {
       <CardHeader>
         <div>
           <CardTitle className="flex items-center gap-2">
-            自动更新 <ToneBadge tone={state.tone}>{state.text}</ToneBadge>
+            自动更新{wiki ? ` · ${wiki.label}` : ""}{" "}
+            <ToneBadge tone={state.tone}>{state.text}</ToneBadge>
           </CardTitle>
           <CardDescription>
             每 {minutes} 分钟看一次 wiki 的最近更改，只重做变了的页面和图片，再导入库里；机器人不用停
@@ -182,7 +192,7 @@ export function SyncStatus({ sync }: { sync: KbSync | null }) {
               <div className="text-muted-foreground mt-1 text-xs">
                 如果是被闸门拦下的、看过确实没问题，到服务器上手动放行一次：
                 <code className="ml-1 font-mono">
-                  ctl exec kbsync python -m jianshanagent.plugins.knowledge sync --force
+                  ctl exec kbsync python -m jianshanagent.plugins.knowledge {only}sync --force
                 </code>
               </div>
             ) : null}

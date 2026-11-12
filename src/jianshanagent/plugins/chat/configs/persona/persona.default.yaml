@@ -1,5 +1,5 @@
 # Character Card 风格默认人设（仅影响 LLM 路径）
-# 这里是对什么 wiki 都说得通的一版；站点插件在它配置的 extend 段里换成那个站的人设（阴阳师的在 site.yys）。
+# 这里是对什么 wiki 都说得通的一版；站点插件在它配置的 extend 段里换成那个站的人设（阴阳师的在 site.huiji_yys）。
 # 配置名是 persona/<文件名>；plugin.chat 的 persona 写用哪一张。
 # 管理后台里改过的人设存在配置覆写目录里，照样盖在这上面。
 name: Wiki 助手

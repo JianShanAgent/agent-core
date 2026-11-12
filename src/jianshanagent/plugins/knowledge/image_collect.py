@@ -1,7 +1,8 @@
 """图片索引的第一步：选图、生成记录、把原图下载到本地缓存。
 
 选哪些图、每张图是什么（记录里的名字和说明）因站而异，由站点插件决定（``image_catalog``，
-见 site.py；阴阳师 wiki 的规则在 ``sites/yys/images.py``）。这里是和站点无关的部分：
+见 site.py；阴阳师 wiki 的规则在站点插件 ``huiji_yys`` 的 ``knowledge/images.py``）。
+这里是和站点无关的部分：
 列 wiki 上的文件、读写记录文件、下载原图。
 
 每张图一条记录（``images.jsonl`` 的一行，字段见 image_store.KbImage）。``subject`` 相同的图

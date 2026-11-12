@@ -27,6 +27,20 @@ def site_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, top: str) -> 
     return root
 
 
+def one_wiki(
+    site: str = "",
+    *,
+    wiki_id: str = "main",
+    api_url: str = "https://wiki.example/api.php",
+    **more: Any,
+) -> dict[str, Any]:
+    """``core.wiki`` 的内容：只挂一个 wiki，用 ``site`` 这个站点插件。
+
+    ``more``：这个 wiki 的别的项（``site_base``、``article_path``、``label``……）。
+    """
+    return {"wikis": [{"id": wiki_id, "api_url": api_url, "site": site, **more}]}
+
+
 def write_site(
     directory: Path,
     *,
@@ -40,8 +54,8 @@ def write_site(
 
     ``config``：它的默认配置（``config.yaml``）；``modules``：接扩展点的模块，名字 → 源码；
     ``manifest``：要改写或加进清单里的项（测不合规范的清单时用）。
-    下级插件放在上级目录的 ``sites/`` 里：
-    ``write_site(上级目录 / "sites" / "子站", parent="上级")``。
+    下级插件放在上级目录的 ``sites/`` 里，id 以上级的 id 开头：
+    ``write_site(上级目录 / "sites" / "上级_子站", parent="上级")``。
     """
     directory.mkdir(parents=True, exist_ok=True)
     for package in (directory, directory.parent if directory.parent.name == "sites" else None):

@@ -299,7 +299,7 @@ class Admin:
                 "image_search": "image_search" in services,
                 "memory": "memory" in services,
                 "chatlog": "chatlog" in services,
-                "wiki": "wiki_query_client" in services,
+                "wiki": "wiki_query" in services,
                 "tracing": runtime.tracer.sink is not None,
             },
             "active": len(runtime.tracer.active),

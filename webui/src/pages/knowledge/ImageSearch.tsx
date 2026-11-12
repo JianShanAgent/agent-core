@@ -15,7 +15,7 @@ import { formatBytes, formatSeconds } from "@/lib/format";
 import type { ImageSearchHit } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { ImageDialog, KbImg, useKbSummary } from "./shared";
+import { ImageDialog, KbImg, useKbSummary, useWikiNames } from "./shared";
 
 // 和后端的上限一致（routes_data.py）
 const MAX_BYTES = 10 * 1024 * 1024;
@@ -38,6 +38,7 @@ function SureBadge({ sure }: { sure: boolean }) {
 
 export function ImageSearch({ active }: { active: boolean }) {
   const summary = useKbSummary();
+  const wikiNames = useWikiNames();
   const [picked, setPicked] = useState<Picked | null>(null);
   const [dragging, setDragging] = useState(false);
   const [opened, setOpened] = useState<ImageSearchHit | null>(null);
@@ -223,7 +224,10 @@ export function ImageSearch({ active }: { active: boolean }) {
                   <div className="flex w-full flex-col gap-1.5 p-2.5">
                     <div className="text-sm font-medium break-words">{hit.label || hit.image_id}</div>
                     <div className="text-muted-foreground flex items-center justify-between gap-2 text-xs">
-                      <span className="truncate">{hit.kind}</span>
+                      <span className="truncate">
+                        {hit.kind}
+                        {wikiNames && hit.wiki ? ` · ${wikiNames[hit.wiki] ?? hit.wiki}` : ""}
+                      </span>
                       <span className="text-foreground shrink-0 font-medium tabular-nums">
                         相似度 {hit.score.toFixed(2)}
                       </span>

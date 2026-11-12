@@ -2,8 +2,8 @@
 
 插件长什么样、清单怎么写见 ``core/manifest.py``。这里是运行时的那一半，所有扩展点共用一套：
 
-- 开出扩展点的功能插件调 :func:`load_sites`，拿到用到的各级站点插件在这个扩展点上的实例，
-  从上到下。
+- 开出扩展点的功能插件对挂着的每个 wiki 调一次 :func:`load_sites`，拿到这个 wiki 用到的
+  各级站点插件在这个扩展点上的实例，从上到下。
 - 站点插件在清单的 ``capabilities`` 里写了哪个扩展点，包里就要有同名的模块，模块里有
   ``create(setup)``，返回那个扩展点的基类的实例。基类在开出扩展点的功能插件里：
   ``plugins/wiki_query/provider.py`` 的 ``WikiProvider``、
@@ -42,9 +42,11 @@ class SiteSetup:
     """``create(setup)`` 拿到的东西。"""
 
     manifest: Manifest
+    #: 这个 wiki 的那一份配置（通用的配置加上它的站点插件的补充）
     config: AppConfig
     #: 这个插件自己的配置（它目录里的 ``config.yaml``，加上后台改过的），没有就是空的
     raw: dict[str, Any]
+    #: 这个插件是为哪个 wiki 加载的
     wiki: WikiSite
     #: 各级上级在同一个扩展点上的实例：id → 实例（没接这个扩展点的上级不在里面）
     parents: Mapping[str, Any] = field(default_factory=dict)
@@ -67,9 +69,14 @@ class SiteSetup:
 
 
 def load_sites(config: AppConfig, extension: str, wiki: WikiSite) -> list[Any]:
-    """用到的各级站点插件在 ``extension`` 这个扩展点上的实例，从上到下。没接的那几级跳过。"""
+    """``wiki`` 这个 wiki 用到的各级站点插件在 ``extension`` 这个扩展点上的实例，从上到下。
+
+    没接这个扩展点的那几级跳过。插件拿到的配置是这个 wiki 的那一份。
+    """
     loaded: dict[str, Any] = {}
-    for manifest in config.site_chain:
+    chain = config.wiki(wiki.id).chain
+    config = config.for_wiki(wiki.id)
+    for manifest in chain:
         if extension not in manifest.capabilities:
             continue
         path = f"{manifest.package}.{extension}"

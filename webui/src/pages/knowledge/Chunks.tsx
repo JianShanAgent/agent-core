@@ -15,27 +15,35 @@ import { useDebounced } from "@/lib/hooks";
 import { KB_TYPE_LABELS, label } from "@/lib/labels";
 import { SearchBox, useOffset } from "@/pages/sessions/shared";
 
-import { ChunkDate, useKbSummary } from "./shared";
+import { ChunkDate, useKbSummary, useWikiNames, WikiBadge, wikiOptions } from "./shared";
 
 const PAGE = 30;
 
 export function Chunks() {
   const [text, setText] = useState("");
   const [type, setType] = useState("");
+  const [wiki, setWiki] = useState("");
   const [chunk, setChunk] = useState<string | null>(null);
   const top = useRef<HTMLDivElement>(null);
   const q = useDebounced(text.trim());
-  const [offset, setOffset] = useOffset(`${type}\n${q}`);
+  const [offset, setOffset] = useOffset(`${type}\n${wiki}\n${q}`);
 
   const summary = useKbSummary();
+  const wikiNames = useWikiNames();
   const query = useQuery({
-    queryKey: ["kb", "chunks", { q, type, offset }],
+    queryKey: ["kb", "chunks", { q, type, wiki, offset }],
     queryFn: () =>
-      api.kbChunks({ q: q || undefined, type: type || undefined, limit: PAGE, offset }),
+      api.kbChunks({
+        q: q || undefined,
+        type: type || undefined,
+        wiki: wiki || undefined,
+        limit: PAGE,
+        offset,
+      }),
     placeholderData: (previous) => previous,
   });
   const data = query.data;
-  const filtered = q !== "" || type !== "";
+  const filtered = q !== "" || type !== "" || wiki !== "";
 
   const types = summary.data?.types.length
     ? summary.data.types.map((row) => ({
@@ -59,6 +67,9 @@ export function Chunks() {
           onChange={setType}
           options={[{ value: "", label: "全部类型" }, ...types]}
         />
+        {wikiNames ? (
+          <SimpleSelect size="sm" value={wiki} onChange={setWiki} options={wikiOptions(wikiNames)} />
+        ) : null}
         <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
           {query.isFetching && data ? <Spinner className="size-3.5" /> : null}
           {data ? `${filtered ? "找到" : "共"} ${formatNumber(data.total)} 片` : ""}
@@ -100,6 +111,7 @@ export function Chunks() {
                     <Td className="align-top">
                       <div className="flex items-center gap-1.5">
                         <span className="truncate font-medium">{row.title}</span>
+                        <WikiBadge wiki={row.wiki} names={wikiNames} />
                         {row.has_vector ? null : <Badge tone="warning">没有向量</Badge>}
                       </div>
                       {row.section_path.length ? (

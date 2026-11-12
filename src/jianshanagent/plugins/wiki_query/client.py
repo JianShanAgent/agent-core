@@ -1,6 +1,7 @@
 """wiki 查询客户端：对任何 MediaWiki 都成立的查法，站点特有的条目由站点插件接进来。
 
-对外的方法，命令通路、LLM 工具和查证工作流共用：
+一个客户端查一个 wiki。部署挂了几个 wiki 就有几个客户端，合在一起用的那一层在 hub.py
+（命令、LLM 工具和查证工作流用的是它）。客户端的方法：
 
 - :meth:`WikiQueryClient.search` 按名字找条目（先问站点插件，找不到再按标题、全文搜索）
 - :meth:`WikiQueryClient.get_page` 取内容（站点插件认得的条目给结构化数据，普通页面给摘要）
@@ -23,9 +24,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import time
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +58,8 @@ class SearchHit:
     kind: str = KIND_PAGE
     #: 查询词与正式名或别名完全一致
     exact: bool = False
+    #: 出自哪个 wiki（``core.wiki.yaml`` 里的 id）。站点插件不用填，客户端会标上
+    wiki: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +73,8 @@ class NameMatch:
     aliases: tuple[str, ...] = ()
     #: 查的名字就是正式名、登记过的别名或重定向；False 表示只是正式名 / 别名里包含它
     exact: bool = True
+    #: 出自哪个 wiki（``core.wiki.yaml`` 里的 id）。站点插件不用填，客户端会标上
+    wiki: str = ""
 
 
 @dataclass(slots=True)
@@ -80,6 +85,8 @@ class PageContent:
     #: 普通页面的文字摘要；站点插件的条目为空，内容在 data 里
     extract: str = ""
     data: dict[str, Any] = field(default_factory=dict)
+    #: 出自哪个 wiki（``core.wiki.yaml`` 里的 id）。站点插件不用填，客户端会标上
+    wiki: str = ""
 
 
 class WikiError(RuntimeError):
@@ -238,7 +245,11 @@ class WikiQueryClient:
             hits += [SearchHit(t, KIND_PAGE, exact=t.casefold() == folded) for t in titles]
 
         hits.sort(key=lambda h: not h.exact)  # 稳定排序：完全一致的排前面
-        return hits[:limit]
+        return [self._mine(hit) for hit in hits[:limit]]
+
+    def _mine(self, found: Any) -> Any:
+        """给查到的东西标上出自这个 wiki。"""
+        return dataclasses.replace(found, wiki=self.wiki.id) if self.wiki.id else found
 
     async def lookup_name(self, name: str, *, candidates: int = 3) -> list[NameMatch]:
         """查一个名字（可能是外号）对应哪个条目，用来把用户的叫法换成 wiki 上的正式名。
@@ -255,11 +266,11 @@ class WikiQueryClient:
         for provider in self.providers:
             found += await provider.lookup_name(query)
         if found:
-            return found
+            return [self._mine(match) for match in found]
 
         title = await self._resolve_title(query)
         if title is not None:
-            return [NameMatch(title, KIND_PAGE)]
+            return [self._mine(NameMatch(title, KIND_PAGE))]
         if len(query) < 2:  # 一个字能「包含」上一大片，没有意义
             return []
         partial: list[NameMatch] = []
@@ -267,7 +278,7 @@ class WikiQueryClient:
             partial += await provider.name_candidates(query, candidates - len(partial))
             if len(partial) >= candidates:
                 break
-        return partial[:candidates]
+        return [self._mine(match) for match in partial[:candidates]]
 
     async def _resolve_title(self, title: str) -> str | None:
         """有这个标题的页面就返回它的规范标题（跟随重定向）；没有返回 None。"""
@@ -314,6 +325,12 @@ class WikiQueryClient:
         title = title.strip()
         if not title:
             return None
+        page = await self._get_page(title, kind)
+        if page is not None:
+            page.wiki = self.wiki.id
+        return page
+
+    async def _get_page(self, title: str, kind: str | None) -> PageContent | None:
         for provider in self.providers:
             if kind is None or kind in provider.kinds:
                 page = await provider.get_page(title, kind)
@@ -346,8 +363,3 @@ class WikiQueryClient:
             url=str(page.get("fullurl") or self.page_url(resolved)),
             extract=extract,
         )
-
-
-def provider_kinds(providers: Sequence[WikiProvider]) -> list[str]:
-    """各个站点插件认得的条目种类的代号，按加载顺序，不重复。"""
-    return list(dict.fromkeys(kind for provider in providers for kind in provider.kinds))

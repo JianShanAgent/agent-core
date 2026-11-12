@@ -132,19 +132,22 @@ def shorten_tool_results(history: list[Message], max_chars: int) -> list[Message
 
 def citations_footer(items: Sequence[Any], *, markdown: bool) -> str:
     """回答后面的参考资料。``items`` 是带 ``title`` 和 ``url`` 的资料；
-    没有链接的（网上搜来的网页）只列标题。"""
+    没有链接的（网上搜来的网页）只列标题。部署挂了不止一个 wiki 时资料上带着出处
+    （``source``），标在标题后面。"""
     if not items:
         return ""
     lines: list[str] = []
     for item in items:
+        source = getattr(item, "source", "")
+        tail = f"（{source}）" if source else ""
         if not item.url:
-            lines.append(f"- {item.title}")
+            lines.append(f"- {item.title}{tail}")
         elif markdown:
             label = (item.title or item.url).replace("[", "【").replace("]", "】")
             url = item.url.replace("(", "%28").replace(")", "%29")
-            lines.append(f"- [{label}]({url})")
+            lines.append(f"- [{label}]({url}){tail}")
         else:
-            lines.append(f"- {item.title} {item.url}".replace("  ", " "))
+            lines.append(f"- {item.title}{tail} {item.url}".replace("  ", " "))
     return "\n\n参考资料：\n" + "\n".join(lines)
 
 

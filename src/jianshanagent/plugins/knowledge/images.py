@@ -18,6 +18,10 @@
 - 认准了（``sure``）就只返回这一张；没认准时返回最像的几张，都只算「有些像」。
 
 索引是空的、或者库里的向量和现在的配置对不上（指纹或预处理不一样）时，不调嵌入接口，直接返回空。
+
+部署挂了几个 wiki 时，一个 wiki 一个 wiki 地找、各自判断认没认准，再合起来：同一张立绘两个 wiki
+上都有，放在一起比的话它们互为第二名、相似度挤在一起，就永远认不准了。有 wiki 认准了，
+就只返回认准的（每个 wiki 至多一张）；都没认准，返回各个 wiki 里最像的几张。
 """
 
 from __future__ import annotations
@@ -80,6 +84,7 @@ class ImageSettings:
 
 @dataclass(frozen=True, slots=True)
 class ImageHit:
+    #: 库里的 id：``<wiki>:<wiki 上的文件名>``
     image_id: str
     #: 给人看的一句话
     label: str
@@ -96,6 +101,8 @@ class ImageHit:
     #: 给大模型当资料的说明文字
     text: str
     meta: dict[str, Any]
+    #: 出自哪个 wiki（``core.wiki.yaml`` 里的 id）
+    wiki: str = ""
 
 
 def is_sure(score: float, runner_up: float | None, settings: ImageSettings) -> bool:
@@ -132,7 +139,7 @@ class ImageSearch:
         await self.embedder.aclose()
 
     def _unusable(self, info: ImageStoreInfo) -> str | None:
-        """库里的向量现在不能拿来比的原因；能比就是 None。"""
+        """一个 wiki 的图片向量现在不能拿来比的原因；能比就是 None。"""
         if not info.with_vectors:
             return "图片索引是空的"
         fingerprint = self.embedder.provider.fingerprint
@@ -160,32 +167,16 @@ class ImageSearch:
             normalize_image, image, max_side=settings.max_side, quality=settings.jpeg_quality
         )
         info = await self.store.info()
-        skipped = self._unusable(info)
+        usable = [wiki for wiki, mine in info.wikis.items() if self._unusable(mine) is None]
+        skipped = None if usable else self._unusable(info)
         hits: list[ImageHit] = []
-        if skipped is None:
+        if usable:
             vector = await self.embedder.embed_image(jpeg)
-            # 至少取两个造型：判断「就是这张图」要看第二名落后多少，
-            # 哪怕调用方只要 1 张、哪怕第二名自己不够格返回
-            matches = await self.store.search(vector, limit=max(limit, 2))
-            runner_up = matches[1].score if len(matches) > 1 else None
-            sure = bool(matches) and is_sure(matches[0].score, runner_up, settings)
-            # 认准了就只给这一张：后面几名明显不如它像，给出去只会让回答里多出「也有点像某某」
-            hits = [
-                ImageHit(
-                    image_id=match.image.image_id,
-                    label=match.image.label,
-                    kind=match.image.kind,
-                    page_title=match.image.page_title,
-                    url=match.image.url,
-                    image_url=match.image.image_url,
-                    score=match.score,
-                    sure=sure,
-                    text=match.image.text,
-                    meta=match.image.meta,
-                )
-                for match in matches[: 1 if sure else limit]
-                if match.score >= settings.min_score
-            ]
+            for wiki in usable:
+                hits += await self._search_wiki(vector, wiki, limit)
+            # 认准了的排前面；有认准的就只给认准的
+            hits.sort(key=lambda hit: (not hit.sure, -hit.score, hit.image_id))
+            hits = [hit for hit in hits if hit.sure] or hits[:limit]
         # 索引还没建（空的）不算异常；建了却对不上，要让人看见
         log = logger.warning if skipped and info.with_vectors else logger.info
         log(
@@ -196,3 +187,30 @@ class ImageSearch:
             seconds=round(time.perf_counter() - started, 2),
         )
         return hits
+
+    async def _search_wiki(self, vector: Any, wiki: str, limit: int) -> list[ImageHit]:
+        """在一个 wiki 的图片里找：认准了只给那一张，没认准给最像的几张。"""
+        settings = self.settings
+        # 至少取两个造型：判断「就是这张图」要看第二名落后多少，
+        # 哪怕调用方只要 1 张、哪怕第二名自己不够格返回
+        matches = await self.store.search(vector, limit=max(limit, 2), wiki=wiki)
+        runner_up = matches[1].score if len(matches) > 1 else None
+        sure = bool(matches) and is_sure(matches[0].score, runner_up, settings)
+        # 认准了就只给这一张：后面几名明显不如它像，给出去只会让回答里多出「也有点像某某」
+        return [
+            ImageHit(
+                image_id=match.image.image_id,
+                label=match.image.label,
+                kind=match.image.kind,
+                page_title=match.image.page_title,
+                url=match.image.url,
+                image_url=match.image.image_url,
+                score=match.score,
+                sure=sure,
+                text=match.image.text,
+                meta=match.image.meta,
+                wiki=match.image.wiki,
+            )
+            for match in matches[: 1 if sure else limit]
+            if match.score >= settings.min_score
+        ]

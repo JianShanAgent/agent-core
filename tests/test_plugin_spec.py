@@ -3,6 +3,7 @@
 - 核心自带的功能插件都合规范：有清单，清单说的和代码里有的对得上，配置在插件自己的目录里；
 - 核心不带站点插件。别的包登记了（entry points）就能按 id 用；站点插件是一棵树，配置里只写最末一级，
   上级顺着清单带出来；
+- 一个部署可以挂好几个 wiki，各用各的站点插件，站点插件的补充只对它那个 wiki 生效；
 - 默认配置随包走，部署目录里只放和默认值不一样的地方；
 - 不合规范的清单、接不上的扩展点、不照规矩取的名字，报错要说得清是哪里不对。
 """
@@ -29,19 +30,27 @@ from jianshanagent.core.manifest import (
 )
 from jianshanagent.core.plugin import PluginHost
 from jianshanagent.core.sites import EXTENSION_KNOWLEDGE, EXTENSION_WIKI, SiteSetup, load_sites
-from jianshanagent.core.wiki import WikiSite
+from jianshanagent.core.wiki import WikiSite, load_wikis
 from jianshanagent.plugins.wiki_query.provider import WikiProvider
 from jianshanagent.testing.conformance import check_plugin
-from jianshanagent.testing.sites import register_plugins, site_packages, write_site
+from jianshanagent.testing.sites import one_wiki, register_plugins, site_packages, write_site
 
 REPO = Path(__file__).resolve().parents[1]
 SOURCE = REPO / "src" / "jianshanagent"
 SITE = "https://wiki.example"
-WIKI = WikiSite(api_url=f"{SITE}/api.php", site_base=SITE)
+WIKI = WikiSite(api_url=f"{SITE}/api.php", site_base=SITE, id="main")
 
 
 def config_for(site: str, **files: dict[str, Any]) -> AppConfig:
-    return AppConfig(root=Path("."), files={"core.wiki": {"site": site}, **files}, secrets={})
+    return AppConfig(root=Path("."), files={"core.wiki": one_wiki(site), **files}, secrets={})
+
+
+def write_wikis(directory: Path, *wikis: dict[str, Any], **top: Any) -> None:
+    """部署的 ``core.wiki.yaml``：挂这几个 wiki。"""
+    directory.mkdir(exist_ok=True)
+    (directory / "core.wiki.yaml").write_text(
+        yaml.safe_dump({**top, "wikis": list(wikis)}, allow_unicode=True), "utf-8"
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -101,15 +110,14 @@ def test_defaults_ship_with_the_package_and_a_deployment_only_writes_what_differ
             assert path.parent == DEFAULTS_DIR, name
     assert {"app", "core.wiki", "core.plugins", "core.llm", "gateway.qq"} <= set(config.sources)
     wiki = config.get("core.wiki")
-    assert (wiki["api_url"], wiki["site"]) == ("", "") and config.sites == []
+    assert wiki["wikis"] == [] and config.wikis == () and config.sites == []
     assert site_chain("") == ()
+    with pytest.raises(ValueError, match="不知道是哪个 wiki"):
+        load_wikis(config)
 
     # 一个部署：只写它和默认值不一样的地方，别的照默认值
     deployment = tmp_path / "config"
-    deployment.mkdir()
-    (deployment / "core.wiki.yaml").write_text(
-        f'name: "某站"\napi_url: "{SITE}/api.php"\n', "utf-8"
-    )
+    write_wikis(deployment, {"id": "main", "api_url": f"{SITE}/api.php"}, name="某站")
     (deployment / "app.yaml").write_text("log:\n  level: DEBUG\n", "utf-8")
     (deployment / "mine.yaml").write_text("anything: 1\n", "utf-8")  # 包里没有的配置，原样算数
     mine = load_config(deployment, with_overrides=False)
@@ -120,6 +128,11 @@ def test_defaults_ship_with_the_package_and_a_deployment_only_writes_what_differ
     assert mine.get("core.llm") == config.get("core.llm")
     # 默认值写在哪：还是包里的那个文件（部署目录里的是对它的改动）
     assert mine.source_path("core.wiki") == DEFAULTS_DIR / "core.wiki.yaml"
+    (site,) = load_wikis(mine)
+    assert (site.id, site.label, site.site_base, site.user_agent) == (
+        "main", "main", SITE, wiki["user_agent"],
+    )  # fmt: skip
+    assert site.page_url("某 页") == f"{SITE}/wiki/%E6%9F%90_%E9%A1%B5"
 
 
 def test_the_plugin_host_only_loads_plugins_that_follow_the_spec() -> None:
@@ -294,7 +307,7 @@ from jianshanagent_site_plat.wiki import PlatData
 
 
 class Station(WikiProvider):
-    id = "station"
+    id = "plat_station"
     kinds = {"hero": "英雄"}
 
     def __init__(self, data, label):
@@ -308,7 +321,7 @@ def create(setup):
 
 
 def platform_and_station(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    """两个独立的包：一个平台，和这个平台上的一个站（清单里 ``parent: plat``）。"""
+    """两个独立的包：一个平台，和这个平台上的一个站（``plat_station``，``parent: plat``）。"""
     plat = write_site(
         site_packages(tmp_path, monkeypatch, "jianshanagent_site_plat"),
         manifest={"id": "plat", "description": "一个平台。"},
@@ -321,7 +334,7 @@ def platform_and_station(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tup
     )
     station = write_site(
         site_packages(tmp_path, monkeypatch, "jianshanagent_site_plat_station"),
-        manifest={"id": "station", "description": "平台上的一个站。"},
+        manifest={"id": "plat_station", "description": "平台上的一个站。"},
         parent="plat",
         capabilities=("wiki", "extend"),
         config={"label": "某个站", "extend": {"plugin.wiki_query": {"format": {"max_chars": 500}}}},
@@ -336,20 +349,22 @@ def test_a_registered_site_is_named_by_its_id_and_brings_its_platform(
     plat, station = platform_and_station(tmp_path, monkeypatch)
     register_plugins(
         monkeypatch,
-        sites={"plat": "jianshanagent_site_plat", "station": "jianshanagent_site_plat_station"},
+        sites={
+            "plat": "jianshanagent_site_plat",
+            "plat_station": "jianshanagent_site_plat_station",
+        },
     )
-    assert list(installed_sites()) == ["plat", "station"]
-    chain = site_chain("station")
-    assert [m.id for m in chain] == ["plat", "station"] and chain[0] is installed_sites()["plat"]
+    assert list(installed_sites()) == ["plat", "plat_station"]
+    chain = site_chain("plat_station")
+    assert [m.id for m in chain] == ["plat", "plat_station"]
+    assert chain[0] is installed_sites()["plat"]
     assert [m.id for m in site_chain("plat")] == ["plat"]
 
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "core.wiki.yaml").write_text(
-        yaml.safe_dump({"api_url": f"{SITE}/api.php", "site": "station"}), "utf-8"
-    )
+    write_wikis(tmp_path / "config", *one_wiki("plat_station")["wikis"])
     config = load_config(tmp_path / "config", with_overrides=False)
-    assert config.sites == ["plat", "station"] and config.site("station")["label"] == "某个站"
-    assert config.source_path("site.station") == station / "config.yaml"
+    assert config.sites == ["plat", "plat_station"]
+    assert config.site("plat_station")["label"] == "某个站"
+    assert config.source_path("site.plat_station") == station / "config.yaml"
     assert config.source_path("site.plat") == plat / "config.yaml"
     assert config.plugin("wiki_query")["format"]["max_chars"] == 500  # 站的补充并进去了
     assert "plat-ignore" in config.plugin("knowledge")["clean"]["remove_classes"]  # 平台的也在
@@ -359,26 +374,33 @@ def test_a_registered_site_is_named_by_its_id_and_brings_its_platform(
     assert platform.namespace == 3500 and mine.label == "某个站"  # type: ignore[attr-defined]
     # 它们都没接知识库这个扩展点
     assert load_sites(config, EXTENSION_KNOWLEDGE, WIKI) == []
-    # 两个包的名字都照规范：前缀 + 从平台到站的 id
+    # 两个包的名字都照规范：前缀 + id（站的 id 里带着平台）
     assert check_plugin("jianshanagent_site_plat").id == "plat"
     assert check_plugin("jianshanagent_site_plat_station").parent == "plat"
 
     # 没登记的包也能用，写包路径；它的上级可以是登记了的插件
-    extra = write_site(site_packages(tmp_path, monkeypatch, "their_sites") / "other", parent="plat")
-    assert [m.id for m in site_chain("their_sites.other")] == ["plat", "other"]
-    assert extra.name == "other"
-    with pytest.raises(PluginError, match="没有叫「nowhere」的站点插件（装着的有：plat、station"):
+    their = site_packages(tmp_path, monkeypatch, "their_sites")
+    extra = write_site(their / "plat_other", parent="plat")
+    assert [m.id for m in site_chain("their_sites.plat_other")] == ["plat", "plat_other"]
+    assert extra.name == "plat_other"
+    with pytest.raises(
+        PluginError, match="没有叫「nowhere」的站点插件（装着的有：plat、plat_station"
+    ):
         site_chain("nowhere")
+    # 站的 id 里没带平台：两个平台上同一个题材的站就没法装在一起了
+    write_site(their / "other", parent="plat")
+    with pytest.raises(PluginError, match="它的 id 要以上级的 id 开头：plat_<这个站的名字>"):
+        site_chain("their_sites.other")
 
-    # 站的包名里漏了平台：规范自检指出该叫什么
+    # 包名和 id 对不上：规范自检指出该叫什么
     write_site(
         site_packages(tmp_path, monkeypatch, "jianshanagent_site_lonely"),
-        manifest={"id": "lonely", "description": "x"},
+        manifest={"id": "plat_lonely", "description": "x"},
         parent="plat",
     )
     register_plugins(
         monkeypatch,
-        sites={"plat": "jianshanagent_site_plat", "lonely": "jianshanagent_site_lonely"},
+        sites={"plat": "jianshanagent_site_plat", "plat_lonely": "jianshanagent_site_lonely"},
     )
     with pytest.raises(PluginError, match="照命名规范应该叫「jianshanagent_site_plat_lonely」"):
         check_plugin("jianshanagent_site_lonely")
@@ -419,9 +441,9 @@ def test_an_extension_point_that_cannot_be_wired_is_explained(
     child = (
         "from wired_sites.base import Data\n\n\ndef create(setup):\n    return setup.parent(Data)\n"
     )
-    write_site(top / "sites" / "leaf", parent="top", capabilities=("wiki",), wiki=child)
-    with pytest.raises(PluginError, match="「leaf」要用它上级的 Data，但没找到"):
-        load("top.sites.leaf")
+    write_site(top / "sites" / "top_leaf", parent="top", capabilities=("wiki",), wiki=child)
+    with pytest.raises(PluginError, match="「top_leaf」要用它上级的 Data，但没找到"):
+        load("top.sites.top_leaf")
     # 放在上级的 sites/ 里，清单里的上级却写的是别人
     write_site(top / "sites" / "stray", parent="elsewhere")
     with pytest.raises(PluginError, match="它放在「top」下面，清单里应该parent: top"):
@@ -442,14 +464,14 @@ def test_instance_local_sites_and_plugins_load_without_packaging(
     plat, _ = platform_and_station(tmp_path / "pkgs", monkeypatch)
     register_plugins(monkeypatch, sites={"plat": "jianshanagent_site_plat"})
 
-    # 1. 实例目录下直接放 sites/mysite/（上级指向已安装的平台插件 plat）
+    # 1. 实例目录下直接放 sites/plat_mysite/（上级指向已安装的平台插件 plat）
     write_site(
-        tmp_path / "sites" / "mysite",
-        manifest={"id": "mysite", "description": "实例目录内的站点插件。"},
+        tmp_path / "sites" / "plat_mysite",
+        manifest={"id": "plat_mysite", "description": "实例目录内的站点插件。"},
         parent="plat",
         capabilities=("wiki", "extend"),
         config={"label": "自写站", "extend": {"plugin.wiki_query": {"format": {"max_chars": 600}}}},
-        wiki=STATION.replace("station", "mysite"),
+        wiki=STATION.replace("plat_station", "plat_mysite"),
     )
 
     # 2. 实例目录下直接放 plugins/hello/
@@ -470,19 +492,16 @@ def test_instance_local_sites_and_plugins_load_without_packaging(
     )
 
     cfg_dir = tmp_path / "config"
-    cfg_dir.mkdir()
-    (cfg_dir / "core.wiki.yaml").write_text(
-        yaml.safe_dump({"api_url": f"{SITE}/api.php", "site": "mysite"}), "utf-8"
-    )
+    write_wikis(cfg_dir, *one_wiki("plat_mysite")["wikis"])
     (cfg_dir / "core.plugins.yaml").write_text(yaml.safe_dump({"enabled": ["hello"]}), "utf-8")
 
     config = load_config(cfg_dir, with_overrides=False)
-    assert config.sites == ["plat", "mysite"]
+    assert config.sites == ["plat", "plat_mysite"]
     assert config.plugin("wiki_query")["format"]["max_chars"] == 600
     assert config.plugin("hello") == {"word": "你好"}
 
     _, loaded_site = load_sites(config, EXTENSION_WIKI, WIKI)
-    assert loaded_site.id == "mysite" and loaded_site.label == "自写站"
+    assert loaded_site.id == "plat_mysite" and loaded_site.label == "自写站"
 
     host = PluginHost(config)
     host.load()

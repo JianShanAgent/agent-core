@@ -2,6 +2,9 @@
 
 这里只有对任何 MediaWiki 都成立的设置。平台、站点特有的设置在各个站点插件自己的配置里
 （``site.<id>``），由插件自己读（见 site.py）；它们对这份配置的补充读配置时已经并进来了。
+
+部署挂了几个 wiki，知识库就各建各的：一个 wiki 一份设置（它自己的站点插件、它那一份配置），
+文件放在知识库目录下它自己的那一层（``<知识库目录>/<wiki 的 id>/``）。
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from typing import Any
 
 from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.sites import EXTENSION_KNOWLEDGE, load_sites
-from jianshanagent.core.wiki import WikiSite, load_wiki_site
+from jianshanagent.core.wiki import WikiSite, load_wiki, load_wikis
 from jianshanagent.plugins.knowledge.site import SiteSet
 
 #: 对 wiki 服务器的硬上限：配置里写得再大也不会超过（这是别人的生产站点）
@@ -24,9 +27,11 @@ MAX_RPS_CAP = 2.0
 MAX_SYNC_REQUESTS_CAP = 2000
 #: 自动更新两次检查之间最少隔多少秒，配置里写得再小也不会低于
 MIN_SYNC_INTERVAL_SECONDS = 300.0
-#: 设了这个环境变量，输出目录就是它、缓存目录是它下面的 ``cache/``，不看配置里的 ``paths``。
+#: 设了这个环境变量，知识库目录就是它，不看配置里的 ``paths``。
 #: 服务器的容器里设成 ``/data/kb``（数据盘）：配置里的相对路径在容器里落在镜像里，不能写
 KB_DIR_ENV = "JIANSHANAGENT_KB_DIR"
+#: 一个 wiki 的原始内容缓存，在它那一层目录下面叫这个名字
+CACHE_DIRNAME = "cache"
 #: 取数用的 wiki 设置：地址、放行密钥来自 ``core.wiki.yaml``（和查询插件共用）
 WikiSettings = WikiSite
 
@@ -206,7 +211,9 @@ class Settings:
     chunk: ChunkSettings
     report: ReportSettings
     dates: DateSettings
+    #: 这个 wiki 的切片、向量、报告放在哪：``<知识库目录>/<wiki 的 id>/``
     output_dir: Path
+    #: 这个 wiki 的原始内容缓存、自动更新的游标：``<输出目录>/cache/``
     cache_dir: Path
     sync: SyncSettings = field(default_factory=SyncSettings)
     #: 加载好的站点插件（见 site.py）；一个都没有就是纯 MediaWiki
@@ -300,18 +307,45 @@ def clean_settings(c: dict[str, Any]) -> CleanSettings:
     )
 
 
-def _wiki_settings(config: AppConfig, raw: dict[str, Any]) -> WikiSettings:
-    """``core.wiki.yaml`` 里的 wiki；``plugin.knowledge`` 另写了 User-Agent 就用它的。"""
-    wiki = load_wiki_site(config)
+def _wiki_settings(config: AppConfig, wiki_id: str, raw: dict[str, Any]) -> WikiSettings:
+    """``core.wiki.yaml`` 里的那个 wiki；``plugin.knowledge`` 另写了 User-Agent 就用它的。"""
+    wiki = load_wiki(config, wiki_id)
     user_agent = str((raw.get("wiki") or {}).get("user_agent") or "")
     return dataclasses.replace(wiki, user_agent=user_agent) if user_agent else wiki
 
 
-def load_settings(config: AppConfig | None = None) -> Settings:
-    """读核心配置（站点插件的补充读配置时已经并进来了），再把站点插件装起来。"""
+def kb_root(config: AppConfig) -> Path:
+    """知识库目录：各个 wiki 的文件都在它下面，一个 wiki 一层。"""
+    paths = config.plugin("knowledge").get("paths") or {}
+    old = [key for key in ("output_dir", "cache_dir") if key in paths]
+    if old:
+        raise ValueError(
+            f"plugin.knowledge 的 paths 里的 {'、'.join(old)} 不用了：改成 paths.root"
+            "（知识库目录），每个 wiki 的文件在它下面的 <wiki 的 id>/，缓存在 <wiki 的 id>/cache/"
+        )
+    kb_dir = os.environ.get(KB_DIR_ENV, "").strip()
+    if kb_dir:
+        return Path(kb_dir).resolve()
+    return (config.root.parent / str(paths.get("root") or "data/kb")).resolve()
+
+
+def is_primary(config: AppConfig, settings: Settings) -> bool:
+    """这份设置是不是主 wiki（``core.wiki.yaml`` 里排第一的那个）的。
+
+    库里没标出处的旧内容算主 wiki 的：导入主 wiki 时把它们一起换掉。
+    """
+    return not config.wikis or config.wikis[0].id == settings.wiki.id
+
+
+def load_settings(config: AppConfig | None = None, wiki: str = "") -> Settings:
+    """``wiki`` 这个 wiki（不写就是主 wiki）的知识库设置：读它那一份配置
+    （它的站点插件的补充读配置时已经并进来了），再把它的站点插件装起来。"""
     config = config or load_config()
+    wiki_id = wiki or load_wikis(config)[0].id  # 一个 wiki 都没挂，在这里报错
+    root = kb_root(config)
+    config = config.for_wiki(wiki_id)
     raw = config.plugin("knowledge")
-    wiki = _wiki_settings(config, raw)
+    site = _wiki_settings(config, wiki_id, raw)
 
     f = raw.get("fetch") or {}
     fetch = FetchSettings(
@@ -379,19 +413,12 @@ def load_settings(config: AppConfig | None = None) -> Settings:
         ),
     )
 
-    repo_root = config.root.parent
-    paths = raw.get("paths") or {}
-    output_dir = (repo_root / str(paths.get("output_dir") or "data/kb")).resolve()
-    cache_dir = (repo_root / str(paths.get("cache_dir") or "data/kb/cache")).resolve()
-    kb_dir = os.environ.get(KB_DIR_ENV, "").strip()
-    if kb_dir:
-        output_dir = Path(kb_dir).resolve()
-        cache_dir = output_dir / "cache"
+    output_dir = root / site.id
 
-    # 用到的各级站点插件里接了知识库这个扩展点的，从上到下
-    sites = SiteSet(load_sites(config, EXTENSION_KNOWLEDGE, wiki))
+    # 这个 wiki 用到的各级站点插件里接了知识库这个扩展点的，从上到下
+    sites = SiteSet(load_sites(config, EXTENSION_KNOWLEDGE, site))
     return Settings(
-        wiki=wiki,
+        wiki=site,
         fetch=fetch,
         sources=sources,
         clean=clean_settings(raw.get("clean") or {}),
@@ -400,6 +427,6 @@ def load_settings(config: AppConfig | None = None) -> Settings:
         dates=dates,
         sync=_sync_settings(raw.get("sync") or {}),
         output_dir=output_dir,
-        cache_dir=cache_dir,
+        cache_dir=output_dir / CACHE_DIRNAME,
         sites=sites,
     )

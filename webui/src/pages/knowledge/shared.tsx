@@ -15,6 +15,36 @@ export function useKbSummary() {
   return useQuery({ queryKey: ["kb", "summary"], queryFn: api.kbSummary });
 }
 
+/**
+ * 挂了不止一个 wiki 时，各个 wiki 的叫法（id → 叫法）：切片、图片上标出处，筛选里多一个下拉。
+ * 只挂一个 wiki（或者概况还没取回来）时是 null——内容都出自同一个地方，不用标。
+ */
+export function useWikiNames(): Record<string, string> | null {
+  const wikis = useKbSummary().data?.wikis ?? [];
+  if (wikis.length < 2) return null;
+  return Object.fromEntries(wikis.map((wiki) => [wiki.id, wiki.label]));
+}
+
+/** 「出自哪个 wiki」的小标签；不用标的时候什么都不显示。 */
+export function WikiBadge({
+  wiki,
+  names,
+}: {
+  wiki: string;
+  names: Record<string, string> | null;
+}) {
+  if (!names || !wiki) return null;
+  return <Badge tone="outline">{names[wiki] ?? wiki}</Badge>;
+}
+
+/** 按 wiki 筛选的下拉的选项。 */
+export function wikiOptions(names: Record<string, string>) {
+  return [
+    { value: "", label: "全部 wiki" },
+    ...Object.entries(names).map(([value, label]) => ({ value, label })),
+  ];
+}
+
 /** 切片的日期：页面上写明的用它；没有就用推断出来的，并标一下。 */
 export function ChunkDate({
   date,
@@ -74,6 +104,7 @@ export function KbImg({
 /** 图库浏览和以图搜图的结果都有的那几项。 */
 export interface ImageInfo {
   image_id: string;
+  wiki: string;
   kind: string;
   label: string;
   page_title: string;
@@ -93,6 +124,7 @@ export function ImageDialog({
   /** 标题旁边多放的标签（以图搜图的相似度） */
   extra?: ReactNode;
 }) {
+  const names = useWikiNames();
   return (
     <Dialog open={image !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-3xl">
@@ -102,6 +134,7 @@ export function ImageDialog({
               <DialogTitle className="flex flex-wrap items-center gap-2">
                 {image.label || image.image_id}
                 <Badge tone="outline">{image.kind}</Badge>
+                <WikiBadge wiki={image.wiki} names={names} />
                 {extra}
               </DialogTitle>
               <DialogDescription className="sr-only">图库里的一张图</DialogDescription>

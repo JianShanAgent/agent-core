@@ -6,8 +6,10 @@
 # 运行时：从数据库里检索（下面的 retrieval 段），是查证工作流的第一级取证（plugin.research）。
 #
 # 这份配置里只有对任何 MediaWiki 都成立的项。某个平台、某个站特有的东西由站点插件带进来
-# （用哪个见 core.wiki.yaml 的 site）：它们自己的设置在 site.<id> 的 knowledge 段，
+# （哪个 wiki 用哪个，见 core.wiki.yaml 的 wikis）：它们自己的设置在 site.<id> 的 knowledge 段，
 # 对这份配置的补充（那个站的清洗规则、排除的页面……）在 site.<id> 的 extend 段，读配置时就并进来了。
+# 挂了几个 wiki 时，每个 wiki 用的是「这份配置 + 它自己的站点插件的补充」；三步命令不指明就挨个 wiki 做，
+# 只做一个的话在子命令前面加 --wiki <id>。在管理后台里改这份配置，对每个 wiki 都生效。
 
 retrieval:
   enabled: true
@@ -23,7 +25,7 @@ retrieval:
 #   导入数据库：              .venv/bin/python -m jianshanagent.plugins.knowledge images load
 # 运行时：服务 image_search（images.py）。上面 retrieval.enabled 为 true、有数据库、嵌入接口可用时才有；
 # 算查询图片的向量用的也是 retrieval 段的 embed_timeout_seconds / embed_retries。
-# 收哪些图、每张图是什么因站而异，由站点插件定（阴阳师的在 site.yys 的 knowledge.images 段）；
+# 收哪些图、每张图是什么因站而异，由站点插件定（阴阳师的在 site.huiji_yys 的 knowledge.images 段）；
 # 没有插件管图库时 images collect 不做事。
 images:
   top_k: 3                         # 没认准时最多返回几张（认准了只返回那一张）；同一个造型的几张图（立绘大图、卡面小图、头像）只算一张
@@ -63,10 +65,12 @@ fetch:
   max_retries: 4
   wikitext_batch_size: 50          # 一次请求取多少个页面的源码（MediaWiki 上限 50）
 
-paths:                             # 相对仓库根目录；data/ 已被 git 忽略
-  output_dir: "data/kb"            # 向量在它下面的 vectors/<提供方>/
-  cache_dir: "data/kb/cache"
-  # 服务器的容器里这两项不起作用：环境变量 JIANSHANAGENT_KB_DIR=/data/kb 把输出放到数据盘上，缓存在它下面的 cache/
+paths:
+  # 知识库目录，相对仓库根目录；data/ 已被 git 忽略。挂着的每个 wiki 在里面有自己的一层：
+  #   <root>/<wiki 的 id>/           切片、报告；向量在它下面的 vectors/<提供方>/
+  #   <root>/<wiki 的 id>/cache/     从 wiki 取回来的原始内容、自动更新的游标
+  # 服务器的容器里这一项不起作用：环境变量 JIANSHANAGENT_KB_DIR=/data/kb 把它放到数据盘上
+  root: "data/kb"
 
 # 自动更新：服务器上的 kbsync 服务每隔一段时间做一轮，只重做 wiki 上变了的部分（做法见 sync.py 顶部）。
 #   手动做一轮：            .venv/bin/python -m jianshanagent.plugins.knowledge sync
@@ -101,7 +105,7 @@ sync:
 sources:
   pages:
     namespace: 0                   # 条目所在的命名空间（0 = 主命名空间），只取非重定向页面
-    # 明确不要的页面（标题完全一致）写在 exclude_titles 里（阴阳师的在 site.yys 的 extend 段）
+    # 明确不要的页面（标题完全一致）写在 exclude_titles 里（阴阳师的在 site.huiji_yys 的 extend 段）
     # 清洗后站内链接文字占全文的比例达到 nav_link_ratio、且链接以外的文字不足 nav_max_plain_chars，判为纯导航页，跳过
     nav_link_ratio: 0.6
     nav_max_plain_chars: 100       # 实测（阴阳师 wiki）：真正的目录页链接以外不超过 44 字；速度检索（内容本身就是带链接的式神名）有 166 字
@@ -113,7 +117,7 @@ sources:
       min_share: 0.5
     min_chars: 20                  # 清洗后不足这么多字的页面按「空页」处理
     # 页面渲染结果只有一句模块报错的不入库：正文不足 broken_max_chars 且含 broken_markers 里的字样
-    # （字样因站而异，阴阳师的在 site.yys 的 extend 段）
+    # （字样因站而异，阴阳师的在 site.huiji_yys 的 extend 段）
     broken_max_chars: 200
 
 clean:
@@ -122,7 +126,7 @@ clean:
   # 能补充的项：remove_classes、heading_classes（class → 提成第几级小标题）、section_titles、
   # badge_texts、term_classes、inline_classes、prefix_classes、linked_cards、table_placeholders、
   # tabber_class / tabber_item_class / tabber_label_class / tabber_label_attribute。
-  # 各项的意思见 site.yys 里的例子。标签页的名字默认从按钮的文字取（tabber_label_class）；
+  # 各项的意思见 site.huiji_yys 里的例子。标签页的名字默认从按钮的文字取（tabber_label_class）；
   # 名字写在内容块的属性上的（MediaWiki 的 Tabber 扩展写在 title 里），用 tabber_label_attribute 指明是哪个属性。
   # 按 class 整块移除（命中任意一个即移除）。下面这几样是 MediaWiki 通用的，代码里本来就有
   # （不写也会去掉），列在这里是为了看得见；要加别的接着往下写
@@ -156,7 +160,7 @@ dates:
   time_keywords: ["活动时间", "活动期间", "活动日期", "开启时间", "开放时间", "持续时间", "举办时间"]
   keyword_window: 40
   lead_chars: 300                  # 「正文开头」指前这么多个字
-  # min_year：早于这一年的年份不算页面写了年份（不写是 2000；阴阳师的在 site.yys 的 extend 段）
+  # min_year：早于这一年的年份不算页面写了年份（不写是 2000；阴阳师的在 site.huiji_yys 的 extend 段）
   same_event_days: 92              # 页面写明的几个活动日期相差不超过这么多天才算同一期；否则是在罗列历届，不给日期
   # 月日前后（同一行、marker_window 个字以内）出现这些字样的，本来就不该带年份，不算「缺年份」
   non_event_markers: ["生日", "诞辰", "诞生日", "生辰", "每年", "农历"]
@@ -175,4 +179,4 @@ report:
   # 实体抽样核对的切片数（有站点插件标实体时才用得上）。抽两组：有确定标签的（按类型分层抽）；
   # 带候选的（随机，每个昵称最多一片）
   entity_sample_size: 10
-  # acceptance：验收点——某个页面里必须有同时含这几个字样的切片（阴阳师的在 site.yys 的 extend 段）
+  # acceptance：验收点——某个页面里必须有同时含这几个字样的切片（阴阳师的在 site.huiji_yys 的 extend 段）

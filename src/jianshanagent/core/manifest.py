@@ -23,19 +23,21 @@
 让站点插件往里接东西。
 
 **站点插件**（``kind: site``）——某个 wiki 平台、某个站特有的东西。通用的代码只懂 MediaWiki。
-站点插件是一棵树：平台在上（``huiji`` = 灰机），具体的站在它下面（``yys`` = 阴阳师 wiki），
-清单里用 ``parent`` 写明上级。核心不带任何站点插件，每个都是独立的包，登记到
-``jianshanagent.sites`` 这个 entry points 组::
+站点插件是一棵树：平台在上（``huiji`` = 灰机），具体的站在它下面（``huiji_yys`` = 灰机上的
+阴阳师 wiki），清单里用 ``parent`` 写明上级。站的 id 以上级的 id 开头（``<上级>_<站>``）：
+同一个题材在两个平台上各有一个站时（``huiji_yys``、``bwiki_yys``），它们能装在一起、挂在同一个
+部署上。核心不带任何站点插件，每个都是独立的包，登记到 ``jianshanagent.sites`` 这个
+entry points 组::
 
     jianshanagent_site_huiji/          平台（仓库 site-huiji）
       plugin.yaml  config.yaml  knowledge.py  wiki.py
     jianshanagent_site_huiji_yys/      这个平台上的一个站（仓库 site-huiji-yys）
       plugin.yaml（parent: huiji）  config.yaml  knowledge/  wiki.py
 
-用哪个站写在 ``core.wiki.yaml`` 的 ``site`` 里，只写最末一级的 id（``site: yys``），上级顺着清单
-自动带出来，从上到下依次加载；不写就是纯 MediaWiki。没登记的包也能用：``site`` 写它的包路径
-（``mypkg.mysite``）。一个包也可以把下级放在自己的 ``sites/`` 目录里一起带上。
-配置叫 ``site.<id>``。
+一个部署挂哪几个 wiki 写在 ``core.wiki.yaml`` 的 ``wikis`` 里，每个 wiki 用哪个站点插件写在它的
+``site`` 里：只写最末一级的 id（``site: huiji_yys``），上级顺着清单自动带出来，从上到下依次加载；
+不写就是纯 MediaWiki。没登记的包也能用：``site`` 写它的包路径（``mypkg.mysite``）。
+一个包也可以把下级放在自己的 ``sites/`` 目录里一起带上。配置叫 ``site.<id>``。
 
 站点插件的能力（清单里的 ``capabilities``）只有这几种，写了哪种就得有哪种：
 
@@ -69,12 +71,12 @@
 命名（各层的仓库、发行包、Python 包、id 怎么取，见 ``docs/插件规范.md`` 的表）::
 
     功能插件   仓库 plugin-<id>            包 jianshanagent_plugin_<id>
-    站点插件   仓库 site-<平台>[-<站>]      包 jianshanagent_site_<平台>[_<站>]   id 是最后一段
+    站点插件   仓库 site-<平台>[-<站>]      包 jianshanagent_site_<id>           id 是 <平台>[_<站>]
     部署插件   目录 deploy/plugins/<id>/
 
 清单的格式（不认识的键会报错，免得写错了键名却以为生效了）::
 
-    id: yys                    # 自带的和部署插件：和目录名一样；登记的包：和登记的名字一样
+    id: huiji_yys              # 自带的和部署插件：和目录名一样；登记的包：和登记的名字一样
     kind: site                 # feature / site / deploy
     name: 阴阳师 wiki           # 给人看的名字
     description: …             # 一两句话说明它管什么
@@ -157,7 +159,7 @@ class Manifest:
 
     @property
     def config_name(self) -> str:
-        """这个插件的配置叫什么：``plugin.chat`` / ``site.yys``。
+        """这个插件的配置叫什么：``plugin.chat`` / ``site.huiji_yys``。
 
         部署插件没有配置文件（它的参数是 Compose 变量）。
         """
@@ -484,7 +486,7 @@ def _parent_of(manifest: Manifest, workspace_root: Path | None = None) -> Manife
 
 
 def site_chain(name: str, workspace_root: Path | None = None) -> tuple[Manifest, ...]:
-    """``core.wiki.yaml`` 的 ``site`` → 要加载的站点插件，从最上面一级到写的那一级。
+    """一个 wiki 的 ``site``（``core.wiki.yaml``）→ 要加载的站点插件，从最上面一级到写的那一级。
 
     ``name`` 是最末一级：已登记或实例 ``sites/`` 下的写 id，未登记的包写包路径；空表示不用。
     """
@@ -497,4 +499,10 @@ def site_chain(name: str, workspace_root: Path | None = None) -> tuple[Manifest,
             names = " → ".join(manifest.id for manifest in (parent, *chain))
             raise PluginError(f"站点插件的上级绕成了圈：{names}")
         chain.insert(0, parent)
+    for parent, child in zip(chain, chain[1:], strict=False):
+        if not child.id.startswith(f"{parent.id}_") or child.id == f"{parent.id}_":
+            raise PluginError(
+                f"站点插件「{child.id}」的上级是「{parent.id}」，它的 id 要以上级的 id 开头："
+                f"{parent.id}_<这个站的名字>（如 {parent.id}_{child.id.rpartition('_')[2]}）"
+            )
     return tuple(chain)

@@ -1,6 +1,7 @@
-"""这个机器人服务的是哪个 wiki：地址、叫什么。
+"""这个机器人服务的是哪些 wiki：讲的是什么、各在哪。
 
-读 ``core.wiki.yaml``，查询、知识库、提示词都从这里拿。
+读 ``core.wiki.yaml``，查询、知识库、提示词都从这里拿。一个部署可以挂好几个 wiki
+（``wikis`` 名单，一项一个 :class:`WikiSite`），它们讲的是同一样东西（:class:`WikiSubject`）。
 """
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import quote, urlsplit
 
-from jianshanagent.core.config import WIKI_FILE, AppConfig
+from jianshanagent.core.config import WIKI_FILE, WIKIS, AppConfig, WikiEntry
 
 #: 页面地址在站内的默认写法：``<站点>/wiki/<标题>``
 DEFAULT_ARTICLE_PATH = "/wiki/$1"
@@ -17,7 +18,7 @@ DEFAULT_USER_AGENT = "JianShanAgent/0.1"
 
 @dataclass(frozen=True, slots=True)
 class WikiSubject:
-    """这个 wiki 讲的是什么，提示词里怎么称呼它。"""
+    """挂着的 wiki 讲的是什么，提示词里怎么称呼它。"""
 
     #: 「阴阳师」；没写就是空的
     name: str = ""
@@ -43,19 +44,32 @@ class WikiSubject:
 
 
 def wiki_subject(config: AppConfig) -> WikiSubject:
-    """``core.wiki.yaml`` 里写的名字和说明（没配地址也能读）。"""
+    """``core.wiki.yaml`` 里写的名字和说明（一个 wiki 都没挂也能读）。"""
     raw = config.get(WIKI_FILE)
     return WikiSubject(str(raw.get("name") or "").strip(), str(raw.get("about") or "").strip())
 
 
+def wiki_labels(config: AppConfig) -> dict[str, str]:
+    """标出处用的叫法：wiki 的 id → 怎么称呼它。
+
+    只挂了一个 wiki（或者一个都没挂）时是空的：内容都出自同一个地方，不用标。
+    """
+    entries = config.wikis
+    if len(entries) < 2:
+        return {}
+    return {entry.id: str(entry.raw.get("label") or "").strip() or entry.id for entry in entries}
+
+
 @dataclass(frozen=True, slots=True)
 class WikiSite:
+    """挂着的一个 wiki：在哪、怎么访问。"""
+
     api_url: str
     site_base: str
-    #: 这个 wiki 讲的是什么（「阴阳师」）；没写就是空的
-    name: str = ""
-    #: 一句话说明它是什么（「网易手游」）；只在要向模型交代背景的地方用
-    about: str = ""
+    #: 它在这个部署里的名字（``wikis`` 里的 ``id``）：知识库的目录名、库里切片的出处
+    id: str = ""
+    #: 回答里标出处时怎么称呼它（「灰机 wiki」）；没写就是 id
+    label: str = ""
     #: 页面地址在站内的写法（MediaWiki 的 ``$wgArticlePath``），``$1`` 是标题
     article_path: str = DEFAULT_ARTICLE_PATH
     user_agent: str = DEFAULT_USER_AGENT
@@ -63,11 +77,6 @@ class WikiSite:
     auth_header: str | None = None
     auth_key: str | None = None
     cookie: str | None = None
-
-    @property
-    def label(self) -> str:
-        """提示词里怎么称呼它：「阴阳师 wiki」；没写名字就是「wiki」。"""
-        return WikiSubject(self.name, self.about).label
 
     def page_url(self, title: str) -> str:
         """一个页面的地址。"""
@@ -85,10 +94,10 @@ class WikiSite:
         return urlsplit(self.site_base).path.rstrip("/") + self.article_path.split("$1", 1)[0]
 
 
-def load_wiki_site(config: AppConfig) -> WikiSite:
-    """读 ``core.wiki.yaml``；没写是哪个 wiki 就报错，不猜。"""
-    raw = config.get(WIKI_FILE)
-    secrets = config.secrets.get("wiki") or {}
+def _wiki_site(entry: WikiEntry, config: AppConfig) -> WikiSite:
+    raw = entry.raw
+    where = f"core.wiki.yaml 的 {WIKIS} 里的「{entry.id}」"
+    secrets = (config.secrets.get("wiki") or {}).get(entry.id) or {}
     api_url = str(raw.get("api_url") or "")
     site_base = str(raw.get("site_base") or "").rstrip("/")
     if not site_base and api_url:
@@ -96,22 +105,41 @@ def load_wiki_site(config: AppConfig) -> WikiSite:
         site_base = f"{parts.scheme}://{parts.netloc}"
     if not site_base:
         raise ValueError(
-            "不知道是哪个 wiki：core.wiki.yaml 里要写 api_url（接口地址）；"
+            f"{where} 要写 api_url（接口地址）；"
             "页面地址不是 <站点>/wiki/<标题> 的，另写 site_base、article_path"
         )
     article_path = str(raw.get("article_path") or DEFAULT_ARTICLE_PATH)
     if "$1" not in article_path:
         raise ValueError(
-            f"core.wiki.yaml 的 article_path 里要有 $1（标题的位置），现在是「{article_path}」"
+            f"{where} 的 article_path 里要有 $1（标题的位置），现在是「{article_path}」"
         )
     return WikiSite(
         api_url=api_url or f"{site_base}/api.php",
         site_base=site_base,
-        name=str(raw.get("name") or "").strip(),
-        about=str(raw.get("about") or "").strip(),
+        id=entry.id,
+        label=str(raw.get("label") or "").strip() or entry.id,
         article_path=article_path,
-        user_agent=str(raw.get("user_agent") or DEFAULT_USER_AGENT),
+        user_agent=str(config.get(WIKI_FILE).get("user_agent") or DEFAULT_USER_AGENT),
         auth_header=str(raw.get("auth_header") or "") or None,
         auth_key=str(secrets.get("authkey") or "") or None,
         cookie=str(secrets.get("cookie") or "") or None,
     )
+
+
+def load_wikis(config: AppConfig) -> tuple[WikiSite, ...]:
+    """挂着的各个 wiki，按 ``core.wiki.yaml`` 里写的顺序（排第一的是主 wiki）。
+
+    一个都没挂就报错，不猜。放行密钥在 ``secrets.yaml`` 的 ``wiki.<id>``。
+    """
+    wikis = tuple(_wiki_site(entry, config) for entry in config.wikis)
+    if not wikis:
+        raise ValueError(
+            f"不知道是哪个 wiki：core.wiki.yaml 的 {WIKIS} 里要写上挂哪些 wiki"
+            "（每一项有 id 和 api_url），写法见核心的 defaults/core.wiki.yaml"
+        )
+    return wikis
+
+
+def load_wiki(config: AppConfig, wiki_id: str) -> WikiSite:
+    """挂着的 wiki 里叫 ``wiki_id`` 的那个。"""
+    return _wiki_site(config.wiki(wiki_id), config)

@@ -19,7 +19,7 @@ import { KB_TYPE_LABELS, label, MODE_LABELS } from "@/lib/labels";
 import type { KbSearchHit, KbSearchResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { ChunkDate } from "./shared";
+import { ChunkDate, useWikiNames, WikiBadge } from "./shared";
 
 const RECENT_KEY = "jianshanagent.kb.recent-queries";
 const RECENT_MAX = 8;
@@ -37,6 +37,7 @@ function HitCard({
   onOpen: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const wikiNames = useWikiNames();
   const keywordOnly = hybrid && hit.vector_rank === null && hit.keyword_rank !== null;
   return (
     <div className={cn("px-4 py-3", keywordOnly && "bg-warning/8")}>
@@ -50,6 +51,7 @@ function HitCard({
           {hit.title}
         </button>
         <Badge tone="muted">{label(KB_TYPE_LABELS, hit.type)}</Badge>
+        <WikiBadge wiki={hit.wiki} names={wikiNames} />
         {hit.vector_rank !== null ? <Badge tone="info">向量第 {hit.vector_rank} 名</Badge> : null}
         {hit.keyword_rank !== null ? (
           <Badge tone="outline">关键词第 {hit.keyword_rank} 名</Badge>

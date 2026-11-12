@@ -224,5 +224,5 @@ def test_items_that_cannot_be_changed_from_the_web_are_marked_locked() -> None:
             "providers.mimo.base_url",
             "providers.mimo.secret",
         },
-        "core.wiki": {"api_url", "site_base", "auth_header", "site"},
+        "core.wiki": {"wikis"},  # 挂哪几个 wiki：里面有地址和用哪个站点插件
     }

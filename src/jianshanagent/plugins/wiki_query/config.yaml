@@ -1,7 +1,8 @@
 # wiki_query 插件：精确查询，不过 LLM
-# 查哪个 wiki（接口地址、放行请求头）在 core.wiki.yaml。通用的部分只认页面：按标题找、全文搜索、取摘要。
-# 那个站另有自己的条目和命令的，由站点插件接进来（core.wiki.yaml 的 site）：
-# 阴阳师 wiki 的式神、御魂（认昵称）和 /筛选 是 yys 插件加的，设置在 site.yys 的 wiki 段。
+# 查哪些 wiki（接口地址、放行请求头）在 core.wiki.yaml 的 wikis。通用的部分只认页面：按标题找、全文搜索、取摘要。
+# 那个站另有自己的条目和命令的，由站点插件接进来（core.wiki.yaml 里那个 wiki 的 site）：
+# 灰机阴阳师 wiki 的式神、御魂（认昵称）和 /筛选 是 huiji_yys 插件加的，设置在 site.huiji_yys 的 wiki 段。
+# 挂了几个 wiki 时 /查 每个都查：几个 wiki 都有这个条目就都回，各标出处；哪个一时访问不了，别的照答。
 commands:
   lookup:                          # /查 <条目名>：名字完全一致就直接给内容，有几个候选就列出来让用户选
     name: "查"
@@ -19,7 +20,7 @@ wiki:
   # 这个站没有这种排法（接口报错）时，自动退回默认的排法，日志里有 wiki_search_ranking_failed。
   search_ranking: "classic_noboostlinks"
 format:
-  max_chars: 800
+  max_chars: 800                   # 一个条目的内容最多多少字；几个 wiki 都有这个条目时，每个 wiki 各这么多
   include_link: true
   disambiguation_limit: 5
   markdown: true                   # /查 的结果用 Markdown 发（加粗、引用、链接）；发送失败会自动退回纯文本

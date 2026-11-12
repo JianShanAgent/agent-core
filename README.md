@@ -38,7 +38,8 @@
 3. **Wiki 图库以图搜图**：使用图文同向量空间的嵌入模型（默认对接 `Qwen3-VL-Embedding-8B`）索引站内立绘、皮肤、头像与图标。用户在 QQ 发图提问时，先通过以图搜图定位角色或皮肤，再结合词条资料作答。
 4. **每小时自动增量同步（`kbsync`）**：后台同步服务定时轮询 MediaWiki 的 `recentchanges` 接口，只重抓有变动的页面和受影响的数据集，增量算好向量热更新入库，无需停机；内置数据量暴跌与异常重算保护闸门。
 5. **开箱即用的 Web 管理后台**：包内已内置编译好的 React 管理面板（免装 Node.js），支持逐条查看问答检索与复核全链路、免连 QQ 直接在网页对话调试、在线热更新配置与插件开关；主仓库发了新版本，后台里点一下就更新并重启，起不来自动退回。
-6. **灵活部署与插件扩展**：既支持 **Python / `uv` 原生直跑**（不需要 Docker），也支持 **`docker compose up -d` 一键启动**，还提供面向生产服务器的原子发布与故障自动回滚工具。用户自写的插件可直接放在实例仓库目录内随 Git 自动同步，也可发布为独立 Python 包。
+6. **一个机器人挂多个 Wiki**：同一个题材有好几个 Wiki 时可以都挂上，各用各的站点插件。知识库各建各的、一起检索，`/查` 每个都查，回答和参考资料里标明出自哪个 Wiki。
+7. **灵活部署与插件扩展**：既支持 **Python / `uv` 原生直跑**（不需要 Docker），也支持 **`docker compose up -d` 一键启动**，还提供面向生产服务器的原子发布与故障自动回滚工具。用户自写的插件可直接放在实例仓库目录内随 Git 自动同步，也可发布为独立 Python 包。
 
 目前线上生产实例服务于[灰机阴阳师 Wiki](https://yys.huijiwiki.com)（见 [`instance-yys`](https://github.com/JianShanAgent/instance-yys)、[`site-huiji`](https://github.com/JianShanAgent/site-huiji)、[`site-huiji-yys`](https://github.com/JianShanAgent/site-huiji-yys)），已稳定索引约 7,700 篇文档、1.4 万个知识切片与 3,000 张图片。
 
@@ -132,10 +133,12 @@ cd my-wiki-bot
 **1. 打开 `config/core.wiki.yaml`，填上你的 Wiki 名称和接口地址：**
 
 ```yaml
-name: "某某游戏"                          # 必填：Wiki 主题名称
-about: "某某游戏玩家资料站"                # 可选：一句话背景说明
-api_url: "https://your.wiki/api.php"     # 必填：MediaWiki 的 api.php 地址
-site: ""                                 # 暂不用站点插件时留空
+name: "某某游戏"                            # 必填：Wiki 主题名称
+about: "某某游戏玩家资料站"                  # 可选：一句话背景说明
+wikis:                                     # 挂哪几个 Wiki；一般只有一个
+  - id: main                               # 必填：这个 Wiki 在部署里的名字（知识库的目录名、密钥的键）
+    api_url: "https://your.wiki/api.php"   # 必填：MediaWiki 的 api.php 地址
+    site: ""                               # 暂不用站点插件时留空
 ```
 
 **2. 复制凭据模板并填入 API Key：**
@@ -204,7 +207,7 @@ docker compose up -d --build
 
 ### 第四步：抓取 Wiki 全站内容构建向量知识库
 
-刚启动时 `/查` 指令和站内实时搜索已经能用了。要让机器人把全站词条切片入库、开启语义向量检索，在实例目录下按顺序跑完这三条命令（支持断点续跑，产物保存在 `data/kb/`）：
+刚启动时 `/查` 指令和站内实时搜索已经能用了。要让机器人把全站词条切片入库、开启语义向量检索，在实例目录下按顺序跑完这三条命令（支持断点续跑，产物保存在 `data/kb/<Wiki 的 id>/`；挂了几个 Wiki 时挨个做，子命令前加 `--wiki <id>` 只做一个）：
 
 ```bash
 # 若使用方式 A（原生 uv）：
@@ -237,7 +240,7 @@ docker compose exec qqbot python -m jianshanagent.plugins.knowledge load
 ```text
 my-wiki-bot/
 ├── config/
-│   └── core.wiki.yaml          # 里面写 site: mywiki 即可启用下面的站点插件
+│   └── core.wiki.yaml          # 在 wikis 里给这个 Wiki 写 site: mywiki 即可启用下面的站点插件
 ├── sites/
 │   └── mywiki/                 # 自写站点插件（放 plugin.yaml、config.yaml、wiki.py、knowledge.py）
 └── plugins/
@@ -258,7 +261,7 @@ my-wiki-bot/
     "jianshanagent-site-mywiki @ git+https://github.com/<你的用户名>/site-mywiki.git",
   ]
   ```
-- 运行 `uv sync` 或 `docker compose build` 时就会自动拉取并安装该插件，在 `config/core.wiki.yaml` 里填上 `site: mywiki` 即可生效。
+- 运行 `uv sync` 或 `docker compose build` 时就会自动拉取并安装该插件，在 `config/core.wiki.yaml` 的 `wikis` 里给这个 Wiki 填上 `site: mywiki` 即可生效。
 
 ### 站点插件一般写些什么？
 
