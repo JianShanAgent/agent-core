@@ -181,7 +181,7 @@ class ResearchPlugin:
             )
         web_settings = WebSearchSettings.from_config(ctx.config)  # 没打开、没填密钥时是 None
         if web_settings is not None:
-            web_search = WebSearchClient(web_settings)
+            web_search = WebSearchClient(web_settings, timezone=timezone)
             ctx.register_service("web_search", web_search)  # 登记成服务，退出时由宿主关掉连接
             available["web"] = WebSearchSource(
                 web_search.search,

@@ -442,7 +442,11 @@ async def test_endpoints_keys_and_the_admins_own_switch_cannot_be_changed_from_t
         "plugin.wiki_query", lambda v: v["wiki"].update(auth_header="X-Leak"), "wiki.auth_header"
     )
     # 用哪个密钥也不能改：把联网搜索的密钥指到模型的密钥上，再配上自己的地址，一样能带出去
-    await refused("core.websearch", lambda v: v.update(secret="llm"), "secret")
+    await refused(
+        "core.websearch",
+        lambda v: v["providers"]["mimo"].update(secret="llm"),
+        "providers.mimo.secret",
+    )
 
     def new_provider(values: dict[str, Any]) -> None:
         values["providers"]["mine"] = {"base_url": "https://evil.test/v1", "secret": "llm"}
@@ -476,7 +480,12 @@ async def test_the_page_is_told_which_items_cannot_be_changed_from_the_web(env: 
     await env.login()
     expected = {
         "core.llm": {"base_url"},
-        "core.websearch": {"base_url", "secret"},
+        "core.websearch": {
+            "providers.gitee_ai.base_url",
+            "providers.gitee_ai.secret",
+            "providers.mimo.base_url",
+            "providers.mimo.secret",
+        },
         "core.embedding": {
             "providers.gitee.base_url",
             "providers.gitee.secret",

@@ -1,22 +1,44 @@
-# 联网搜索：模力方舟的「互联网搜索接口」（POST {base_url}/web-search）。
-# 按次计费，每次 0.04 元，和要几条结果无关（2026-11 的价格）。密钥和嵌入用的是同一个，不用另外申请。
+# 联网搜索：给一句搜索词，拿回若干网页（标题、网站名、发布日期、内容摘要）。
 #
-# 现在只有查证工作流用它：plugin.research 的 stages 里的 web 那一级。
-# 前面几级（知识库、站内搜索）的资料答不了，查证员才会走到这一级，所以不是每个问题都搜。
+# 只有查证工作流用它：plugin.research 的 stages 里的 web 那一级。
+# 前面几级（知识库、站内搜索）的资料答不了，查证员才会走到这一级，所以不是每个问题都搜；
+# 对话、查证员、复核员这些模型调用都不走这里的地址和密钥（它们用 core.llm.yaml）。
 # 关掉、或者密钥没填时，那一级自动跳过。
 #
-# 没有用 MiMo 自带的联网搜索：它要另开「联网服务插件」，我们用的 Token Plan 密钥调用时报 webSearchEnabled is false。
-#
-# 现在关着（用户 2026-11-11 定：代码先上线，联网先不开）。改成 true 就生效，不用动别的。
+# 默认关着。改成 true、填上 provider 那一家的密钥就生效，不用动别的。
 enabled: false
 
-base_url: "https://ai.gitee.com/v1"
-secret: "gitee_ai"                # 密钥在 secrets.yaml 的哪一项下（取它的 api_key）
+provider: "mimo"                  # 用哪一家：providers 里的名字
 
-count: 6                          # 一次要几个网页（1–50）。价格和个数无关；多了查证员要读的字也多
-summary: true                     # 要不要网页内容的摘要（几百字）。关掉就只有搜索结果里那一两句话
+count: 6                          # 一次搜索要几个网页（1–50）。多了查证员要读的字也多
 page_chars: 1200                  # 一个网页的摘要最多留多少字，超出的截掉
-freshness: "noLimit"              # 只要多久以内的网页：noLimit 不限 / oneDay / oneWeek / oneMonth / oneYear
-
-timeout_seconds: 10               # 一次搜索最多等这么久（实测约 1 秒）；超时或出错就当这一级没查到
 max_retries: 1                    # 网络错误、限流、接口故障时再试几次
+
+providers:
+  # 小米 MiMo 的联网搜索：对话接口（POST {base_url}/chat/completions）里带一个 web_search 工具，
+  # 搜到的网页在回复的 annotations 里；模型自己写的那句回答不用。
+  # 要「按量付费」的密钥（sk- 开头）和按量付费的地址，还要在 MiMo 控制台的「插件管理」里开通
+  # 「联网服务插件」（开通后约 5 分钟生效）。Token Plan 的密钥（tp- 开头，core.llm.yaml 用的那个）
+  # 调不了：报 webSearchEnabled is false。两种密钥和地址不能混用，所以这里单独一份。
+  # 计费（2026-11 的价格）：搜索每 1000 次 16 元，另算这一次对话的 token。
+  # 2026-11-12 实测（下面这组值）：一次调用 5～8 秒，算 2 次搜索、约 4700 token，拿回 10～12 个网页
+  # （count 是每个关键词要几个）；摘要多数 100 字上下，长的四五百字；发布日期基本都有。
+  mimo:
+    base_url: "https://api.xiaomimimo.com/v1"
+    secret: "mimo_search"         # 密钥在 secrets.yaml 的哪一项下（取它的 api_key）
+    model: "mimo-v2.6-flash"      # 支持联网的型号：mimo-v2.6-flash / mimo-v2.6-pro / mimo-v2.6-pro-ultraspeed
+    force_search: true            # 强制联网：每次调用都搜。false 是由模型判断要不要搜（可能不搜、凭记忆答）
+    max_keyword: 2                # 一次调用里模型最多拆成几个关键词去搜（1–50），每个关键词算一次搜索。
+                                  # 改成 1：网页少一半（6 个），钱和用时也大约少一半
+    max_completion_tokens: 16     # 模型那句回答最多多少 token。我们不用它，只要它搜到的网页，所以给最少：
+                                  # 实测给 300 时网页一样多，每次多等 3～5 秒
+    timeout_seconds: 20           # 一次搜索最多等这么久；超时或出错就当这一级没查到
+
+  # 模力方舟的「互联网搜索接口」（POST {base_url}/web-search）。每次 0.04 元，和要几条结果无关
+  # （2026-11 的价格）；密钥和嵌入用的是同一个。实测一次约 1 秒。
+  gitee_ai:
+    base_url: "https://ai.gitee.com/v1"
+    secret: "gitee_ai"
+    summary: true                 # 要不要网页内容的摘要（几百字）。关掉就只有搜索结果里那一两句话
+    freshness: "noLimit"          # 只要多久以内的网页：noLimit 不限 / oneDay / oneWeek / oneMonth / oneYear
+    timeout_seconds: 10
