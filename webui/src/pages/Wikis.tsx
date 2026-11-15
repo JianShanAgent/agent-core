@@ -421,18 +421,22 @@ function BilibiliLogin() {
     }
   };
 
-  const configured = status.data?.configured && status.data.valid;
+  const saved = Boolean(status.data?.configured);
   return (
     <Card className="flex flex-wrap items-center gap-3 p-4">
       <QrCode className="size-5 text-muted-foreground" />
       <div className="min-w-48 flex-1">
         <div className="text-sm font-semibold">B 站登录（BWiki）</div>
         <div className="text-muted-foreground text-xs">
-          {configured ? "已登录，Cookie 会自动持久化并尝试刷新" : "未登录，扫码后自动保存登录凭据"}
+          {saved
+            ? status.data?.valid
+              ? "已登录，Cookie 会自动持久化并尝试刷新"
+              : "凭据已保存。B 站暂时没有确认登录状态，请求仍会带上 Cookie。"
+            : "未登录，扫码后自动保存登录凭据"}
         </div>
       </div>
       <Button size="xs" variant="outline" loading={busy} onClick={() => void start()}>
-        {configured ? "重新扫码" : "扫码登录"}
+        {saved ? "重新扫码" : "扫码登录"}
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-sm items-center">
