@@ -19,6 +19,7 @@ from aiohttp import web
 from jianshanagent import __version__
 from jianshanagent.admin.auth import COOKIE, CSRF_HEADER, CSRF_VALUE, Auth
 from jianshanagent.admin.queries import AdminQueries
+from jianshanagent.bilibili_auth import BilibiliCredentialStore
 from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.plugin import PluginHost
@@ -174,6 +175,9 @@ class Admin:
         self._backup: dict[str, Any] | None = None
         self._backup_checked: float | None = None
         self._restarting: set[asyncio.Task[None]] = set()
+        config_root = getattr(getattr(runtime, "config", None), "root", Path("config"))
+        self.bilibili = BilibiliCredentialStore(config_root)
+        self.bilibili_qr: Any | None = None
 
     def restart_soon(self) -> None:
         """过一小会儿重启机器人：先让这次请求的回应发出去。"""

@@ -21,6 +21,7 @@ from typing import Any
 from aiohttp import web
 
 from jianshanagent.admin.core import Admin, fail, flag_param, read_body, reply
+from jianshanagent.bilibili_auth import BilibiliQrLogin
 from jianshanagent.core import trace
 from jianshanagent.core.catalog import CatalogError, CatalogSettings, uninstall
 from jianshanagent.core.config import (
@@ -125,6 +126,42 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             "embedding": EmbeddingSettings.from_config(disk) is not None,
             "sync_alive": alive,
         }
+
+    async def bilibili_status(_request: web.Request) -> web.Response:
+        credential = admin.bilibili.credential()
+        valid = await admin.bilibili.refresh_if_needed() if credential else False
+        return reply(
+            {
+                "configured": credential is not None,
+                "valid": valid,
+                "login": "" if admin.bilibili_qr is None else admin.bilibili_qr.state,
+            }
+        )
+
+    async def bilibili_qr(_request: web.Request) -> web.Response:
+        if admin.bilibili_qr is not None and admin.bilibili_qr.state in {
+            "waiting", "scanned", "confirmed"
+        }:
+            fail(409, "已经有一个扫码登录在进行")
+        login = BilibiliQrLogin(admin.bilibili)
+        try:
+            image = await login.generate()
+        except Exception as exc:
+            fail(502, f"B 站二维码生成失败：{exc}")
+        admin.bilibili_qr = login
+        return reply({"image": image, "state": login.state})
+
+    async def bilibili_poll(_request: web.Request) -> web.Response:
+        login = admin.bilibili_qr
+        if login is None:
+            fail(409, "还没有待确认的二维码")
+        try:
+            state = await login.poll()
+        except Exception as exc:
+            login.error = str(exc)
+            login.state = "error"
+            state = login.state
+        return reply({"state": state, "error": login.error})
 
     async def list_wikis(_request: web.Request) -> web.Response:
         disk = admin.disk_config()
@@ -376,6 +413,9 @@ def routes(admin: Admin) -> list[web.RouteDef]:
 
     return [
         web.get("/api/wikis", list_wikis),
+        web.get("/api/wikis/bilibili/status", bilibili_status),
+        web.post("/api/wikis/bilibili/qr", bilibili_qr),
+        web.post("/api/wikis/bilibili/poll", bilibili_poll),
         web.get("/api/wikis/catalog", list_catalog),
         web.post("/api/wikis", add_wiki),
         web.post("/api/wikis/sites/{site}/update", update_site),

@@ -5,6 +5,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CircleArrowUp,
+  QrCode,
   Database,
   Download,
   ExternalLink,
@@ -377,6 +378,78 @@ type Ask =
   | { kind: "build"; wiki: WikiInfo }
   | { kind: "update"; wiki: WikiInfo };
 
+function BilibiliLogin() {
+  const [open, setOpen] = useState(false);
+  const [image, setImage] = useState<string | null>(null);
+  const [state, setState] = useState("");
+  const [busy, setBusy] = useState(false);
+  const status = useQuery({
+    queryKey: ["bilibili", "status"],
+    queryFn: api.bilibiliStatus,
+    refetchInterval: 30_000,
+  });
+
+  useEffect(() => {
+    if (!open || !image || !["waiting", "scanned", "confirmed"].includes(state)) return;
+    const timer = window.setInterval(() => {
+      void api.bilibiliPoll().then((result) => {
+        setState(result.state);
+        if (result.state === "done") {
+          setOpen(false);
+          setImage(null);
+          void status.refetch();
+          toast.success("B 站登录成功，凭据已保存");
+        } else if (result.state === "error" || result.state === "expired") {
+          toast.error(result.error || "二维码已失效，请重新生成");
+        }
+      }).catch((error: Error) => toast.error("读取扫码状态失败", { description: error.message }));
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [image, open, state, status]);
+
+  const start = async () => {
+    setBusy(true);
+    try {
+      const result = await api.bilibiliQr();
+      setImage(result.image);
+      setState(result.state);
+      setOpen(true);
+    } catch (error) {
+      toast.error("二维码生成失败", { description: (error as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const configured = status.data?.configured && status.data.valid;
+  return (
+    <Card className="flex flex-wrap items-center gap-3 p-4">
+      <QrCode className="size-5 text-muted-foreground" />
+      <div className="min-w-48 flex-1">
+        <div className="text-sm font-semibold">B 站登录（BWiki）</div>
+        <div className="text-muted-foreground text-xs">
+          {configured ? "已登录，Cookie 会自动持久化并尝试刷新" : "未登录，扫码后自动保存登录凭据"}
+        </div>
+      </div>
+      <Button size="xs" variant="outline" loading={busy} onClick={() => void start()}>
+        {configured ? "重新扫码" : "扫码登录"}
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-sm items-center">
+          <DialogHeader>
+            <DialogTitle>扫描二维码登录 B 站</DialogTitle>
+            <DialogDescription>请用 B 站手机客户端扫描并确认，二维码有效期约 3 分钟。</DialogDescription>
+          </DialogHeader>
+          {image ? <img src={image} alt="B 站登录二维码" className="mx-auto size-64" /> : null}
+          <div className="text-muted-foreground text-center text-xs">
+            {state === "scanned" ? "已扫描，请在手机上确认" : state === "confirmed" ? "正在完成登录" : "等待扫码"}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
 export default function Wikis() {
   const refresh = useRefreshConfig();
   const client = useQueryClient();
@@ -507,6 +580,8 @@ export default function Wikis() {
         title="Wiki"
         description="机器人挂着哪些 wiki。做好了的站点可以从站点目录里挑，点一下就挂上，不用重启。"
       />
+
+      <BilibiliLogin />
 
       {query.isPending ? (
         <div className="flex flex-col gap-2">

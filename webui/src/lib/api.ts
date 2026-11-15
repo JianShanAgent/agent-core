@@ -162,6 +162,9 @@ export const api = {
   savePlugins: (enabled: string[]) => put<SaveResult>("/api/plugins", { enabled }),
 
   wikis: () => get<WikisInfo>("/api/wikis"),
+  bilibiliStatus: () => get<{ configured: boolean; valid: boolean; login: string }>("/api/wikis/bilibili/status"),
+  bilibiliQr: () => post<{ image: string; state: string }>("/api/wikis/bilibili/qr"),
+  bilibiliPoll: () => post<{ state: string; error: string }>("/api/wikis/bilibili/poll"),
   wikiCatalog: (refresh = false) => get<CatalogInfo>("/api/wikis/catalog", { refresh }),
   addWiki: (site: string, id: string, label: string) =>
     post<{ added: WikiInfo; downloaded: string | null; status: Status }>("/api/wikis", {

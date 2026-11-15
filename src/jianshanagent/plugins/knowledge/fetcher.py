@@ -24,6 +24,7 @@ from typing import Any
 
 import httpx
 
+from jianshanagent.bilibili_auth import BilibiliCredentialStore
 from jianshanagent.core.logging import get_logger
 from jianshanagent.plugins.knowledge.settings import FetchSettings, WikiSettings
 
@@ -174,7 +175,12 @@ class WikiFetcher:
         self.give_up_after = give_up_after
         self._failed_in_a_row = 0
         self.stats = FetchStats()
-        headers = {"User-Agent": wiki.user_agent, "Accept": "application/json"}
+        headers = {
+            "User-Agent": wiki.user_agent,
+            "Accept": "application/json",
+            # BWiki/EdgeOne 的防盗链规则要求 API 请求带站内来源。
+            "Referer": f"{wiki.site_base}/",
+        }
         if wiki.auth_header and wiki.auth_key:
             headers[wiki.auth_header] = wiki.auth_key  # Cloudflare 放行请求头
         if wiki.cookie:
@@ -187,6 +193,10 @@ class WikiFetcher:
         )
         self._semaphore = asyncio.Semaphore(fetch.max_concurrency)
         self._limiter = RateLimiter(fetch.requests_per_second)
+        self._bilibili = (
+            BilibiliCredentialStore(Path(os.environ.get("JIANSHANAGENT_CONFIG_DIR", ".")))
+            if wiki.id == "bwiki" else None
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -227,7 +237,17 @@ class WikiFetcher:
                 self.stats.by_kind[kind] = self.stats.by_kind.get(kind, 0) + 1
                 await self._limiter.wait()
                 try:
-                    resp = await self._client.get(url, params=params)
+                    if self._bilibili is not None:
+                        await self._bilibili.refresh_if_needed()
+                        cookie = self._bilibili.cookie()
+                        if cookie:
+                            resp = await self._client.get(
+                                url, params=params, headers={"Cookie": cookie}
+                            )
+                        else:
+                            resp = await self._client.get(url, params=params)
+                    else:
+                        resp = await self._client.get(url, params=params)
                 except httpx.HTTPError as exc:
                     last_error = repr(exc)
                     continue
