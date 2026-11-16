@@ -23,6 +23,7 @@ from jianshanagent.core.embedding import EmbeddingError
 from jianshanagent.core.images import ImageError
 from jianshanagent.core.trace import brief
 from jianshanagent.plugins.knowledge.plugin import TYPE_NAMES
+from jianshanagent.plugins.knowledge.settings import load_settings, set_sync_enabled
 
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 #: 会话清单、群聊清单的「最近多少天」最多能填多少（十年；0 = 不限时间）
@@ -103,6 +104,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 "sure_score": image_search.settings.sure_score,
                 "sure_margin": image_search.settings.sure_margin,
             }
+        disk = admin.disk_config()
         for wiki in admin.config.wikis:
             chunks, images = chunk_info.get(wiki.id), image_info.get(wiki.id)
             result["wikis"].append(
@@ -114,11 +116,29 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                     "fingerprint": chunks.fingerprint if chunks else None,
                     "loaded_at": chunks.loaded_at if chunks else None,
                     "images": images.images if images else 0,
+                    # 现在配的是开还是关（知识库页的开关）。和下面 sync 里记的可能不一样：
+                    # 那一份是 kbsync 上一轮写下的，下一轮才会换成新的
+                    "sync_enabled": load_settings(disk, wiki.id).sync.enabled,
                     # 自动更新的状态（服务器上的 kbsync 服务写的）；它没跑过就是 None
                     "sync": await admin.queries.kb_sync(wiki.id),
                 }
             )
         return reply(result)
+
+    async def set_kb_sync(request: web.Request) -> web.Response:
+        """开或关这一个 wiki 的自动更新。别的 wiki 不动，已经入库的内容也不动。"""
+        wiki_id = request.match_info["wiki"]
+        body = await read_body(request)
+        if not isinstance(body.get("enabled"), bool):
+            fail(400, "enabled 应该是 true 或 false")
+        disk = admin.disk_config()
+        if not any(entry.id == wiki_id for entry in disk.wikis):
+            fail(404, f"没有叫「{wiki_id}」的 wiki")
+        try:
+            enabled = set_sync_enabled(disk, wiki_id, body["enabled"])
+        except ValueError as exc:
+            fail(409, str(exc))
+        return reply({"id": wiki_id, "enabled": enabled})
 
     async def kb_chunks(request: web.Request) -> web.Response:
         return reply(
@@ -307,6 +327,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
 
     return [
         web.get("/api/kb/summary", kb_summary),
+        web.put("/api/kb/sync/{wiki}", set_kb_sync),
         web.get("/api/kb/chunks", kb_chunks),
         web.get("/api/kb/chunks/{id:.+}", kb_chunk),
         web.post("/api/kb/search", kb_search),

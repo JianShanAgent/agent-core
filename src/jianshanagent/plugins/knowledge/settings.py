@@ -9,13 +9,14 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from jianshanagent.core.config import AppConfig, load_config
+from jianshanagent.core.config import AppConfig, load_config, write_override
 from jianshanagent.core.sites import EXTENSION_KNOWLEDGE, load_sites
 from jianshanagent.core.wiki import WikiSite, load_wiki, load_wikis
 from jianshanagent.plugins.knowledge.site import SiteSet
@@ -249,7 +250,7 @@ def parse_window(text: str) -> tuple[int, int] | None:
     return minutes
 
 
-def _sync_settings(raw: dict[str, Any]) -> SyncSettings:
+def _sync_settings(raw: dict[str, Any], *, wiki_id: str = "") -> SyncSettings:
     defaults = SyncSettings()
     full = raw.get("full_refresh") or {}
     limits = raw.get("limits") or {}
@@ -259,8 +260,14 @@ def _sync_settings(raw: dict[str, Any]) -> SyncSettings:
         return float(section[key]) if section.get(key) is not None else default
 
     interval = number(raw, "interval_minutes", defaults.interval_seconds / 60) * 60
+    enabled = bool(raw.get("enabled", defaults.enabled))
+    # 只关（或只开）某一个 wiki：sync.wikis.<id>.enabled。没写的跟着上面的 enabled
+    per_wiki = raw.get("wikis") if isinstance(raw.get("wikis"), dict) else {}
+    mine = per_wiki.get(wiki_id) if wiki_id else None
+    if isinstance(mine, dict) and "enabled" in mine:
+        enabled = bool(mine["enabled"])
     return SyncSettings(
-        enabled=bool(raw.get("enabled", defaults.enabled)),
+        enabled=enabled,
         interval_seconds=max(MIN_SYNC_INTERVAL_SECONDS, interval),
         template_namespaces=tuple(int(n) for n in raw.get("template_namespaces") or ())
         or defaults.template_namespaces,
@@ -432,8 +439,40 @@ def load_settings(config: AppConfig | None = None, wiki: str = "") -> Settings:
         chunk=chunk,
         report=report,
         dates=dates,
-        sync=_sync_settings(raw.get("sync") or {}),
+        sync=_sync_settings(raw.get("sync") or {}, wiki_id=wiki_id),
         output_dir=output_dir,
         cache_dir=output_dir / CACHE_DIRNAME,
         sites=sites,
     )
+
+
+def set_sync_enabled(config: AppConfig, wiki_id: str, enabled: bool) -> bool:
+    """把 ``wiki_id`` 这一个 wiki 的自动更新开或关，存成覆写。返回它现在开不开。
+
+    只动 ``plugin.knowledge`` 的 ``sync.wikis.<id>.enabled``。和这个 wiki 自己的默认值一样时
+    不记这一项。别的 wiki 不动，已经入库的内容也不动。下一轮自动更新读到新配置就生效。
+    """
+    config.wiki(wiki_id)  # 没有这个 wiki 就报错
+    name = "plugin.knowledge"
+    edited = copy.deepcopy(config.files[name])
+    sync = edited.get("sync")
+    if not isinstance(sync, dict):
+        sync = {}
+        edited["sync"] = sync
+    per_wiki = dict(sync.get("wikis") or {}) if isinstance(sync.get("wikis"), dict) else {}
+    base = config.for_wiki(wiki_id).base_files[name].get("sync") or {}
+    base_enabled = bool(base.get("enabled", True)) if isinstance(base, dict) else True
+    if bool(enabled) == base_enabled:
+        per_wiki.pop(wiki_id, None)
+    else:
+        current = per_wiki.get(wiki_id)
+        current = dict(current) if isinstance(current, dict) else {}
+        current["enabled"] = bool(enabled)
+        per_wiki[wiki_id] = current
+    if per_wiki:
+        sync["wikis"] = per_wiki
+    else:
+        sync.pop("wikis", None)
+    write_override(config, name, edited)
+    fresh = load_config(config.root, config.overrides_dir)
+    return load_settings(fresh, wiki_id).sync.enabled

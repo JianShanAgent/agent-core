@@ -32,7 +32,12 @@ from jianshanagent.plugins.knowledge.image_store import (
 )
 from jianshanagent.plugins.knowledge.images import ImageSearch, ImageSettings
 from jianshanagent.plugins.knowledge.retrieval import RetrievalSettings, Retriever
-from jianshanagent.plugins.knowledge.settings import is_primary, kb_root, load_settings
+from jianshanagent.plugins.knowledge.settings import (
+    is_primary,
+    kb_root,
+    load_settings,
+    set_sync_enabled,
+)
 from jianshanagent.plugins.knowledge.store import (
     KbChunk,
     KnowledgeStore,
@@ -186,6 +191,41 @@ def test_each_wiki_reads_the_shared_config_plus_its_own_site_plugins(
     bwiki_clean = config.for_wiki("bwiki").plugin("knowledge")["clean"]
     assert "navigation-not-searchable" in bwiki_clean["remove_classes"]
     assert config.for_wiki("bwiki").plugin("knowledge")["fetch"]["requests_per_second"] == 0.5
+
+
+def test_sync_can_be_turned_off_for_one_wiki(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """知识库页的开关只关那一个 wiki：灰机照常更新，BWiki 下一轮不再去请求。"""
+    two_site_plugins(tmp_path, monkeypatch)
+    wiki = {**TWO_WIKIS, "wikis": [dict(item) for item in TWO_WIKIS["wikis"]]}
+    wiki["wikis"][0] |= {"site": "huiji_game"}
+    wiki["wikis"][1] |= {"site": "bwiki_game"}
+    config_dir = write_deployment(tmp_path, wiki)
+    overrides = tmp_path / "overrides"
+    config = load_config(config_dir, overrides)
+
+    assert load_settings(config, "huiji").sync.enabled
+    assert load_settings(config, "bwiki").sync.enabled
+    assert set_sync_enabled(config, "bwiki", False) is False
+
+    config = load_config(config_dir, overrides)
+    assert load_settings(config, "huiji").sync.enabled
+    assert load_settings(config, "bwiki").sync.enabled is False
+    stored = yaml.safe_load((overrides / "plugin.knowledge.yaml").read_text("utf-8"))
+    assert stored == {"sync": {"wikis": {"bwiki": {"enabled": False}}}}
+    # 别的覆写还在：只关 BWiki 不会把已经改过的项冲掉
+    edited = config.plugin("knowledge")
+    edited = {**edited, "retrieval": {**edited["retrieval"], "top_k": 11}}
+    write_override(config, "plugin.knowledge", edited)
+    config = load_config(config_dir, overrides)
+    assert set_sync_enabled(config, "bwiki", True) is True
+    config = load_config(config_dir, overrides)
+    assert load_settings(config, "bwiki").sync.enabled
+    assert config.plugin("knowledge")["retrieval"]["top_k"] == 11
+    assert "wikis" not in (config.overrides.get("plugin.knowledge") or {}).get("sync", {})
+    with pytest.raises(ValueError, match="nope"):
+        set_sync_enabled(config, "nope", False)
 
 
 def test_a_wiki_list_that_cannot_work_is_explained(tmp_path: Path) -> None:

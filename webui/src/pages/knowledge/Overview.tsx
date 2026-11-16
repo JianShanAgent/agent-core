@@ -381,9 +381,21 @@ export function Overview({ onOpenTab }: { onOpenTab: (tab: "chunks" | "images") 
 
       {data.wikis.length > 1 ? <Wikis wikis={data.wikis} /> : null}
       {data.wikis.length > 1 ? (
-        data.wikis.map((wiki) => <SyncStatus key={wiki.id} sync={wiki.sync} wiki={wiki} />)
+        data.wikis.map((wiki) => (
+          <SyncStatus
+            key={wiki.id}
+            sync={wiki.sync}
+            wiki={wiki}
+            wikiId={wiki.id}
+            enabled={wiki.sync_enabled}
+          />
+        ))
       ) : (
-        <SyncStatus sync={data.wikis[0]?.sync ?? null} />
+        <SyncStatus
+          sync={data.wikis[0]?.sync ?? null}
+          wikiId={data.wikis[0]?.id ?? ""}
+          enabled={data.wikis[0]?.sync_enabled ?? true}
+        />
       )}
 
       <Tables data={data} />

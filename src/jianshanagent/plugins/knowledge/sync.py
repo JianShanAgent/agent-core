@@ -1240,7 +1240,7 @@ async def run_loop(config_dir: str | None = None) -> int:
                         logger.info(
                             "kb_sync_disabled",
                             wiki=entry.id,
-                            hint="plugin.knowledge 的 sync.enabled",
+                            hint="知识库页的开关，或 plugin.knowledge 的 sync.enabled",
                         )
                         continue
                     intervals.append(cfg.interval_seconds)

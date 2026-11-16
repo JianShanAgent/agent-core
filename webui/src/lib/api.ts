@@ -183,6 +183,8 @@ export const api = {
     ),
 
   kbSummary: () => get<KbSummary>("/api/kb/summary"),
+  setWikiSync: (id: string, enabled: boolean) =>
+    put<{ id: string; enabled: boolean }>(`/api/kb/sync/${seg(id)}`, { enabled }),
   kbChunks: (query: {
     q?: string;
     type?: string;

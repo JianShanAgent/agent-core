@@ -523,6 +523,20 @@ async def test_the_page_is_told_which_items_cannot_be_changed_from_the_web(env: 
     assert models["base_url_locked"] is True and models["base_url"].startswith("https://")
 
 
+async def test_one_wiki_sync_switch_does_not_need_a_restart(env: Env) -> None:
+    await env.login()
+    turned_off = await env.send("PUT", "/api/kb/sync/main", {"enabled": False})
+    assert turned_off == {"id": "main", "enabled": False}
+    stored = yaml.safe_load((env.overrides / "plugin.knowledge.yaml").read_text("utf-8"))
+    assert stored == {"sync": {"wikis": {"main": {"enabled": False}}}}
+    assert env.runtime.generation == 1  # 下一轮 kbsync 自己读，不用重启机器人
+    missing = await env.send("PUT", "/api/kb/sync/nope", {"enabled": False}, 404)
+    assert "nope" in missing["error"]
+    turned_on = await env.send("PUT", "/api/kb/sync/main", {"enabled": True})
+    assert turned_on == {"id": "main", "enabled": True}
+    assert not (env.overrides / "plugin.knowledge.yaml").exists()
+
+
 async def test_what_can_be_reached_without_logging_in_takes_no_big_or_odd_input(env: Env) -> None:
     # 整个服务的请求体上限为了网页对话传图放到了 64 MB；登录接口不用登录就能调，
     # 不能让谁都能叫进程把几十 MB 读进内存

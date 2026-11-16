@@ -77,8 +77,9 @@ paths:
 #   只看这一轮打算做什么：  .venv/bin/python -m jianshanagent.plugins.knowledge sync --plan
 #   看现状：                .venv/bin/python -m jianshanagent.plugins.knowledge sync --status（管理后台的知识库页也有）
 # 这一段在管理后台里改了，下一轮就生效，不用重启。
+# enabled 管所有 wiki。只关某一个：知识库页上那个 wiki 的开关，存成 sync.wikis.<它的 id>.enabled。
 sync:
-  enabled: true                    # false = kbsync 服务空转，不检查、不更新
+  enabled: true                    # false = 所有 wiki 都不检查、不更新
   # 每隔多少分钟看一次 wiki 的最近更改（最少 5 分钟）。没有变化时一轮只发 1 个请求；
   # 有变化时重新列一遍页面（6 个请求上下）再取变了的。实测这个站一周 200 条变更、涉及 20 多个条目
   interval_minutes: 60

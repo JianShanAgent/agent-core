@@ -1,15 +1,19 @@
 // 知识库 · 概况里的「自动更新」：服务器上的 kbsync 服务上次什么时候看过 wiki、更新了什么、
 // 有没有被闸门拦下的事。状态是它每做完一轮写进数据库的（后端 plugins/knowledge/sync.py）。
 
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
+import { toast } from "sonner";
 
 import { ToneBadge } from "@/components/common";
 import { Banner } from "@/components/layout/StateBanners";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/form";
 import { Table, Td, Th, Tr } from "@/components/ui/misc";
+import { ApiError, api } from "@/lib/api";
 import { formatAgo, formatDateTime, formatNumber, formatSeconds, formatTime, parseTime } from "@/lib/format";
 import type { Tone } from "@/lib/labels";
 import type { KbSync, KbSyncRound } from "@/lib/types";
@@ -36,6 +40,30 @@ const PARTS: Record<string, string> = {
   kb: "知识库",
   images: "图库",
 };
+
+/** 这一个 wiki 的自动更新开关。存进配置覆写，下一轮生效，别的 wiki 不动。 */
+function SyncToggle({ wikiId, enabled }: { wikiId: string; enabled: boolean }) {
+  const client = useQueryClient();
+  const save = useMutation({
+    mutationFn: (next: boolean) => api.setWikiSync(wikiId, next),
+    onSuccess: async (_result, next) => {
+      await client.invalidateQueries({ queryKey: ["kb", "summary"] });
+      toast.success(next ? "下一轮会恢复自动更新" : "下一轮起不再自动更新");
+    },
+    onError: (error) => toast.error(error instanceof ApiError ? error.message : "没存上"),
+  });
+  return (
+    <label className="flex items-center gap-2">
+      <span className="text-muted-foreground text-xs">自动更新</span>
+      <Switch
+        checked={enabled}
+        disabled={save.isPending}
+        onCheckedChange={(next) => save.mutate(next)}
+        aria-label="自动更新"
+      />
+    </label>
+  );
+}
 
 /** 上次检查过了两个周期再加 5 分钟还没有下一次：服务多半没在跑。 */
 function overdue(sync: KbSync): boolean {
@@ -98,26 +126,48 @@ function changesOf(round: KbSyncRound): string {
 export function SyncStatus({
   sync,
   wiki,
+  wikiId,
+  enabled,
 }: {
   sync: KbSync | null;
   /** 挂了不止一个 wiki 时：这是哪个 wiki 的（每个 wiki 各更新各的，各有一份状态） */
   wiki?: { id: string; label: string };
+  /** 开关改的是哪一个 wiki */
+  wikiId: string;
+  /** 现在配的是开还是关。和 sync.enabled 可能不一样：那是上一轮写下的 */
+  enabled: boolean;
 }) {
   // 手动放行的命令：挂了不止一个 wiki 时指明是哪一个
   const only = wiki ? `--wiki ${wiki.id} ` : "";
+  const toggle = wikiId ? <SyncToggle wikiId={wikiId} enabled={enabled} /> : null;
   if (!sync) {
     return (
-      <div className="text-muted-foreground px-1 text-xs leading-relaxed">
-        {wiki ? `「${wiki.label}」的` : ""}自动更新还没有跑过。它是服务器上单独的一个服务（kbsync），每隔一段时间看 wiki
-        改了什么、只重做变了的部分；本机调试时没有这个服务。跑起来以后，这里会显示它上次什么时候看过
-        wiki、更新了什么。
-      </div>
+      <Card>
+        <CardHeader>
+          <div>
+            <CardTitle>自动更新{wiki ? ` · ${wiki.label}` : ""}</CardTitle>
+          </div>
+          {toggle}
+        </CardHeader>
+        <CardContent>
+          <div className="text-muted-foreground text-xs leading-relaxed">
+            {wiki ? `「${wiki.label}」的` : ""}自动更新还没有跑过。它是服务器上单独的一个服务（kbsync），每隔一段时间看
+            wiki 改了什么、只重做变了的部分；本机调试时没有这个服务。跑起来以后，这里会显示它上次什么时候看过
+            wiki、更新了什么。
+          </div>
+          {!enabled ? (
+            <Banner tone="info" className="mt-3 mb-0">
+              这个 wiki 的自动更新关着。打开开关以后，下一轮会开始看 wiki。
+            </Banner>
+          ) : null}
+        </CardContent>
+      </Card>
     );
   }
 
   const problems = Object.entries(sync.problems).filter(([, text]) => text);
   const late = overdue(sync);
-  const state: { text: string; tone: Tone } = !sync.enabled
+  const state: { text: string; tone: Tone } = !enabled
     ? { text: "已关闭", tone: "muted" }
     : problems.length
       ? { text: "有步骤没做成", tone: "warning" }
@@ -157,11 +207,14 @@ export function SyncStatus({
             每 {minutes} 分钟看一次 wiki 的最近更改，只重做变了的页面和图片，再导入库里；机器人不用停
           </CardDescription>
         </div>
-        <Button asChild variant="ghost" size="xs">
-          <Link to={CONFIG_LINK}>
-            去改这些参数（sync 一段） <ArrowRight />
-          </Link>
-        </Button>
+        <div className="flex items-center gap-3">
+          {toggle}
+          <Button asChild variant="ghost" size="xs">
+            <Link to={CONFIG_LINK}>
+              去改这些参数（sync 一段） <ArrowRight />
+            </Link>
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <div className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-4">
@@ -171,12 +224,12 @@ export function SyncStatus({
           <Fact label="上次对图库" value={sync.images_at} />
         </div>
 
-        {!sync.enabled ? (
+        {!enabled ? (
           <Banner tone="info" className="mb-0">
-            自动更新在配置里关掉了（sync.enabled），知识库不会跟着 wiki 更新。
+            这个 wiki 的自动更新关着。已经入库的内容还在，只是不再跟着 wiki 更新。打开开关以后，下一轮就恢复。
           </Banner>
         ) : null}
-        {late ? (
+        {enabled && late ? (
           <Banner tone="warning" className="mb-0">
             <b>上次看 wiki 是 {formatAgo(sync.checked_at)}，</b>
             按配置应该每 {minutes} 分钟看一次。kbsync 服务可能没在跑：到服务器上看{" "}
@@ -184,20 +237,22 @@ export function SyncStatus({
             <code className="font-mono text-xs">ctl logs kbsync</code>。
           </Banner>
         ) : null}
-        {problems.map(([part, text]) => (
-          <Banner key={part} tone="warning" className="mb-0">
-            <b>{PARTS[part] ?? part}这一步没做成，每一轮都会再试：</b>
-            <div className="mt-0.5 text-xs break-words">{text}</div>
-            {part !== "check" ? (
-              <div className="text-muted-foreground mt-1 text-xs">
-                如果是被闸门拦下的、看过确实没问题，到服务器上手动放行一次：
-                <code className="ml-1 font-mono">
-                  ctl exec kbsync python -m jianshanagent.plugins.knowledge {only}sync --force
-                </code>
-              </div>
-            ) : null}
-          </Banner>
-        ))}
+        {enabled
+          ? problems.map(([part, text]) => (
+              <Banner key={part} tone="warning" className="mb-0">
+                <b>{PARTS[part] ?? part}这一步没做成，每一轮都会再试：</b>
+                <div className="mt-0.5 text-xs break-words">{text}</div>
+                {part !== "check" ? (
+                  <div className="text-muted-foreground mt-1 text-xs">
+                    如果是被闸门拦下的、看过确实没问题，到服务器上手动放行一次：
+                    <code className="ml-1 font-mono">
+                      ctl exec kbsync python -m jianshanagent.plugins.knowledge {only}sync --force
+                    </code>
+                  </div>
+                ) : null}
+              </Banner>
+            ))
+          : null}
         {waiting.length ? (
           <ul className="text-muted-foreground list-disc space-y-0.5 pl-5 text-xs leading-relaxed">
             {waiting.map((line, index) => (

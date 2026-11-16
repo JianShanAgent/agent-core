@@ -489,6 +489,8 @@ export interface KbWiki {
   fingerprint: string | null;
   loaded_at: string | null;
   images: number;
+  /** 现在配的是开还是关（知识库页的开关）。下一轮自动更新才按它做 */
+  sync_enabled: boolean;
   /** 自动更新的状态；服务器上的 kbsync 服务还没跑过（或者本机调试）时是 null */
   sync: KbSync | null;
 }
