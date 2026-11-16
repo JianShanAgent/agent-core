@@ -495,6 +495,7 @@ function SiteList({
                 </label>
               ) : null}
             </div>
+            {group.id === "bwiki" ? <BilibiliLogin /> : null}
             <div className="divide-y">
               {group.sites.map((site) => (
                 <SiteRow
@@ -564,10 +565,10 @@ function BilibiliLogin() {
 
   const saved = Boolean(status.data?.configured);
   return (
-    <Card className="flex flex-wrap items-center gap-3 p-4">
+    <div className="flex flex-wrap items-center gap-3 border-b px-4 py-3">
       <QrCode className="size-5 text-muted-foreground" />
       <div className="min-w-48 flex-1">
-        <div className="text-sm font-semibold">B 站登录（BWiki）</div>
+        <div className="text-sm font-semibold">B 站登录</div>
         <div className="text-muted-foreground text-xs">
           {saved
             ? status.data?.valid
@@ -591,7 +592,7 @@ function BilibiliLogin() {
           </div>
         </DialogContent>
       </Dialog>
-    </Card>
+    </div>
   );
 }
 
@@ -748,8 +749,6 @@ export default function Wikis() {
         title="Wiki"
         description="按平台看这台机器上的站点插件。挂载开关卸下以后，/查 和自动更新不再用那个 wiki，知识库留着。"
       />
-
-      <BilibiliLogin />
 
       {query.isPending ? (
         <div className="flex flex-col gap-2">
