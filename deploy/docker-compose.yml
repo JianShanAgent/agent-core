@@ -40,6 +40,8 @@ services:
       # 在管理后台的「Wiki」页里下载的站点插件放在这里（数据盘上，换发布还在）
       JIANSHANAGENT_SITES_DIR: /data/sites
       JIANSHANAGENT_BILIBILI_CREDENTIAL_FILE: /data/bilibili/credential.json
+      # 页面上填的 wiki 放行密钥。secrets.yaml 是只读挂载，改不了
+      JIANSHANAGENT_WIKI_AUTH_DIR: /data/wiki-auth
       JIANSHANAGENT_POSTGRES_DSN: postgresql://jianshanagent:${POSTGRES_PASSWORD:?请在 .env 里设置 POSTGRES_PASSWORD}@postgres:5432/jianshanagent
       JIANSHANAGENT_REDIS_URL: redis://redis:6379/0
       TZ: Asia/Shanghai
@@ -92,6 +94,7 @@ services:
       # 和机器人看同一个目录：后台下载的站点插件，它的 wiki 也要更新
       JIANSHANAGENT_SITES_DIR: /data/sites
       JIANSHANAGENT_BILIBILI_CREDENTIAL_FILE: /data/bilibili/credential.json
+      JIANSHANAGENT_WIKI_AUTH_DIR: /data/wiki-auth
       JIANSHANAGENT_LOG_JSON: "1"
       # 和机器人一样带着发布号：按发布流程部署的，用哪个版本由发布决定，不用后台装的更新包
       JIANSHANAGENT_RELEASE: ${JIANSHANAGENT_RELEASE:-dev}

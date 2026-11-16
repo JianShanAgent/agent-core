@@ -60,6 +60,7 @@ from jianshanagent.plugins.wiki_query.client import WikiQueryClient
 from jianshanagent.plugins.wiki_query.hub import WikiQueryHub
 from jianshanagent.plugins.wiki_query.plugin import WikiQueryPlugin
 from jianshanagent.testing.sites import register_plugins, site_packages, write_site
+from jianshanagent.wiki_auth import WikiAuthStore
 
 HUIJI = "https://huiji.example"
 BWIKI = "https://bwiki.example"
@@ -232,6 +233,34 @@ def test_sync_can_be_turned_off_for_one_wiki(
     assert "wikis" not in (config.overrides.get("plugin.knowledge") or {}).get("sync", {})
     with pytest.raises(ValueError, match="nope"):
         set_sync_enabled(config, "nope", False)
+
+
+def test_a_key_saved_on_the_page_overrides_the_deployed_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """页面上保存的放行密钥盖过 secrets.yaml，留空则改回用部署里的。"""
+    monkeypatch.setenv("JIANSHANAGENT_WIKI_AUTH_DIR", str(tmp_path / "wiki-auth"))
+    wiki = {**TWO_WIKIS, "wikis": [dict(item) for item in TWO_WIKIS["wikis"]]}
+    wiki["wikis"][0] |= {"auth_header": "X-authkey"}
+    config_dir = write_deployment(tmp_path, wiki)
+    (config_dir / "secrets.yaml").write_text(
+        "wiki:\n  huiji:\n    authkey: k-huiji\n", encoding="utf-8"
+    )
+    config = load_config(config_dir, tmp_path / "overrides")
+    store = WikiAuthStore(config_dir)
+    assert load_wiki(config, "huiji").auth_key == "k-huiji"
+
+    store.set("huiji", "from-page")
+    path = tmp_path / "wiki-auth" / "huiji.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert load_wiki(config, "huiji").auth_key == "from-page"
+    with pytest.raises(ValueError, match="不能有空格"):
+        store.set("huiji", "has space")
+    assert load_wiki(config, "huiji").auth_key == "from-page"
+
+    store.set("huiji", "")
+    assert not path.exists()
+    assert load_wiki(config, "huiji").auth_key == "k-huiji"
 
 
 def test_unmounting_one_wiki_keeps_it_on_the_list(

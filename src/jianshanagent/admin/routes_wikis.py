@@ -132,6 +132,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
 
     def describe(disk: AppConfig, entry: WikiEntry) -> dict[str, Any]:
         raw = entry.raw
+        saved_key = admin.wiki_auth.saved(entry.id)
         return {
             "id": entry.id,
             "label": str(raw.get("label") or "").strip() or entry.id,
@@ -144,7 +145,11 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             "site": _site_info(disk, entry.site) if entry.site is not None else None,
             "api_url": str(raw.get("api_url") or ""),
             "auth_header": str(raw.get("auth_header") or ""),
-            "auth_key_set": _secret_set(disk, entry.id),
+            "auth_key_set": bool(saved_key) or _secret_set(disk, entry.id),
+            #: page = 页面上保存的；secrets = 还没在页面上改过，用部署里的
+            "auth_key_source": (
+                "page" if saved_key else ("secrets" if _secret_set(disk, entry.id) else "")
+            ),
             #: 正在运行的那一套里有没有它（刚加上、还要重启才生效的是 False）
             "running": any(running.id == entry.id for running in admin.config.wikis),
             "kb": _kb(disk, entry.id),
@@ -415,6 +420,53 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             logger.warning("admin_wiki_mounted", wiki=wiki_id, mounted=now)
             return reply({"id": wiki_id, "mounted": now, "status": admin.status()})
 
+    def auth_state(disk: AppConfig, wiki_id: str) -> dict[str, Any]:
+        entry = next(item for item in disk.wikis if item.id == wiki_id)
+        described = describe(disk, entry)
+        return {
+            "id": wiki_id,
+            "auth_key_set": described["auth_key_set"],
+            "auth_key_source": described["auth_key_source"],
+        }
+
+    async def set_authkey(request: web.Request) -> web.Response:
+        """保存这个 wiki 的放行密钥。空字符串删掉页面上的，改回用部署里的。不把密钥读回去。"""
+        wiki_id = request.match_info["id"]
+        body = await read_body(request, limit=4096)
+        if not isinstance(body.get("authkey"), str):
+            fail(400, "authkey 应该是字符串")
+        authkey = body["authkey"].strip()
+        async with changing:
+            disk = admin.disk_config()
+            entry = next((item for item in disk.wikis if item.id == wiki_id), None)
+            if entry is None:
+                fail(404, f"没有叫「{wiki_id}」的 wiki")
+            if not str(entry.raw.get("auth_header") or "").strip():
+                fail(409, "这个 wiki 不用放行密钥")
+            previous = admin.wiki_auth.snapshot(wiki_id)
+            try:
+                admin.wiki_auth.set(wiki_id, authkey)
+            except ValueError as exc:
+                fail(400, str(exc))
+            try:
+                await admin.runtime.reload()
+            except Exception as exc:
+                admin.wiki_auth.restore(wiki_id, previous)
+                try:
+                    await admin.runtime.reload()
+                except Exception:
+                    logger.warning("admin_wiki_authkey_restore_failed", wiki=wiki_id)
+                logger.warning(
+                    "admin_wiki_authkey_rejected", wiki=wiki_id, error=trace.brief(repr(exc))
+                )
+                fail(
+                    409,
+                    "保存以后装不起来，已经撤回："
+                    + trace.brief(f"{type(exc).__name__}: {exc}", 500),
+                )
+            logger.warning("admin_wiki_authkey", wiki=wiki_id, saved=bool(authkey))
+            return reply(auth_state(admin.disk_config(), wiki_id))
+
     async def build_kb(request: web.Request) -> web.Response:
         """请自动更新给这个 wiki 从头建知识库。只放一个请求，不在这个进程里做。"""
         wiki_id = request.match_info["id"]
@@ -480,6 +532,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         web.post("/api/wikis/sites/{site}/update", update_site),
         web.delete("/api/wikis/{id}", remove_wiki),
         web.put("/api/wikis/{id}/mounted", set_mounted),
+        web.put("/api/wikis/{id}/authkey", set_authkey),
         web.post("/api/wikis/{id}/kb", build_kb),
         web.delete("/api/wikis/{id}/kb", cancel_kb),
     ]

@@ -178,6 +178,11 @@ export const api = {
     put<{ id: string; mounted: boolean; status: Status }>(`/api/wikis/${seg(id)}/mounted`, {
       mounted,
     }),
+  setWikiAuthKey: (id: string, authkey: string) =>
+    put<{ id: string; auth_key_set: boolean; auth_key_source: WikiInfo["auth_key_source"] }>(
+      `/api/wikis/${seg(id)}/authkey`,
+      { authkey },
+    ),
   buildWikiKb: (id: string) =>
     post<{ kb: WikiKbState; sync_alive: boolean }>(`/api/wikis/${seg(id)}/kb`),
   cancelWikiKb: (id: string) => del<{ kb: WikiKbState }>(`/api/wikis/${seg(id)}/kb`),

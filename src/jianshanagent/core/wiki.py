@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from urllib.parse import quote, urlsplit
 
 from jianshanagent.core.config import WIKI_FILE, WIKIS, AppConfig, WikiEntry
+from jianshanagent.wiki_auth import WikiAuthStore
 
 #: 页面地址在站内的默认写法：``<站点>/wiki/<标题>``
 DEFAULT_ARTICLE_PATH = "/wiki/$1"
@@ -98,6 +99,8 @@ def _wiki_site(entry: WikiEntry, config: AppConfig) -> WikiSite:
     raw = entry.raw
     where = f"core.wiki.yaml 的 {WIKIS} 里的「{entry.id}」"
     secrets = (config.secrets.get("wiki") or {}).get(entry.id) or {}
+    #: 页面上保存的盖过 secrets.yaml。容器里的 secrets.yaml 是只读的，页面改不了它
+    saved_key = WikiAuthStore(config.root).saved(entry.id)
     api_url = str(raw.get("api_url") or "")
     site_base = str(raw.get("site_base") or "").rstrip("/")
     if not site_base and api_url:
@@ -121,7 +124,7 @@ def _wiki_site(entry: WikiEntry, config: AppConfig) -> WikiSite:
         article_path=article_path,
         user_agent=str(config.get(WIKI_FILE).get("user_agent") or DEFAULT_USER_AGENT),
         auth_header=str(raw.get("auth_header") or "") or None,
-        auth_key=str(secrets.get("authkey") or "") or None,
+        auth_key=saved_key or str(secrets.get("authkey") or "") or None,
         cookie=str(secrets.get("cookie") or "") or None,
     )
 
@@ -129,7 +132,7 @@ def _wiki_site(entry: WikiEntry, config: AppConfig) -> WikiSite:
 def load_wikis(config: AppConfig) -> tuple[WikiSite, ...]:
     """挂着的各个 wiki，按 ``core.wiki.yaml`` 里写的顺序（排第一的是主 wiki）。
 
-    一个都没挂就报错，不猜。放行密钥在 ``secrets.yaml`` 的 ``wiki.<id>``。
+    一个都没挂就报错，不猜。放行密钥优先用页面上保存的，否则用 ``secrets.yaml`` 的 ``wiki.<id>``。
     """
     wikis = tuple(_wiki_site(entry, config) for entry in config.wikis)
     if not wikis:

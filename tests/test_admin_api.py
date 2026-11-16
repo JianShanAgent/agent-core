@@ -537,6 +537,28 @@ async def test_one_wiki_sync_switch_does_not_need_a_restart(env: Env) -> None:
     assert not (env.overrides / "plugin.knowledge.yaml").exists()
 
 
+async def test_a_wiki_authkey_can_be_saved_without_showing_it(
+    env: Env, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("JIANSHANAGENT_WIKI_AUTH_DIR", str(tmp_path / "wiki-auth"))
+    await env.login()
+    refused = await env.send("PUT", "/api/wikis/main/authkey", {"authkey": "nope"}, status=409)
+    assert "不用放行密钥" in refused["error"]
+    wiki = env.root / "core.wiki.yaml"
+    data = yaml.safe_load(wiki.read_text("utf-8"))
+    data["wikis"][0]["auth_header"] = "X-authkey"
+    wiki.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    saved = await env.send("PUT", "/api/wikis/main/authkey", {"authkey": "page-key"})
+    assert saved["auth_key_set"] is True and saved["auth_key_source"] == "page"
+    assert "page-key" not in json.dumps(saved)
+    listing = await env.get("/api/wikis")
+    assert listing["wikis"][0]["auth_key_source"] == "page"
+    assert "page-key" not in json.dumps(listing)
+    cleared = await env.send("PUT", "/api/wikis/main/authkey", {"authkey": ""})
+    assert cleared["auth_key_set"] is False and cleared["auth_key_source"] == ""
+    assert not (tmp_path / "wiki-auth" / "main.json").exists()
+
+
 async def test_unmounting_a_deployed_wiki_keeps_it_listed(env: Env) -> None:
     await env.login()
     turned_off = await env.send("PUT", "/api/wikis/main/mounted", {"mounted": False})

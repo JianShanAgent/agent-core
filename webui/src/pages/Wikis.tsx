@@ -211,12 +211,12 @@ function WikiCard({
             <KeyRound className="size-3.5" />
             {wiki.auth_key_set ? (
               <span>
-                请求带着放行请求头 <Mono>{wiki.auth_header}</Mono>，密钥已经填了。
+                请求带着放行请求头 <Mono>{wiki.auth_header}</Mono>，密钥已经填了
+                {wiki.auth_key_source === "page" ? "（在上面这个平台里保存的）" : "（部署里的那一份）"}。
               </span>
             ) : (
               <span className="text-warning">
-                这个站要带放行请求头 <Mono>{wiki.auth_header}</Mono> 才不会被拦：在{" "}
-                <Mono>secrets.yaml</Mono> 里填 <Mono>wiki.{wiki.id}.authkey</Mono>，然后重启机器人。
+                这个站要带放行请求头 <Mono>{wiki.auth_header}</Mono> 才不会被拦。在上面这个平台里填写。
               </span>
             )}
           </div>
@@ -337,7 +337,7 @@ function AddDialog({
               onChange={(event) => setId(event.target.value.trim())}
             />
             <div className={cn("text-xs", problem ? "text-destructive" : "text-muted-foreground")}>
-              {problem || "知识库的目录名、放行密钥的键（wiki.<名字>.authkey）。建了知识库以后不要改。"}
+              {problem || "知识库的目录名。建了知识库以后不要改。"}
             </div>
           </div>
           <div className="flex flex-col gap-1.5">
@@ -355,9 +355,7 @@ function AddDialog({
           </div>
           {site?.auth_header ? (
             <div className="border-warning/40 bg-warning/8 rounded-md border px-3 py-2 text-xs leading-relaxed">
-              这个站的请求要带放行请求头 <Mono>{site.auth_header}</Mono>。加上以后在{" "}
-              <Mono>secrets.yaml</Mono> 里填 <Mono>wiki.{id || "<名字>"}.authkey</Mono>{" "}
-              并重启机器人，不然请求会被拦。
+              这个站的请求要带放行请求头 <Mono>{site.auth_header}</Mono>。加上以后在这个平台里填放行密钥，不然请求会被拦。
             </div>
           ) : null}
         </div>
@@ -435,6 +433,97 @@ function SiteRow({
   );
 }
 
+function authStatus(wiki: WikiInfo): string {
+  if (wiki.auth_key_source === "page") return "已在这里保存，请求会带上它。";
+  if (wiki.auth_key_set) return "现在用的是部署里的那一份。在这里保存会盖过它，不用重新发布。";
+  return "还没填。不带这个请求头，站点可能会拦。";
+}
+
+function PlatformAuth({ wikis }: { wikis: WikiInfo[] }) {
+  const refresh = useRefreshConfig();
+  const client = useQueryClient();
+  const [editing, setEditing] = useState<WikiInfo | null>(null);
+  const [value, setValue] = useState("");
+  const save = useMutation({
+    mutationFn: (input: { id: string; authkey: string }) => api.setWikiAuthKey(input.id, input.authkey),
+    onSuccess: (result) => {
+      setEditing(null);
+      setValue("");
+      toast.success(result.auth_key_source === "page" ? "放行密钥已保存" : "已改回用部署里的那一份");
+      refresh();
+      void client.invalidateQueries({ queryKey: ["wikis"] });
+    },
+    onError: (error: Error) => toast.error("放行密钥没存成", { description: error.message }),
+  });
+  if (!wikis.length) return null;
+
+  return (
+    <div className="divide-y border-b">
+      {wikis.map((wiki) => (
+        <div key={wiki.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+          <KeyRound className="size-5 text-muted-foreground" />
+          <div className="min-w-48 flex-1">
+            <div className="text-sm font-semibold">
+              放行密钥{wikis.length > 1 ? ` · ${wiki.label}` : ""}
+            </div>
+            <div className="text-muted-foreground text-xs">
+              请求头 <Mono>{wiki.auth_header}</Mono>。{authStatus(wiki)}
+            </div>
+          </div>
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={save.isPending}
+            onClick={() => {
+              setValue("");
+              setEditing(wiki);
+            }}
+          >
+            修改
+          </Button>
+        </div>
+      ))}
+      <Dialog
+        open={editing !== null}
+        onOpenChange={(open) => {
+          if (!open && !save.isPending) setEditing(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>放行密钥{editing ? ` · ${editing.label}` : ""}</DialogTitle>
+            <DialogDescription>
+              不会回显已经保存的。留空再保存，就改回用部署里的那一份。保存以后 /查 马上换上，自动更新下一轮换。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="wiki-authkey">密钥</Label>
+            <Input
+              id="wiki-authkey"
+              type="password"
+              autoComplete="new-password"
+              value={value}
+              disabled={save.isPending}
+              onChange={(event) => setValue(event.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" disabled={save.isPending} onClick={() => setEditing(null)}>
+              取消
+            </Button>
+            <Button
+              loading={save.isPending}
+              onClick={() => (editing ? save.mutate({ id: editing.id, authkey: value.trim() }) : undefined)}
+            >
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 function SiteList({
   info,
   locked,
@@ -496,6 +585,9 @@ function SiteList({
               ) : null}
             </div>
             {group.id === "bwiki" ? <BilibiliLogin /> : null}
+            <PlatformAuth
+              wikis={info.wikis.filter((wiki) => wiki.platform === group.id && wiki.auth_header)}
+            />
             <div className="divide-y">
               {group.sites.map((site) => (
                 <SiteRow
@@ -638,7 +730,7 @@ export default function Wikis() {
         description:
           (result.downloaded ? `站点插件 v${result.downloaded} 已下载。` : "") +
           (wiki.auth_header && !wiki.auth_key_set
-            ? `别忘了在 secrets.yaml 里填 wiki.${wiki.id}.authkey 并重启。`
+            ? "别忘了在这个平台里填放行密钥。"
             : "知识库要另外点「建知识库」。"),
       });
       done();

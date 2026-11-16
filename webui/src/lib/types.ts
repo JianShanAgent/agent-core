@@ -746,6 +746,8 @@ export interface WikiInfo {
   /** 请求要带的放行请求头的名字；不用放行是空的 */
   auth_header: string;
   auth_key_set: boolean;
+  /** page = 在页面上保存的；secrets = 还没在页面上改过；空 = 没填 */
+  auth_key_source: "page" | "secrets" | "";
   /** 正在运行的那一套里有没有它 */
   running: boolean;
   kb: WikiKbState;

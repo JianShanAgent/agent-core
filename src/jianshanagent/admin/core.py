@@ -24,6 +24,7 @@ from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.plugin import PluginHost
 from jianshanagent.core.trace import brief
+from jianshanagent.wiki_auth import WikiAuthStore
 
 if TYPE_CHECKING:
     from jianshanagent.runtime import Runtime
@@ -178,6 +179,7 @@ class Admin:
         config_root = getattr(getattr(runtime, "config", None), "root", Path("config"))
         self.bilibili = BilibiliCredentialStore(config_root)
         self.bilibili_qr: Any | None = None
+        self.wiki_auth = WikiAuthStore(config_root)
 
     def restart_soon(self) -> None:
         """过一小会儿重启机器人：先让这次请求的回应发出去。"""
