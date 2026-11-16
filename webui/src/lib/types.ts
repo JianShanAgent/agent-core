@@ -738,6 +738,8 @@ export interface WikiInfo {
   primary: boolean;
   /** 在这一页里加的（能在这里移除）；不然是部署的配置文件里写的 */
   added: boolean;
+  /** 挂着才给 /查 和自动更新用。卸下以后名单和知识库都还在 */
+  mounted: boolean;
   platform: string;
   site: SitePluginInfo | null;
   api_url: string;
@@ -749,9 +751,29 @@ export interface WikiInfo {
   kb: WikiKbState;
 }
 
+/** 这台机器上装着的一个站点插件，以及它现在挂着的 wiki（没挂上是 null）。 */
+export interface InstalledSite {
+  id: string;
+  name: string;
+  description: string;
+  platform: string;
+  source: SitePluginInfo["source"];
+  version: string | null;
+  wiki: {
+    id: string;
+    label: string;
+    mounted: boolean;
+    added: boolean;
+    primary: boolean;
+    api_url: string;
+  } | null;
+}
+
 export interface WikisInfo {
   writable: boolean;
   platforms: { id: string; name: string; description: string }[];
+  /** 装着的站点插件，站点列表用它，不靠远程的站点目录 */
+  sites: InstalledSite[];
   wikis: WikiInfo[];
   /** 在这里加过、现在挂不上的和原因 */
   skipped: string;

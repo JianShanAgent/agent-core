@@ -1,6 +1,6 @@
-// Wiki：机器人挂着哪些 wiki；从站点目录里按平台挑一个做好了的站，点一下就挂上。
-// 部署的配置文件里写的 wiki 在这里只能看；在这里加的可以移除。加上以后 /查 马上能用，
-// 知识库不跟着建（要把整个 wiki 取一遍、算向量）：另点「建知识库」，由自动更新在后台做。
+// Wiki：站点列表按平台列出这台机器上装着的站点插件，挂载开关就在这一页。
+// 卸下不把 wiki 从名单里删掉，知识库留着，/查 和自动更新不再用它。
+// 部署配置里写的 wiki 不能从名单里移除；在这里另外加的可以。知识库另点「建知识库」。
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -32,12 +32,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input, Label } from "@/components/ui/form";
+import { Input, Label, Switch } from "@/components/ui/form";
 import { Hint, Skeleton } from "@/components/ui/misc";
 import { api } from "@/lib/api";
 import { formatAgo } from "@/lib/format";
 import { useRefreshConfig } from "@/lib/hooks";
-import type { CatalogSite, SitePluginInfo, WikiInfo, WikisInfo } from "@/lib/types";
+import type { CatalogSite, InstalledSite, SitePluginInfo, WikiInfo, WikisInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const SOURCES: Record<SitePluginInfo["source"], string> = {
@@ -164,6 +164,7 @@ function WikiCard({
         <Badge tone={wiki.added ? "default" : "muted"}>
           {wiki.added ? "在这里加的" : "部署的配置文件里写的"}
         </Badge>
+        {wiki.mounted ? null : <Badge tone="warning">已卸下</Badge>}
         {wiki.running ? null : (
           <Hint text="盘上的配置里有它，正在运行的这一套里还没有：重新加载或者重启以后生效">
             <Badge tone="warning">还没生效</Badge>
@@ -376,7 +377,147 @@ function AddDialog({
 type Ask =
   | { kind: "remove"; wiki: WikiInfo }
   | { kind: "build"; wiki: WikiInfo }
-  | { kind: "update"; wiki: WikiInfo };
+  | { kind: "update"; wiki: WikiInfo }
+  | { kind: "unmount"; wikis: { id: string; label: string; primary: boolean }[] };
+
+/** 站点列表里的一行：这台机器上的站点插件，以及它挂着的 wiki。 */
+function SiteRow({
+  site,
+  platformName,
+  locked,
+  pending,
+  onToggle,
+}: {
+  site: InstalledSite;
+  platformName: string;
+  locked: boolean;
+  pending: boolean;
+  onToggle: (mounted: boolean) => void;
+}) {
+  const wiki = site.wiki;
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 py-3">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-sm font-medium">{site.name}</span>
+          <Mono>{site.id}</Mono>
+          <Badge tone="outline">{platformName}</Badge>
+          {wiki?.primary ? <Badge tone="brand">主 wiki</Badge> : null}
+          {wiki && !wiki.mounted ? <Badge tone="warning">已卸下</Badge> : null}
+        </div>
+        {site.description ? (
+          <p className="text-muted-foreground mt-1 text-xs leading-relaxed">{site.description}</p>
+        ) : null}
+        <div className="text-muted-foreground mt-1 text-xs">
+          {wiki ? (
+            <>
+              挂着 <span className="text-foreground/80">{wiki.label}</span> <Mono>{wiki.id}</Mono>
+              {" · "}
+              <Mono>{wiki.api_url}</Mono>
+            </>
+          ) : (
+            "插件在这台机器上，还没有 wiki 用它"
+          )}
+        </div>
+      </div>
+      {wiki ? (
+        <label className="flex items-center gap-2">
+          <span className="text-muted-foreground text-xs">挂载</span>
+          <Switch
+            checked={wiki.mounted}
+            disabled={locked || pending}
+            onCheckedChange={onToggle}
+            aria-label={`挂载 ${site.name}`}
+          />
+        </label>
+      ) : null}
+    </div>
+  );
+}
+
+function SiteList({
+  info,
+  locked,
+  pendingId,
+  onToggle,
+  onTogglePlatform,
+}: {
+  info: WikisInfo;
+  locked: boolean;
+  pendingId: string | null;
+  onToggle: (wiki: { id: string; label: string; primary: boolean }, mounted: boolean) => void;
+  onTogglePlatform: (
+    name: string,
+    wikis: { id: string; label: string; primary: boolean }[],
+    mounted: boolean,
+  ) => void;
+}) {
+  const groups = info.platforms
+    .map((item) => ({
+      ...item,
+      sites: info.sites.filter((site) => site.platform === item.id),
+    }))
+    .filter((group) => group.sites.length > 0);
+  if (!groups.length) {
+    return (
+      <Card>
+        <EmptyState icon={Globe} title="这台机器上没有站点插件" hint="站点插件随部署装进来，或者从下面的目录添加。" />
+      </Card>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-3">
+      {groups.map((group) => {
+        const wikis = group.sites.flatMap((site) =>
+          site.wiki ? [{ id: site.wiki.id, label: site.wiki.label, primary: site.wiki.primary }] : [],
+        );
+        const anyOn = group.sites.some((site) => site.wiki?.mounted);
+        return (
+          <Card key={group.id} className="gap-0 overflow-hidden p-0">
+            <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold">{group.name}</div>
+                {group.description ? (
+                  <p className="text-muted-foreground mt-0.5 max-w-3xl text-xs leading-relaxed">
+                    {group.description}
+                  </p>
+                ) : null}
+              </div>
+              {wikis.length ? (
+                <label className="flex items-center gap-2">
+                  <span className="text-muted-foreground text-xs">这个平台</span>
+                  <Switch
+                    checked={anyOn}
+                    disabled={locked || pendingId !== null}
+                    onCheckedChange={(mounted) => onTogglePlatform(group.name, wikis, mounted)}
+                    aria-label={`挂载 ${group.name}`}
+                  />
+                </label>
+              ) : null}
+            </div>
+            <div className="divide-y">
+              {group.sites.map((site) => (
+                <SiteRow
+                  key={site.id}
+                  site={site}
+                  platformName={group.name}
+                  locked={locked}
+                  pending={pendingId === site.wiki?.id}
+                  onToggle={(mounted) =>
+                    site.wiki ? onToggle(
+                      { id: site.wiki.id, label: site.wiki.label, primary: site.wiki.primary },
+                      mounted,
+                    ) : undefined
+                  }
+                />
+              ))}
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
 
 function BilibiliLogin() {
   const [open, setOpen] = useState(false);
@@ -535,6 +676,19 @@ export default function Wikis() {
     },
     onError: failed("没撤回成"),
   });
+  const mount = useMutation({
+    mutationFn: (input: { id: string; label: string; mounted: boolean }) =>
+      api.setWikiMounted(input.id, input.mounted),
+    onSuccess: (_result, input) => {
+      toast.success(
+        input.mounted
+          ? `已挂上「${input.label}」，/查 会用它`
+          : `已卸下「${input.label}」。/查 和自动更新不再用它，知识库还在`,
+      );
+      done();
+    },
+    onError: failed("挂载没改成"),
+  });
   const update = useMutation({
     mutationFn: (wiki: WikiInfo) => api.updateSitePlugin(wiki.site?.id ?? ""),
     onSuccess: (result) => {
@@ -550,10 +704,16 @@ export default function Wikis() {
 
   const data = query.data;
   const busy =
-    add.isPending || remove.isPending || update.isPending || actions.restarting || build.isPending;
+    add.isPending ||
+    remove.isPending ||
+    update.isPending ||
+    mount.isPending ||
+    actions.restarting ||
+    build.isPending;
   const locked = busy || !data?.state.writable;
   const platformName = (id: string) => data?.platforms.find((item) => item.id === id)?.name ?? id;
-  const sites = catalog.data?.sites ?? [];
+  const installedIds = new Set((data?.sites ?? []).map((site) => site.id));
+  const sites = (catalog.data?.sites ?? []).filter((site) => !installedIds.has(site.id));
   const shown = platform ? sites.filter((site) => site.platform === platform) : sites;
   const counts = new Map<string, number>();
   for (const site of sites) counts.set(site.platform, (counts.get(site.platform) ?? 0) + 1);
@@ -571,18 +731,22 @@ export default function Wikis() {
 
   const confirm = () => {
     if (!asking) return;
-    const { kind, wiki } = asking;
+    const current = asking;
     setAsking(null);
-    if (kind === "remove") remove.mutate(wiki);
-    else if (kind === "build") build.mutate(wiki);
-    else update.mutate(wiki);
+    if (current.kind === "remove") remove.mutate(current.wiki);
+    else if (current.kind === "build") build.mutate(current.wiki);
+    else if (current.kind === "unmount") {
+      for (const item of current.wikis) {
+        mount.mutate({ id: item.id, label: item.label, mounted: false });
+      }
+    } else update.mutate(current.wiki);
   };
 
   return (
     <div className="flex flex-col gap-3">
       <PageHeader
         title="Wiki"
-        description="机器人挂着哪些 wiki。做好了的站点可以从站点目录里挑，点一下就挂上，不用重启。"
+        description="按平台看这台机器上的站点插件。挂载开关卸下以后，/查 和自动更新不再用那个 wiki，知识库留着。"
       />
 
       <BilibiliLogin />
@@ -611,7 +775,30 @@ export default function Wikis() {
             </Banner>
           ) : null}
 
-          <div className="text-muted-foreground mt-1 px-1 text-xs font-medium">挂着的 wiki</div>
+          <div className="text-muted-foreground mt-1 px-1 text-xs font-medium">站点列表</div>
+          <SiteList
+            info={data}
+            locked={locked}
+            pendingId={mount.isPending ? mount.variables?.id ?? null : null}
+            onToggle={(wiki, mounted) => {
+              if (mounted) mount.mutate({ ...wiki, mounted });
+              else setAsking({ kind: "unmount", wikis: [wiki] });
+            }}
+            onTogglePlatform={(_name, wikis, mounted) => {
+              if (mounted) {
+                for (const wiki of wikis) {
+                  if (!data.wikis.find((item) => item.id === wiki.id)?.mounted) {
+                    mount.mutate({ ...wiki, mounted: true });
+                  }
+                }
+              } else {
+                const on = wikis.filter((wiki) => data.wikis.find((item) => item.id === wiki.id)?.mounted);
+                if (on.length) setAsking({ kind: "unmount", wikis: on });
+              }
+            }}
+          />
+
+          <div className="text-muted-foreground mt-3 px-1 text-xs font-medium">挂着的 wiki</div>
           {data.wikis.length === 0 ? (
             <Card>
               <EmptyState
@@ -639,7 +826,7 @@ export default function Wikis() {
           )}
 
           <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
-            <div className="text-muted-foreground text-xs font-medium">站点目录</div>
+            <div className="text-muted-foreground text-xs font-medium">目录里还能添加</div>
             <div className="flex flex-wrap items-center gap-1">
               {[{ id: "", name: "全部" }, ...data.platforms.filter((p) => counts.has(p.id))].map(
                 (item) => (
@@ -696,9 +883,9 @@ export default function Wikis() {
                 </Banner>
               ) : null}
               {shown.length === 0 && !catalog.data.error ? (
-                <Card>
-                  <EmptyState icon={Globe} title="目录里还没有站点" />
-                </Card>
+                <p className="text-muted-foreground px-1 text-xs">
+                  目录里没有这台机器上还没装的站。上面的站点列表就是现在能挂的。
+                </p>
               ) : (
                 <div className="flex flex-col gap-2">
                   {shown.map((site) => (
@@ -724,8 +911,8 @@ export default function Wikis() {
             站点目录是 <Mono>{data.catalog.repo}</Mono>{" "}
             仓库里的一份名单，只列同一个组织下的站点插件；wiki
             的地址、用哪个站点插件都照目录里写的，这里只能给它起名字。各个 wiki
-            平台（灰机、BWiki）多出来的东西核心自己带着，站点插件只带某一个站特有的。在这里加的 wiki
-            存在数据目录里，发布新版本不会丢；部署的配置文件里写的 wiki 要改那个文件再发布。
+            平台（灰机、BWiki）多出来的东西核心自己带着，站点插件只带某一个站特有的。上面的站点列表是这台机器上已经装着的。在这里加的 wiki
+            存在数据目录里，发布新版本不会丢；部署的配置文件里写的 wiki 不能从名单里删掉，可以在站点列表里卸下。
           </p>
         </>
       )}
@@ -747,10 +934,23 @@ export default function Wikis() {
             ? `移除「${asking.wiki.label}」？`
             : asking?.kind === "build"
               ? `给「${asking.wiki.label}」建知识库？`
-              : `更新「${asking?.wiki.site?.name ?? ""}」的站点插件？`
+              : asking?.kind === "unmount"
+                ? asking.wikis.length > 1
+                  ? `卸下这 ${asking.wikis.length} 个 wiki？`
+                  : `卸下「${asking.wikis[0]?.label ?? ""}」？`
+                : `更新「${asking?.wiki.site?.name ?? ""}」的站点插件？`
         }
         description={
-          asking?.kind === "remove" ? (
+          asking?.kind === "unmount" ? (
+            <>
+              /查 不再查
+              {asking.wikis.map((wiki) => wiki.label).join("、")}
+              ，自动更新也停。知识库里的内容还在，检索仍可能用到。再打开开关就挂回去，不用重新发布。
+              {asking.wikis.some((wiki) => wiki.primary)
+                ? "其中有主 wiki：对话和查证的说法仍用它的站点插件。"
+                : ""}
+            </>
+          ) : asking?.kind === "remove" ? (
             <>
               /查 不再查它，对话和查证也不再用它的内容；马上生效，不用重启。
               {asking.wiki.site?.source === "downloaded" ? "下载的站点插件一起删掉。" : ""}
@@ -771,9 +971,15 @@ export default function Wikis() {
           )
         }
         confirmText={
-          asking?.kind === "remove" ? "移除" : asking?.kind === "build" ? "开始建" : "检查并更新"
+          asking?.kind === "remove"
+            ? "移除"
+            : asking?.kind === "build"
+              ? "开始建"
+              : asking?.kind === "unmount"
+                ? "卸下"
+                : "检查并更新"
         }
-        destructive={asking?.kind === "remove"}
+        destructive={asking?.kind === "remove" || asking?.kind === "unmount"}
         onConfirm={confirm}
       />
     </div>

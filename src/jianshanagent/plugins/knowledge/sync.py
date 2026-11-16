@@ -78,7 +78,7 @@ from typing import Any, Protocol
 import httpx
 
 from jianshanagent._bootstrap import running_version
-from jianshanagent.core.config import AppConfig, load_config
+from jianshanagent.core.config import AppConfig, disabled_wiki_ids, load_config
 from jianshanagent.core.db import Database
 from jianshanagent.core.embedding import EmbeddingProvider, EmbeddingSettings
 from jianshanagent.core.logging import get_logger
@@ -1234,7 +1234,11 @@ async def run_loop(config_dir: str | None = None) -> int:
                     site_updated |= site_versions.setdefault(site_id, version) != version
                 due: list[str] = []
                 intervals: list[float] = []
+                unmounted = disabled_wiki_ids(config)
                 for entry in config.wikis:
+                    if entry.id in unmounted:
+                        logger.info("kb_sync_unmounted", wiki=entry.id, hint="Wiki 页的站点列表")
+                        continue
                     cfg = load_settings(config, entry.id).sync
                     if not cfg.enabled:
                         logger.info(

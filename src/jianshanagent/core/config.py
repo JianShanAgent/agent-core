@@ -106,6 +106,9 @@ WIKIS = "wikis"
 #: 覆写目录的 ``core.wiki.yaml`` 里的一项：在管理后台里从站点目录加的 wiki，接在 ``wikis`` 后面。
 #: 只在覆写文件里有，读配置时并进 ``wikis`` 就拿掉
 WIKIS_ADDED = "wikis_added"
+#: 同一份覆写里的另一项：这些 wiki 卸下了挂载。名单里还在（知识库不删），
+#: /查 和自动更新不再用它们。管理后台的站点列表改的就是这一项
+WIKIS_DISABLED = "wikis_disabled"
 #: 并进去以后，后台加的那几项带着这个记号（部署写的 wiki 不能写它）
 ADDED = "added"
 #: 站点插件的配置叫 ``site.<id>``，平台的叫 ``platform.<id>``；
@@ -805,6 +808,43 @@ def _stored_added_wikis(path: Path) -> list[dict[str, Any]]:
     if not isinstance(found, list):
         return []
     return [dict(item) for item in found if isinstance(item, dict)]
+
+
+def disabled_wiki_ids(config: AppConfig) -> set[str]:
+    """卸下了挂载的 wiki 的 id。名单里还在，只是 /查 和自动更新不用它们。"""
+    raw = config.get(WIKI_FILE).get(WIKIS_DISABLED)
+    if not isinstance(raw, list):
+        return set()
+    return {str(item) for item in raw if str(item)}
+
+
+def set_wiki_mounted(config: AppConfig, wiki_id: str, mounted: bool) -> bool:
+    """把 ``wiki_id`` 挂上或卸下，存进覆写。返回它现在挂没挂着。
+
+    卸下不把它从名单里拿走，知识库里的内容还在。要生效得重新 :func:`load_config`。
+    """
+    config.wiki(wiki_id)
+    path = config.override_path(WIKI_FILE)
+    if path is None:
+        raise ValueError(f"没有配置覆写目录（环境变量 {OVERRIDES_ENV}），挂载状态没有地方存")
+    try:
+        override = _load_yaml(path)
+    except (yaml.YAMLError, ValueError, OSError):
+        override = {}
+    disabled = [str(item) for item in override.get(WIKIS_DISABLED) or [] if str(item)]
+    if mounted:
+        disabled = [item for item in disabled if item != wiki_id]
+    elif wiki_id not in disabled:
+        disabled.append(wiki_id)
+    if disabled:
+        override[WIKIS_DISABLED] = disabled
+    else:
+        override.pop(WIKIS_DISABLED, None)
+    if override:
+        _write_override_file(path, WIKI_FILE, override)
+    else:
+        path.unlink(missing_ok=True)
+    return wiki_id not in disabled
 
 
 def added_wikis(config: AppConfig) -> list[dict[str, Any]]:

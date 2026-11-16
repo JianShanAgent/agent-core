@@ -21,6 +21,7 @@ import dataclasses
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from jianshanagent.core.config import disabled_wiki_ids
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.messages import Button, InboundMessage, OutboundMessage
 from jianshanagent.core.plugin import PluginContext
@@ -83,7 +84,13 @@ class WikiQueryPlugin:
         cfg = ctx.plugin_config()
         # 挂着哪些 wiki 在 core.wiki.yaml；请求头名在那里，密钥在 secrets.yaml（不入库）
         # 一个都没挂也能起来（新的实例）：/查 查不到东西，在管理后台的「Wiki」页里添加第一个
-        wikis = load_wikis(ctx.config) if ctx.config.wikis else ()
+        # 卸下挂载的不查（知识库里已有的内容还在）。一个都没挂也能起来
+        disabled = disabled_wiki_ids(ctx.config)
+        wikis = (
+            tuple(wiki for wiki in load_wikis(ctx.config) if wiki.id not in disabled)
+            if ctx.config.wikis
+            else ()
+        )
         if not wikis:
             logger.warning(
                 "wiki_query_no_wiki", hint="在管理后台的「Wiki」页里添加，或写进 core.wiki.yaml"

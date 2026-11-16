@@ -537,6 +537,20 @@ async def test_one_wiki_sync_switch_does_not_need_a_restart(env: Env) -> None:
     assert not (env.overrides / "plugin.knowledge.yaml").exists()
 
 
+async def test_unmounting_a_deployed_wiki_keeps_it_listed(env: Env) -> None:
+    await env.login()
+    turned_off = await env.send("PUT", "/api/wikis/main/mounted", {"mounted": False})
+    assert turned_off["mounted"] is False and env.runtime.generation == 2
+    stored = yaml.safe_load((env.overrides / "core.wiki.yaml").read_text("utf-8"))
+    assert stored["wikis_disabled"] == ["main"]
+    listing = await env.get("/api/wikis")
+    assert listing["wikis"][0]["id"] == "main" and listing["wikis"][0]["mounted"] is False
+    assert isinstance(listing["sites"], list)
+    turned_on = await env.send("PUT", "/api/wikis/main/mounted", {"mounted": True})
+    assert turned_on["mounted"] is True
+    assert not (env.overrides / "core.wiki.yaml").exists()
+
+
 async def test_what_can_be_reached_without_logging_in_takes_no_big_or_odd_input(env: Env) -> None:
     # 整个服务的请求体上限为了网页对话传图放到了 64 MB；登录接口不用登录就能调，
     # 不能让谁都能叫进程把几十 MB 读进内存

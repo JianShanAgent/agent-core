@@ -29,7 +29,9 @@ from jianshanagent.core.config import (
     AppConfig,
     WikiEntry,
     added_wikis,
+    disabled_wiki_ids,
     restore_override,
+    set_wiki_mounted,
     write_added_wikis,
 )
 from jianshanagent.core.embedding import EmbeddingSettings
@@ -79,6 +81,38 @@ def _site_info(disk: AppConfig, manifest: Manifest) -> dict[str, Any]:
     return {"id": manifest.id, "name": manifest.name, "source": source, "version": version}
 
 
+def _installed_sites(disk: AppConfig) -> list[dict[str, Any]]:
+    """这台机器上装着的站点插件，各自现在挂着哪个 wiki（没挂上就是 None）。"""
+    disabled = disabled_wiki_ids(disk)
+    by_site = {entry.site.id: entry for entry in disk.wikis if entry.site is not None}
+    primary = disk.wikis[0].id if disk.wikis else ""
+    found: list[dict[str, Any]] = []
+    for manifest in installed_sites(_workspace(disk)).values():
+        entry = by_site.get(manifest.id)
+        wiki = None
+        if entry is not None:
+            raw = entry.raw
+            wiki = {
+                "id": entry.id,
+                "label": str(raw.get("label") or "").strip() or entry.id,
+                "mounted": entry.id not in disabled,
+                "added": entry.added,
+                "primary": entry.id == primary,
+                "api_url": str(raw.get("api_url") or ""),
+            }
+        info = _site_info(disk, manifest)
+        found.append(
+            {
+                **info,
+                "platform": manifest.platform or "mediawiki",
+                "description": manifest.description,
+                "wiki": wiki,
+            }
+        )
+    found.sort(key=lambda item: (item["platform"], item["id"]))
+    return found
+
+
 def _secret_set(disk: AppConfig, wiki_id: str) -> bool:
     """``secrets.yaml`` 里这个 wiki 的放行密钥填了没有。只看填没填，值不出这个函数。"""
     value = str(((disk.secrets.get("wiki") or {}).get(wiki_id) or {}).get("authkey") or "").strip()
@@ -104,6 +138,8 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             "primary": entry.id == disk.wikis[0].id,
             #: 在这里加的（能在这里移除）；不然是部署的配置文件里写的
             "added": entry.added,
+            #: 卸下挂载的仍在名单里，/查 和自动更新不用它，知识库留着
+            "mounted": entry.id not in disabled_wiki_ids(disk),
             "platform": entry.platform.id,
             "site": _site_info(disk, entry.site) if entry.site is not None else None,
             "api_url": str(raw.get("api_url") or ""),
@@ -178,6 +214,9 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                     for item in platforms().values()
                 ],
                 "wikis": [describe(disk, entry) for entry in disk.wikis],
+                #: 这台机器上的站点插件，按平台归在一起。不靠站点目录：目录是组织里还能下载的，
+                #: 这里是已经装着的
+                "sites": _installed_sites(disk),
                 #: 在这里加过、现在挂不上的（它的站点插件没了……）和原因
                 "skipped": disk.override_errors.get(WIKI_FILE, ""),
                 "kb": kb_overview(disk),
@@ -327,8 +366,8 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 if any(entry.id == wiki_id for entry in disk.wikis):
                     fail(
                         409,
-                        f"「{wiki_id}」是部署的配置文件（core.wiki.yaml）里写的，"
-                        "不能在这里移除：改那个文件再发布",
+                        f"「{wiki_id}」是部署的配置文件里写的，不能从名单里删掉。"
+                        "不想让机器人再用它，在站点列表里把它卸下：/查 和自动更新会停，知识库留着",
                     )
                 fail(404, f"没有叫「{wiki_id}」的 wiki")
             rest = [item for item in stored if item is not target]
@@ -355,6 +394,26 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             return reply(
                 {"removed": wiki_id, "site_removed": removed_site, "status": admin.status()}
             )
+
+    async def set_mounted(request: web.Request) -> web.Response:
+        """挂上或卸下一个 wiki。卸下不删名单、不删知识库，/查 和自动更新不再用它。"""
+        wiki_id = request.match_info["id"]
+        body = await read_body(request)
+        if not isinstance(body.get("mounted"), bool):
+            fail(400, "mounted 应该是 true 或 false")
+        mounted = body["mounted"]
+        async with changing:
+            disk = admin.disk_config()
+            if not any(entry.id == wiki_id for entry in disk.wikis):
+                fail(404, f"没有叫「{wiki_id}」的 wiki")
+            previous = override_text(disk)
+            try:
+                now = set_wiki_mounted(disk, wiki_id, mounted)
+            except ValueError as exc:
+                fail(409, str(exc))
+            await reload_or_undo(disk, previous, f"{'挂上' if mounted else '卸下'}「{wiki_id}」")
+            logger.warning("admin_wiki_mounted", wiki=wiki_id, mounted=now)
+            return reply({"id": wiki_id, "mounted": now, "status": admin.status()})
 
     async def build_kb(request: web.Request) -> web.Response:
         """请自动更新给这个 wiki 从头建知识库。只放一个请求，不在这个进程里做。"""
@@ -420,6 +479,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         web.post("/api/wikis", add_wiki),
         web.post("/api/wikis/sites/{site}/update", update_site),
         web.delete("/api/wikis/{id}", remove_wiki),
+        web.put("/api/wikis/{id}/mounted", set_mounted),
         web.post("/api/wikis/{id}/kb", build_kb),
         web.delete("/api/wikis/{id}/kb", cancel_kb),
     ]

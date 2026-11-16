@@ -17,7 +17,13 @@ import pytest
 import yaml
 from PIL import Image
 
-from jianshanagent.core.config import AppConfig, load_config, write_override
+from jianshanagent.core.config import (
+    AppConfig,
+    disabled_wiki_ids,
+    load_config,
+    set_wiki_mounted,
+    write_override,
+)
 from jianshanagent.core.db import Database
 from jianshanagent.core.messages import ChatScope, InboundMessage, OutboundMessage
 from jianshanagent.core.plugin import PluginContext
@@ -226,6 +232,29 @@ def test_sync_can_be_turned_off_for_one_wiki(
     assert "wikis" not in (config.overrides.get("plugin.knowledge") or {}).get("sync", {})
     with pytest.raises(ValueError, match="nope"):
         set_sync_enabled(config, "nope", False)
+
+
+def test_unmounting_one_wiki_keeps_it_on_the_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """卸下挂载不把它从名单里拿走：知识库留着，只是不再算挂着。"""
+    two_site_plugins(tmp_path, monkeypatch)
+    wiki = {**TWO_WIKIS, "wikis": [dict(item) for item in TWO_WIKIS["wikis"]]}
+    wiki["wikis"][0] |= {"site": "huiji_game"}
+    wiki["wikis"][1] |= {"site": "bwiki_game"}
+    config_dir = write_deployment(tmp_path, wiki)
+    overrides = tmp_path / "overrides"
+    config = load_config(config_dir, overrides)
+
+    assert set_wiki_mounted(config, "bwiki", False) is False
+    config = load_config(config_dir, overrides)
+    assert [entry.id for entry in config.wikis] == ["huiji", "bwiki"]
+    assert disabled_wiki_ids(config) == {"bwiki"}
+    assert disabled_wiki_ids(config.for_wiki("huiji")) == {"bwiki"}
+    stored = yaml.safe_load((overrides / "core.wiki.yaml").read_text("utf-8"))
+    assert stored["wikis_disabled"] == ["bwiki"]
+    assert set_wiki_mounted(config, "bwiki", True) is True
+    assert not (overrides / "core.wiki.yaml").exists()
 
 
 def test_a_wiki_list_that_cannot_work_is_explained(tmp_path: Path) -> None:

@@ -174,6 +174,10 @@ export const api = {
     }),
   removeWiki: (id: string) =>
     del<{ removed: string; site_removed: boolean; status: Status }>(`/api/wikis/${seg(id)}`),
+  setWikiMounted: (id: string, mounted: boolean) =>
+    put<{ id: string; mounted: boolean; status: Status }>(`/api/wikis/${seg(id)}/mounted`, {
+      mounted,
+    }),
   buildWikiKb: (id: string) =>
     post<{ kb: WikiKbState; sync_alive: boolean }>(`/api/wikis/${seg(id)}/kb`),
   cancelWikiKb: (id: string) => del<{ kb: WikiKbState }>(`/api/wikis/${seg(id)}/kb`),
