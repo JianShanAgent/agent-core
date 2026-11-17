@@ -776,7 +776,7 @@ export default function Wikis() {
       toast.success(
         input.mounted
           ? `已挂上「${input.label}」，/查 会用它`
-          : `已卸下「${input.label}」。/查 和自动更新不再用它，知识库还在`,
+          : `已卸下「${input.label}」。/查、自动更新和回答都不再用它，库里的内容还留着`,
       );
       done();
     },
@@ -839,7 +839,7 @@ export default function Wikis() {
     <div className="flex flex-col gap-3">
       <PageHeader
         title="Wiki"
-        description="按平台看这台机器上的站点插件。挂载开关卸下以后，/查 和自动更新不再用那个 wiki，知识库留着。"
+        description="按平台看这台机器上的站点插件。卸下一个站点以后，/查、自动更新和回答都不再用它，包括已经入库的内容。库还留着，再挂上就恢复。"
       />
 
       {query.isPending ? (
@@ -1036,7 +1036,7 @@ export default function Wikis() {
             <>
               /查 不再查
               {asking.wikis.map((wiki) => wiki.label).join("、")}
-              ，自动更新也停。知识库里的内容还在，检索仍可能用到。再打开开关就挂回去，不用重新发布。
+              ，自动更新也停，回答也不再引用它已经入库的内容。内容还留在库里，再打开开关就恢复，不用重新发布。
               {asking.wikis.some((wiki) => wiki.primary)
                 ? "其中有主 wiki：对话和查证的说法仍用它的站点插件。"
                 : ""}

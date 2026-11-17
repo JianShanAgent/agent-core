@@ -139,7 +139,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             "primary": entry.id == disk.wikis[0].id,
             #: 在这里加的（能在这里移除）；不然是部署的配置文件里写的
             "added": entry.added,
-            #: 卸下挂载的仍在名单里，/查 和自动更新不用它，知识库留着
+            #: 卸下挂载的仍在名单里。/查、自动更新和回答都不用它，知识库留着
             "mounted": entry.id not in disabled_wiki_ids(disk),
             "platform": entry.platform.id,
             "site": _site_info(disk, entry.site) if entry.site is not None else None,
@@ -372,7 +372,8 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                     fail(
                         409,
                         f"「{wiki_id}」是部署的配置文件里写的，不能从名单里删掉。"
-                        "不想让机器人再用它，在站点列表里把它卸下：/查 和自动更新会停，知识库留着",
+                        "不想让机器人再用它，在站点列表里把它卸下："
+                        "/查、自动更新和回答都会停，已经入库的内容也不再引用，知识库留着",
                     )
                 fail(404, f"没有叫「{wiki_id}」的 wiki")
             rest = [item for item in stored if item is not target]

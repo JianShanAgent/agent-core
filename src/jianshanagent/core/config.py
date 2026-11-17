@@ -811,7 +811,7 @@ def _stored_added_wikis(path: Path) -> list[dict[str, Any]]:
 
 
 def disabled_wiki_ids(config: AppConfig) -> set[str]:
-    """卸下了挂载的 wiki 的 id。名单里还在，只是 /查 和自动更新不用它们。"""
+    """卸下了挂载的 wiki 的 id。名单和知识库都还在，/查、自动更新和回答都不用它们。"""
     raw = config.get(WIKI_FILE).get(WIKIS_DISABLED)
     if not isinstance(raw, list):
         return set()

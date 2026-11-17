@@ -21,13 +21,14 @@
 
 部署挂了几个 wiki 时，一个 wiki 一个 wiki 地找、各自判断认没认准，再合起来：同一张立绘两个 wiki
 上都有，放在一起比的话它们互为第二名、相似度挤在一起，就永远认不准了。有 wiki 认准了，
-就只返回认准的（每个 wiki 至多一张）；都没认准，返回各个 wiki 里最像的几张。
+就只返回认准的（每个 wiki 至多一张）；都没认准，返回各个 wiki 里最像的几张。卸下挂载的 wiki 不找。
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -130,10 +131,12 @@ class ImageSearch:
         store: ImageStore,
         embedder: EmbeddingClient,
         settings: ImageSettings | None = None,
+        exclude_wikis: Collection[str] = (),
     ):
         self.store = store
         self.embedder = embedder
         self.settings = settings or ImageSettings()
+        self.exclude_wikis = frozenset(exclude_wikis)
 
     async def aclose(self) -> None:
         await self.embedder.aclose()
@@ -173,6 +176,8 @@ class ImageSearch:
         if usable:
             vector = await self.embedder.embed_image(jpeg)
             for wiki in usable:
+                if wiki in self.exclude_wikis:
+                    continue
                 hits += await self._search_wiki(vector, wiki, limit)
             # 认准了的排前面；有认准的就只给认准的
             hits.sort(key=lambda hit: (not hit.sure, -hit.score, hit.image_id))

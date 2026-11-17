@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import quote, urlsplit
 
-from jianshanagent.core.config import WIKI_FILE, WIKIS, AppConfig, WikiEntry
+from jianshanagent.core.config import WIKI_FILE, WIKIS, AppConfig, WikiEntry, disabled_wiki_ids
 from jianshanagent.wiki_auth import WikiAuthStore
 
 #: 页面地址在站内的默认写法：``<站点>/wiki/<标题>``
@@ -54,8 +54,10 @@ def wiki_labels(config: AppConfig) -> dict[str, str]:
     """标出处用的叫法：wiki 的 id → 怎么称呼它。
 
     只挂了一个 wiki（或者一个都没挂）时是空的：内容都出自同一个地方，不用标。
+    卸下挂载的不算挂着。
     """
-    entries = config.wikis
+    disabled = disabled_wiki_ids(config)
+    entries = [entry for entry in config.wikis if entry.id not in disabled]
     if len(entries) < 2:
         return {}
     return {entry.id: str(entry.raw.get("label") or "").strip() or entry.id for entry in entries}

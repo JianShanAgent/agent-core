@@ -14,6 +14,7 @@
 只用关键词一路，照样返回 ``top_k`` 片；``RetrievalResult.mode`` 会说明这次用了哪几路。
 
 部署挂了几个 wiki 时，它们的切片在同一个库里，一起找、一起排，每片上标着出自哪个 wiki。
+卸下挂载的 wiki 不参与：名额由还挂着的补满，库里的内容留着，再挂上就又能被引用。
 各个 wiki 的向量不是同一批算的（换嵌入型号换到一半）时，只和指纹对得上的那些比。
 
 不做重排序：前 10 名直接交给大模型。
@@ -230,10 +231,13 @@ class Retriever:
         store: KnowledgeStore,
         embedder: EmbeddingClient | None,
         settings: RetrievalSettings | None = None,
+        exclude_wikis: Collection[str] = (),
     ):
         self.store = store
         self.embedder = embedder
         self.settings = settings or RetrievalSettings()
+        #: 卸下了挂载的 wiki。空的表示都挂着
+        self.exclude_wikis = frozenset(exclude_wikis)
         self._vectors: dict[str, Sequence[float]] = {}
         #: 嵌入接口刚出过错：到这个时刻（``time.monotonic``）之前不问它，原因记在 ``_embed_error``
         self._embed_off_until = 0.0
@@ -289,13 +293,19 @@ class Retriever:
         ``wiki``：这些标题是哪个 wiki 的页面（只在它的切片里挑）；不写就不分 wiki。
         """
         query = query.strip()
-        if not query or not titles or limit <= 0:
+        if not query or not titles or limit <= 0 or (wiki and wiki in self.exclude_wikis):
             return []
         wanted = limit + len(exclude)
+        left_out = self.exclude_wikis or None
         vector, _skipped = await self._query_vector(query)
         if vector is not None:
             hits = await self.store.vector_search(
-                vector, limit=wanted, titles=titles, wiki=wiki, fingerprint=self._fingerprint
+                vector,
+                limit=wanted,
+                titles=titles,
+                wiki=wiki,
+                fingerprint=self._fingerprint,
+                exclude_wikis=left_out,
             )
         else:
             hits = await self.store.keyword_search(
@@ -304,6 +314,7 @@ class Retriever:
                 max_df_ratio=self.settings.max_df_ratio,
                 titles=titles,
                 wiki=wiki,
+                exclude_wikis=left_out,
             )
         return [hit.chunk for hit in hits if hit.chunk.chunk_id not in exclude][:limit]
 
@@ -338,13 +349,19 @@ class Retriever:
         if not query:
             return RetrievalResult(hits=[], mode=MODE_NONE)
         vector, skipped = await self._query_vector(query)
+        left_out = self.exclude_wikis or None
         vector_hits = (
-            await self.store.vector_search(vector, limit=limit, fingerprint=self._fingerprint)
+            await self.store.vector_search(
+                vector, limit=limit, fingerprint=self._fingerprint, exclude_wikis=left_out
+            )
             if vector is not None
             else []
         )
         keyword_hits = await self.store.keyword_search(
-            extract_terms(query), limit=limit, max_df_ratio=settings.max_df_ratio
+            extract_terms(query),
+            limit=limit,
+            max_df_ratio=settings.max_df_ratio,
+            exclude_wikis=left_out,
         )
         hits = merge(
             vector_hits, keyword_hits, top_k=limit, keyword_slots=min(settings.keyword_slots, limit)

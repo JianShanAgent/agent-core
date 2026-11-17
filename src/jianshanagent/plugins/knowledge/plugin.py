@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from jianshanagent.core.config import AppConfig, disabled_wiki_ids
 from jianshanagent.core.embedding import EmbeddingClient, EmbeddingError, EmbeddingSettings
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.plugin import PluginContext
@@ -21,6 +22,14 @@ from jianshanagent.plugins.knowledge.store import PostgresKnowledgeStore
 logger = get_logger(__name__)
 
 TYPE_NAMES = {"entry": "条目", "announcement": "公告", "story": "剧情", "data": "数据"}
+
+
+def left_out_wikis(config: AppConfig) -> set[str]:
+    """回答时不引用的 wiki。卸下挂载的不算；主 wiki 卸下时，没标出处的旧内容也算它的。"""
+    disabled = set(disabled_wiki_ids(config))
+    if config.wikis and config.wikis[0].id in disabled:
+        disabled.add("")
+    return disabled
 
 
 def retrieval_settings(raw: dict[str, Any]) -> RetrievalSettings:
@@ -64,7 +73,11 @@ class KnowledgePlugin:
         except EmbeddingError as exc:
             # 嵌入配置有问题不该让机器人起不来：退回只用关键词
             logger.warning("knowledge_embedding_unavailable", error=str(exc))
-        ctx.register_service("knowledge", Retriever(PostgresKnowledgeStore(db), embedder, settings))
+        left_out = left_out_wikis(ctx.config)
+        ctx.register_service(
+            "knowledge",
+            Retriever(PostgresKnowledgeStore(db), embedder, settings, exclude_wikis=left_out),
+        )
         logger.info(
             "knowledge_retrieval_enabled",
             top_k=settings.top_k,
@@ -76,7 +89,8 @@ class KnowledgePlugin:
             return
         images = ImageSettings.from_config(ctx.plugin_config().get("images") or {})
         ctx.register_service(
-            "image_search", ImageSearch(PostgresImageStore(db), image_embedder, images)
+            "image_search",
+            ImageSearch(PostgresImageStore(db), image_embedder, images, exclude_wikis=left_out),
         )
         logger.info(
             "image_search_enabled",

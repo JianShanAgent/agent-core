@@ -37,6 +37,7 @@ from jianshanagent.plugins.knowledge.image_store import (
     PostgresImageStore,
 )
 from jianshanagent.plugins.knowledge.images import ImageSearch, ImageSettings
+from jianshanagent.plugins.knowledge.plugin import left_out_wikis
 from jianshanagent.plugins.knowledge.retrieval import RetrievalSettings, Retriever
 from jianshanagent.plugins.knowledge.settings import (
     is_primary,
@@ -280,6 +281,8 @@ def test_unmounting_one_wiki_keeps_it_on_the_list(
     assert [entry.id for entry in config.wikis] == ["huiji", "bwiki"]
     assert disabled_wiki_ids(config) == {"bwiki"}
     assert disabled_wiki_ids(config.for_wiki("huiji")) == {"bwiki"}
+    assert wiki_labels(config) == {}
+    assert left_out_wikis(config) == {"bwiki"}
     stored = yaml.safe_load((overrides / "core.wiki.yaml").read_text("utf-8"))
     assert stored["wikis_disabled"] == ["bwiki"]
     assert set_wiki_mounted(config, "bwiki", True) is True
@@ -536,6 +539,15 @@ async def test_chunks_of_several_wikis_share_one_table(store: KnowledgeStore) ->
     assert not info.has_vectors_of("别的")
     hits = await store.vector_search(unit(1), limit=5, fingerprint=FP)
     assert {h.chunk.wiki for h in hits} == {"huiji"}
+
+    # 卸下挂载的 wiki：检索不再引用它，内容还在库里
+    hidden = await store.vector_search(unit(1), limit=5, fingerprint=FP, exclude_wikis=["bwiki"])
+    assert {hit.chunk.wiki for hit in hidden} == {"huiji"}
+    hidden_words = await store.keyword_search(
+        ["山风"], limit=5, max_df_ratio=1.0, exclude_wikis=["bwiki"]
+    )
+    assert {hit.chunk.wiki for hit in hidden_words} == {"huiji"}
+    assert (await store.info()).chunks == 4
 
     # 从配置里拿掉了的 wiki：它的内容删掉
     assert await store.keep_only(["huiji"]) == 2

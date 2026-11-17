@@ -223,10 +223,12 @@ class KnowledgeStore(Protocol):
         titles: Sequence[str] | None = None,
         wiki: str | None = None,
         fingerprint: str | None = None,
+        exclude_wikis: Collection[str] | None = None,
     ) -> list[Hit]:
         """按向量相似度从高到低。``titles``：只在这些页面的切片里找；``wiki``：只在这个 wiki 里找。
 
         ``fingerprint``：只和用这个指纹算的向量比（各个 wiki 的向量可能不是同一批算的）。
+        ``exclude_wikis``：这些 wiki 的切片不参与（卸下了挂载的）。名额仍由剩下的补满。
         """
 
     async def keyword_search(
@@ -237,8 +239,12 @@ class KnowledgeStore(Protocol):
         max_df_ratio: float = 0.2,
         titles: Sequence[str] | None = None,
         wiki: str | None = None,
+        exclude_wikis: Collection[str] | None = None,
     ) -> list[Hit]:
-        """按关键词得分从高到低；一个查询词都不含的切片不返回。``titles``、``wiki`` 同上。"""
+        """按关键词得分从高到低；一个查询词都不含的切片不返回。
+
+        ``titles``、``wiki``、``exclude_wikis`` 和 :meth:`vector_search` 一样。
+        """
 
     async def outline(self, chunk_ids: Collection[str]) -> list[ChunkPlace]:
         """这些切片所在的页面的全部切片（不带正文），按页面、页内先后排。库里没有的 id 不管。"""
@@ -335,9 +341,19 @@ class MemoryKnowledgeStore:
                 self._df[term] = self._df.get(term, 0) + 1
         return len(gone)
 
-    def _within(self, chunk_id: str, titles: Sequence[str] | None, wiki: str | None) -> bool:
+    def _within(
+        self,
+        chunk_id: str,
+        titles: Sequence[str] | None,
+        wiki: str | None,
+        exclude_wikis: Collection[str] | None,
+    ) -> bool:
         chunk = self._chunks[chunk_id]
-        return (titles is None or chunk.title in titles) and (wiki is None or chunk.wiki == wiki)
+        return (
+            (titles is None or chunk.title in titles)
+            and (wiki is None or chunk.wiki == wiki)
+            and (not exclude_wikis or chunk.wiki not in exclude_wikis)
+        )
 
     async def vector_search(
         self,
@@ -347,11 +363,12 @@ class MemoryKnowledgeStore:
         titles: Sequence[str] | None = None,
         wiki: str | None = None,
         fingerprint: str | None = None,
+        exclude_wikis: Collection[str] | None = None,
     ) -> list[Hit]:
         scored = [
             (dot(vector, v), chunk_id)
             for chunk_id, v in self._vectors.items()
-            if self._within(chunk_id, titles, wiki)
+            if self._within(chunk_id, titles, wiki, exclude_wikis)
             and (fingerprint is None or self._fingerprints[chunk_id] == fingerprint)
         ]
         scored.sort(key=lambda item: (-item[0], item[1]))
@@ -365,11 +382,12 @@ class MemoryKnowledgeStore:
         max_df_ratio: float = 0.2,
         titles: Sequence[str] | None = None,
         wiki: str | None = None,
+        exclude_wikis: Collection[str] | None = None,
     ) -> list[Hit]:
         weights = term_weights(terms, self._df, len(self._chunks), max_df_ratio=max_df_ratio)
         scored = []
         for chunk_id, have in self._terms.items():
-            if not self._within(chunk_id, titles, wiki):
+            if not self._within(chunk_id, titles, wiki, exclude_wikis):
                 continue
             score = sum(weight for term, weight in weights.items() if term in have)
             if score > 0:
@@ -428,6 +446,7 @@ SELECT {_COLUMNS}, -(c.embedding <#> q.v) AS score
 FROM kb_chunks c, q
 WHERE c.embedding IS NOT NULL AND ($3::text[] IS NULL OR c.title = ANY($3::text[]))
   AND ($4::text IS NULL OR c.wiki = $4) AND ($5::text IS NULL OR c.fingerprint = $5)
+  AND ($6::text[] IS NULL OR c.wiki <> ALL($6::text[]))
 ORDER BY c.embedding <#> q.v, c.chunk_id
 LIMIT $2
 """
@@ -440,6 +459,7 @@ scored AS (
     SELECT k.chunk_id, sum(q.weight) AS score
     FROM q JOIN kb_chunks k ON k.terms @> ARRAY[q.term]
     WHERE ($4::text[] IS NULL OR k.title = ANY($4::text[])) AND ($5::text IS NULL OR k.wiki = $5)
+      AND ($6::text[] IS NULL OR k.wiki <> ALL($6::text[]))
     GROUP BY k.chunk_id
     ORDER BY score DESC, k.chunk_id
     LIMIT $3
@@ -633,6 +653,7 @@ class PostgresKnowledgeStore:
         titles: Sequence[str] | None = None,
         wiki: str | None = None,
         fingerprint: str | None = None,
+        exclude_wikis: Collection[str] | None = None,
     ) -> list[Hit]:
         rows = await self._db.pool.fetch(
             _VECTOR_SEARCH,
@@ -641,6 +662,7 @@ class PostgresKnowledgeStore:
             list(titles) if titles else None,
             wiki,
             fingerprint,
+            list(exclude_wikis) if exclude_wikis else None,
         )
         return [Hit(_chunk(row), float(row["score"])) for row in rows]
 
@@ -652,6 +674,7 @@ class PostgresKnowledgeStore:
         max_df_ratio: float = 0.2,
         titles: Sequence[str] | None = None,
         wiki: str | None = None,
+        exclude_wikis: Collection[str] | None = None,
     ) -> list[Hit]:
         wanted = sorted(set(terms))
         if not wanted:
@@ -673,6 +696,7 @@ class PostgresKnowledgeStore:
             max(limit, KEYWORD_POOL),
             list(titles) if titles else None,
             wiki,
+            list(exclude_wikis) if exclude_wikis else None,
         )
         return _best_by_bm25((_chunk(row) for row in rows), weights, info.average_chars, limit)
 
