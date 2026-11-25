@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -6,8 +7,10 @@ from typing import Any
 import httpx
 import pytest
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from deployment import FULL_CONFIG_DIR
+from jianshanagent.core import trace
 from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.llm import (
     LLMClient,
@@ -19,6 +22,10 @@ from jianshanagent.core.llm import (
     tool_result_message,
     user_message,
 )
+from jianshanagent.core.messages import ChatScope, InboundMessage
+from jianshanagent.core.trace import LLMCall
+from jianshanagent.plugins.research.analysis import Analysis
+from jianshanagent.plugins.research.workflow import Decision, Fixed, Verdict
 
 
 def _settings(**overrides: Any) -> LLMSettings:
@@ -210,11 +217,14 @@ async def test_retries_on_429_then_succeeds() -> None:
         ]
     )
     client = _client(handler)
+    calls: list[LLMCall] = []
+    client.on_call = calls.append
     result = await client.chat([user_message("x")])
     await client.aclose()
 
     assert result.content == "ok"
     assert len(bodies) == 3
+    assert [call.retry_count for call in calls] == [2]
 
 
 async def test_gives_up_after_max_retries() -> None:
@@ -310,11 +320,216 @@ async def test_a_200_that_is_not_a_model_reply_counts_as_a_failed_call() -> None
     assert (timeout.connect, timeout.read) == (10.0, 150.0)
 
 
-async def test_content_moderation_block() -> None:
-    client = _client(lambda _r: httpx.Response(421, text="blocked"))
-    with pytest.raises(LLMContentBlocked):
-        await client.chat([user_message("x")])
-    await client.aclose()
+@pytest.mark.parametrize("status", [200, 421])
+async def test_content_moderation_block_retries_three_times_without_releasing_content(
+    status: int,
+) -> None:
+    response = (
+        httpx.Response(421, text="blocked")
+        if status == 421
+        else httpx.Response(
+            200,
+            json=_reply(
+                {"role": "assistant", "content": '{"ok": true}'},
+                finish="content_filter",
+                usage={"prompt_tokens": 20, "prompt_tokens_details": {"cached_tokens": 5}},
+            ),
+        )
+    )
+    bodies, _, handler = _recorder([response] * 4)
+    client = _client(handler)
+    calls: list[LLMCall] = []
+    client.on_call = calls.append
+    try:
+        with pytest.raises(LLMContentBlocked) as exc:
+            await client.chat_json([user_message("只返回 JSON")], Verdict)
+    finally:
+        await client.aclose()
+
+    assert exc.value.status == status and not exc.value.retryable
+    assert len(bodies) == len(calls) == 4 and all(body == bodies[0] for body in bodies)
+    assert [call.retry_count for call in calls] == [0, 1, 1, 1]
+    for call in calls:
+        assert not call.ok and call.finish_reason == "content_filter" and call.response is None
+        assert (call.prompt_tokens, call.cached_tokens) == ((20, 5) if status == 200 else (0, 0))
+
+
+@pytest.mark.parametrize("status", [200, 421])
+async def test_content_block_diagnostics_pair_upstream_ids_without_logging_payloads(
+    status: int,
+) -> None:
+    if status == 421:
+        blocked = httpx.Response(
+            421, json={"error": {"request_id": "req-block", "message": "not-for-diagnostics"}}
+        )
+    else:
+        blocked = httpx.Response(
+            200,
+            json={
+                **_reply({"content": "not-for-diagnostics"}, finish="content_filter"),
+                "id": "cmp-block",
+            },
+            headers={"X-Request-Id": "req-block", "Set-Cookie": "do-not-log-cookie"},
+        )
+    success = httpx.Response(
+        200,
+        json={**_reply({"content": '{"ok": true}'}), "id": "cmp-ok"},
+        headers={"X-MiMo-Request-Id": "req-ok"},
+    )
+    _, _, handler = _recorder([blocked, success])
+    client = _client(handler)
+    tracer = trace.Tracer()
+    record = tracer.begin(
+        InboundMessage(
+            message_id="diagnostic",
+            chat_scope=ChatScope.C2C,
+            chat_id="test",
+            user_id="test",
+            content="do-not-log-user-text",
+        )
+    )
+    try:
+        with capture_logs() as logs, trace.span("review", "复核"):
+            result = await client.chat_json([user_message("do-not-log-user-text")], Verdict)
+    finally:
+        tracer.finish(record)
+        await client.aclose()
+    assert result.ok
+    blocked_log, retry, recovered = [
+        row for row in logs if row["event"].startswith("llm_content_block")
+    ]
+    assert [row["event"] for row in (blocked_log, retry, recovered)] == [
+        "llm_content_blocked",
+        "llm_content_block_retry",
+        "llm_content_block_retry_succeeded",
+    ]
+    assert (
+        blocked_log["retry_group_id"]
+        and len({row["retry_group_id"] for row in (blocked_log, retry, recovered)}) == 1
+    )
+    assert all(
+        row["stage"] == "review" and row["trace_id"] == record.id
+        for row in (blocked_log, retry, recovered)
+    )
+    assert (
+        blocked_log["attempt"],
+        blocked_log["http_status"],
+        blocked_log["provider_request_id"],
+    ) == (0, status, "req-block")
+    assert blocked_log["finish_reason"] == ("content_filter" if status == 200 else None)
+    assert blocked_log["provider_response_id"] == ("cmp-block" if status == 200 else None)
+    assert (recovered["attempt"], recovered["http_status"], recovered["finish_reason"]) == (
+        1,
+        200,
+        "stop",
+    )
+    assert (recovered["provider_request_id"], recovered["provider_response_id"]) == (
+        "req-ok",
+        "cmp-ok",
+    )
+    assert not any(
+        text in repr(logs)
+        for text in (
+            "do-not-log-user-text",
+            "not-for-diagnostics",
+            "do-not-log-cookie",
+            "tp-test",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema", "answer"),
+    [
+        (None, "正常答复"),
+        (Analysis, "{}"),
+        (Decision, "{}"),
+        (Verdict, '{"ok":true}'),
+        (Fixed, "{}"),
+    ],
+)
+async def test_content_block_can_recover_in_every_stage_with_the_same_request(
+    schema: type[BaseModel] | None,
+    answer: str,
+) -> None:
+    bodies, _, handler = _recorder(
+        [
+            *[httpx.Response(421)] * 3,
+            httpx.Response(200, json=_reply({"content": answer})),
+        ]
+    )
+    client = _client(handler)
+    calls: list[LLMCall] = []
+    client.on_call = calls.append
+    messages = [user_message("同一份提示词和资料")]
+    try:
+        if schema is not None:
+            result = await client.chat_json(messages, schema)
+            assert isinstance(result, schema)
+        else:
+            tools = [function_tool("wiki_get", "查条目", {"type": "object"})]
+            assert (await client.chat(messages, tools=tools)).content == answer
+    finally:
+        await client.aclose()
+    assert len(bodies) == 4 and all(body == bodies[0] for body in bodies)
+    assert [call.retry_count for call in calls] == [0, 1, 1, 1]
+    assert [call.ok for call in calls] == [False, False, False, True]
+
+
+async def test_block_retry_does_not_multiply_http_retries_or_rewrite_invalid_json() -> None:
+    bodies, _, handler = _recorder(
+        [
+            httpx.Response(421),
+            httpx.Response(503),
+            httpx.Response(200, json=_reply({"content": '{"missing": "ok"}'})),
+            httpx.Response(503),
+        ]
+    )
+    client = _client(handler)
+    try:
+        with pytest.raises(LLMContentBlocked):
+            await client.chat_json([user_message("同一份资料")], Verdict)
+    finally:
+        await client.aclose()
+    assert len(bodies) == 4 and all(body == bodies[0] for body in bodies)
+
+
+async def test_block_followed_by_timeout_stays_blocked_and_does_not_overrun() -> None:
+    sent = 0
+
+    async def handle(_request: httpx.Request) -> httpx.Response:
+        nonlocal sent
+        sent += 1
+        if sent == 1:
+            return httpx.Response(421)
+        await asyncio.sleep(30)
+        raise AssertionError("retry overran its deadline")
+
+    client = LLMClient(_settings(), transport=httpx.MockTransport(handle))
+    try:
+        with pytest.raises(LLMContentBlocked):
+            await client.chat(
+                [user_message("同一份资料")], deadline=asyncio.get_running_loop().time() + 0.15
+            )
+    finally:
+        await client.aclose()
+    assert sent == 2
+
+
+@pytest.mark.parametrize("schema", [Decision, Verdict])
+async def test_research_normalizes_unambiguous_source_numbers_without_retry(
+    schema: type[Decision] | type[Verdict],
+) -> None:
+    body = _reply({"content": '{"ok": false, "problems": ["问题"], "sources": ["资料 2", 3, "4"]}'})
+    requests, _, handler = _recorder([httpx.Response(200, json=body)])
+    client = _client(handler)
+    try:
+        result = await client.chat_json([user_message("只返回 JSON")], schema)
+    finally:
+        await client.aclose()
+    assert result.sources == [2, 3, 4] and len(requests) == 1
+    if isinstance(result, Verdict):
+        assert result.ok is False and result.problems == ["问题"]
 
 
 class _Slots(BaseModel):
@@ -333,9 +548,14 @@ async def test_chat_json_validates_and_retries_with_error_feedback() -> None:
         ]
     )
     client = _client(handler)
-    slots = await client.chat_json([user_message("只返回 JSON：name, rarity")], _Slots)
+    calls: list[LLMCall] = []
+    client.on_call = calls.append
+    slots = await client.chat_json(
+        [user_message("只返回 JSON：name, rarity")], _Slots, retrying=True
+    )
     await client.aclose()
 
+    assert [call.retry_count for call in calls] == [1, 1]  # 阶段重试、JSON 重试各一次
     assert slots == _Slots(name="山风", rarity="SSR")
     assert bodies[0]["response_format"] == {"type": "json_object"}
     retry_messages = bodies[1]["messages"]

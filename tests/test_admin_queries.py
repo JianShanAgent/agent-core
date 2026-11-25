@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from asyncpg import CheckViolationError
 
 from jianshanagent.admin.queries import (
     CHAT_DAYS,
@@ -94,8 +95,8 @@ def _call(record: Trace | None, purpose: str, profile: str, **fields: Any) -> LL
         model="mimo-test",
         thinking=profile in {"reason", "review"},
         ok=fields.pop("ok", True),
-        finish_reason="stop",
-        prompt_tokens=1000,
+        finish_reason=fields.pop("finish_reason", "stop"),
+        prompt_tokens=fields.pop("prompt_tokens", 1000),
         completion_tokens=100,
         reasoning_tokens=60,
         purpose=purpose,
@@ -246,6 +247,82 @@ async def test_overview_traces_and_calls(db: Database) -> None:
     assert await queries.trace(rejected.id) is None
     assert not [c for c in await queries.calls(limit=100) if c["trace_id"] == rejected.id]
     assert await queries.trace(command.id) is not None
+
+
+async def test_overview_retry_coverage_cached_input_and_content_blocks(db: Database) -> None:
+    store, queries = PostgresTraceStore(db), AdminQueries(db)
+    channel = f"t{uuid.uuid4().hex[:8]}"
+    profile = f"test-{uuid.uuid4().hex}"
+    record = _trace(channel, "查证", route="research", seconds=7.0)
+    await store.save_trace(record)
+
+    # 模拟老版本的 INSERT：不写 retry_count，而且 HTTP 200 的内容拦截仍标为 ok。
+    for purpose, finish_reason, prompt, cached in (
+        ("analyst", "content_filter", 150, 50),
+        ("review", "stop", 90, 0),
+    ):
+        await db.pool.execute(
+            "INSERT INTO llm_calls (trace_id, started_at, seconds, purpose, profile, model, "
+            "thinking, ok, finish_reason, prompt_tokens, cached_tokens) "
+            "VALUES ($1, $2, 1, $3, $4, 'mimo-test', false, true, $5, $6, $7)",
+            record.id,
+            record.started_at,
+            purpose,
+            profile,
+            finish_reason,
+            prompt,
+            cached,
+        )
+    for call in (
+        _call(
+            record,
+            "analyst",
+            profile,
+            ok=False,
+            finish_reason="content_filter",
+            retry_count=3,
+            prompt_tokens=120,
+            cached_tokens=100,
+        ),
+        _call(record, "analyst", profile, ok=False, retry_count=2, prompt_tokens=0),
+        _call(record, "fix", profile, retry_count=0, prompt_tokens=200, cached_tokens=200),
+    ):
+        await store.save_call(call)
+    with pytest.raises(CheckViolationError):
+        await store.save_call(_call(record, "fix", profile, retry_count=-1))
+
+    since = datetime.now(UTC) - timedelta(hours=1)
+    stats = await queries.overview(since, channel=channel, daily=False)
+    assert (stats["totals"]["llm_calls"], stats["totals"]["llm_failed"]) == (5, 2)
+
+    def counters(row: dict[str, Any]) -> tuple[int, int, int, int, int, int | None, int]:
+        return (
+            row["calls"], row["failed"], row["blocked"], row["cached_tokens"],
+            row["uncached_tokens"], row["retries"], row["retry_tracked_calls"],
+        )  # fmt: skip
+
+    assert {row["purpose"]: counters(row) for row in stats["purposes"]} == {
+        "analyst": (3, 1, 2, 150, 120, 5, 2),
+        "review": (1, 0, 0, 0, 90, None, 0),
+        "fix": (1, 0, 0, 200, 0, 0, 1),
+    }
+    assert {row["profile"]: counters(row) for row in stats["profiles"]} == {
+        profile: (5, 1, 2, 350, 210, 5, 3),
+    }
+
+    detail = await queries.trace(record.id)
+    assert detail is not None
+    assert [row["retry_count"] for row in detail["calls"]] == [None, None, 3, 2, 0]
+    # 模型调用的问题筛选应同时找出普通失败和两种历史/新式的拦截。
+    problems = await queries.calls(limit=10, profile=profile, failed_only=True)
+    assert [(row["ok"], row["finish_reason"], row["retry_count"]) for row in problems] == [
+        (False, "stop", 2),
+        (False, "content_filter", 3),
+        (True, "content_filter", None),
+    ]
+    full = await queries.call(problems[1]["id"])
+    assert full is not None
+    assert (full["retry_count"], full["finish_reason"]) == (3, "content_filter")
 
 
 async def test_sessions_memories_chatlog_and_labels(db: Database) -> None:

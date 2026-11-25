@@ -61,9 +61,9 @@ class PostgresTraceStore:
         await self._db.pool.execute(
             "INSERT INTO llm_calls (trace_id, step_id, started_at, seconds, purpose, profile, "
             "model, thinking, ok, finish_reason, error, prompt_tokens, completion_tokens, "
-            "reasoning_tokens, cached_tokens, tool_calls, request, response) "
+            "reasoning_tokens, cached_tokens, tool_calls, request, response, retry_count) "
             "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, "
-            "$17::jsonb, $18::jsonb)",
+            "$17::jsonb, $18::jsonb, $19)",
             call.trace_id,
             call.step_id,
             call.started_at,
@@ -82,6 +82,7 @@ class PostgresTraceStore:
             call.tool_calls,
             _json(call.request) if call.request is not None else None,
             _json(call.response) if call.response is not None else None,
+            call.retry_count,
         )
 
     async def erase_user(self, session_key: str, user_id: str) -> int:

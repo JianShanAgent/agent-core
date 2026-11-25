@@ -9,6 +9,9 @@ import type {
   ConfigState,
   ConfigValues,
   ImageSearchHit,
+  IntegrationApp,
+  IntegrationUsage,
+  IntegrationUsageRange,
   KbChunk,
   KbChunkRow,
   KbImage,
@@ -121,6 +124,16 @@ export const api = {
   session: () => get<{ authenticated: boolean; locked_seconds: number }>("/api/session"),
   login: (token: string) => post<{ authenticated: boolean }>("/api/login", { token }),
   logout: () => post<{ authenticated: boolean }>("/api/logout"),
+
+  integrations: () => get<{ managed: boolean; apps: IntegrationApp[] }>("/api/integrations"),
+  createIntegration: (body: { app_id: string; name: string }) =>
+    post<{ app: IntegrationApp; token: string }>("/api/integrations", body),
+  updateIntegration: (appId: string, body: { name?: string; enabled?: boolean }) =>
+    request<{ app: IntegrationApp }>("PATCH", `/api/integrations/${seg(appId)}`, body),
+  rotateIntegrationToken: (appId: string) =>
+    post<{ app: IntegrationApp; token: string }>(`/api/integrations/${seg(appId)}/rotate`),
+  integrationUsage: (window: IntegrationUsageRange, appId?: string) =>
+    get<IntegrationUsage>("/api/integrations/usage", { ...window, app_id: appId }),
 
   overview: (hours: number, channel?: string) => get<Overview>("/api/overview", { hours, channel }),
   status: () => get<Status>("/api/status"),

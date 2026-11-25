@@ -28,6 +28,7 @@ import httpx
 from jianshanagent.core.config import AppConfig
 from jianshanagent.core.images import jpeg_data_uri
 from jianshanagent.core.logging import get_logger
+from jianshanagent.core.usage import embedding_usage, metered_post
 
 logger = get_logger(__name__)
 
@@ -201,7 +202,14 @@ class EmbeddingClient:
             if attempt:
                 await asyncio.sleep(self._retry_base_seconds * 2 ** (attempt - 1))
             try:
-                resp = await self._client.post("/embeddings", json=body)
+                resp = await metered_post(
+                    self._client,
+                    "/embeddings",
+                    body=body,
+                    kind="embedding",
+                    model=self.provider.model,
+                    read_usage=embedding_usage,
+                )
             except httpx.HTTPError as exc:
                 last_error = EmbeddingError(f"嵌入请求失败：{exc!r}", retryable=True)
                 continue

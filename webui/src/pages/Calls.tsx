@@ -38,11 +38,18 @@ const FINISH_NOTES: Record<string, { text: string; hint: string }> = {
   },
   content_filter: {
     text: "被内容审核拦下",
-    hint: "结束原因 content_filter：输出被接口的内容审核拦下了。",
+    hint: "结束原因 content_filter：模型请求或输出被接口的内容审核拦下了。",
   },
 };
 
 function Result({ call }: { call: LlmCall }) {
+  if (call.finish_reason === "content_filter") {
+    return (
+      <Hint text={FINISH_NOTES.content_filter.hint}>
+        <Badge tone="warning">{FINISH_NOTES.content_filter.text}</Badge>
+      </Hint>
+    );
+  }
   if (!call.ok) {
     return (
       // 限着宽度：报错的话可能很长，不限的话这一列会把别的列都挤窄
@@ -231,7 +238,7 @@ export default function Calls() {
               })),
             ]}
           />
-          <Hint text="报错、超时的，以及返回了但不是正常写完的（输出被截断、接口中途放弃）">
+          <Hint text="包括报错、超时、内容拦截、输出被截断或接口中途放弃">
             <label className="flex cursor-pointer items-center gap-2 text-sm">
               <Switch
                 checked={filters.failed}

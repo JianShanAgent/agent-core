@@ -86,8 +86,11 @@ export function CallMeta({ call }: { call: LlmCall }) {
         输入 {formatNumber(call.prompt_tokens)} · 输出 {formatNumber(call.completion_tokens)}
         {call.reasoning_tokens ? `（思考 ${formatNumber(call.reasoning_tokens)}）` : ""}
         {call.cached_tokens ? ` · 缓存命中 ${formatNumber(call.cached_tokens)}` : ""}
+        {call.retry_count == null ? " · 重试未追踪" : ` · 重试 ${formatNumber(call.retry_count)} 次`}
       </span>
-      {call.ok && call.finish_reason && !["stop", "tool_calls"].includes(call.finish_reason) ? (
+      {call.finish_reason === "content_filter" ? (
+        <Badge tone="warning">被内容审核拦下</Badge>
+      ) : call.ok && call.finish_reason && !["stop", "tool_calls"].includes(call.finish_reason) ? (
         <Badge tone="warning">结束原因 {call.finish_reason}</Badge>
       ) : null}
     </div>

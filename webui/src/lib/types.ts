@@ -63,6 +63,53 @@ export interface Status {
   config: ConfigState;
 }
 
+export interface IntegrationApp {
+  app_id: string;
+  name: string;
+  enabled: boolean;
+  created_at: string | null;
+  last_request_at: string | null;
+}
+
+interface IntegrationUsageCounts {
+  unknown_calls: number;
+  unknown_search_tokens: number;
+  unknown_searches: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+  embedding_tokens: number | null;
+  search_tokens: number | null;
+  searches: number | null;
+}
+
+export interface IntegrationAppUsage extends IntegrationUsageCounts {
+  app_id: string;
+  requests: number;
+  model_calls: number;
+}
+
+export interface IntegrationModelUsage extends IntegrationUsageCounts {
+  app_id: string;
+  kind: "llm" | "embedding" | "search";
+  model: string;
+  calls: number;
+}
+
+export interface IntegrationUsage {
+  from: string;
+  to: string;
+  timezone: string;
+  tracking_since: string | null;
+  apps: IntegrationAppUsage[];
+  models: IntegrationModelUsage[];
+}
+
+export type IntegrationUsageRange =
+  | { range: "today" | "7d" | "30d" }
+  | { from: string; to: string };
+
 /** 一条处理记录在列表里的样子 */
 export interface TraceRow {
   id: string;
@@ -153,6 +200,8 @@ export interface LlmCall {
   reasoning_tokens: number;
   cached_tokens: number;
   tool_calls: number;
+  /** null = 未追踪；0 = 已追踪，未重发。 */
+  retry_count: number | null;
   has_detail: boolean;
 }
 
@@ -197,9 +246,15 @@ export interface SeriesPoint {
 export interface UsageRow {
   calls: number;
   failed: number;
+  blocked: number;
   prompt_tokens: number;
   completion_tokens: number;
   reasoning_tokens: number;
+  cached_tokens: number;
+  uncached_tokens: number;
+  /** 只合计有追踪的调用；全部未追踪时为 null。 */
+  retries: number | null;
+  retry_tracked_calls: number;
   avg_seconds: number | null;
   p90_seconds: number | null;
 }

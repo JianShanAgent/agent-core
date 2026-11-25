@@ -57,6 +57,11 @@ note() { # 记一笔切换，以后查「什么时候从哪个版本换到哪个
 
 ctl() { (cd "$ROOT" && ./ctl "$@") </dev/null; }
 
+# 一旦开始用数据库鉴权，就不自动重启不认识停用/轮换状态的旧版本。
+managed_http_release() {
+  [[ -n $1 && -f "$ROOT/releases/$1/components/core/src/jianshanagent/migrations/0012_integrations.sql" ]]
+}
+
 # 用 current 指向的发布起栈。--wait：等有健康检查的服务都变成 healthy 才算成功
 bring_up() { ctl up -d --remove-orphans --wait --wait-timeout "$WAIT_SECONDS"; }
 
@@ -100,6 +105,16 @@ activate() {
   check_compose "$rel" || die "发布 $rel 的 Compose 文件过不了检查（见上面的报错），没有切换，线上没动"
 
   previous=$(linked_release current)
+  local marker="$ROOT/shared/.managed-http-auth"
+  if managed_http_release "$previous" && [ -f "$ROOT/releases/$previous/config/gateway.http.yaml" ]; then
+    (umask 077; touch "$marker")
+  fi
+  if [ -f "$marker" ] && ! managed_http_release "$rel"; then
+    die "已使用数据库管理第三方令牌，拒绝直接启动旧鉴权版本 $rel；请先关闭公网聊天入口并人工回滚"
+  fi
+  if managed_http_release "$rel" && [ -f "$ROOT/releases/$rel/config/gateway.http.yaml" ]; then
+    (umask 077; touch "$marker")
+  fi
   if [ -n "$previous" ] && [ "$previous" != "$rel" ]; then
     quiesce
   fi
@@ -122,6 +137,11 @@ activate() {
   if [ -z "$previous" ] || [ "$previous" = "$rel" ] || [ ! -d "$ROOT/releases/$previous" ]; then
     note "from=${previous:-none} to=$rel result=failed"
     die "没有可以切回去的上一个发布，current 仍指向 ${rel}，需要人来处理"
+  fi
+  if [ -f "$marker" ] && ! managed_http_release "$previous"; then
+    ctl stop qqbot || true
+    note "from=$previous to=$rel result=unsafe_rollback_blocked"
+    die "已阻止回退到旧鉴权版本 $previous；请先关闭公网聊天入口再人工恢复"
   fi
   echo "切回上一个发布 ${previous}……" >&2
   point current "$previous"

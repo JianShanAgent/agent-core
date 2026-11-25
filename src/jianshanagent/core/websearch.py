@@ -30,6 +30,7 @@ import httpx
 from jianshanagent.core.clock import now_text
 from jianshanagent.core.config import AppConfig
 from jianshanagent.core.logging import get_logger
+from jianshanagent.core.usage import gitee_search_usage, metered_post, mimo_search_usage
 
 logger = get_logger(__name__)
 
@@ -218,12 +219,22 @@ class WebSearchClient:
         await self._client.aclose()
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        model = self.settings.model if self.settings.provider == "mimo" else self.settings.provider
+        read_usage = mimo_search_usage if self.settings.provider == "mimo" else gitee_search_usage
         last_error: WebSearchError | None = None
         for attempt in range(self.settings.max_retries + 1):
             if attempt:
                 await asyncio.sleep(self._retry_base_seconds * 2 ** (attempt - 1))
             try:
-                resp = await self._client.post(path, json=body)
+                resp = await metered_post(
+                    self._client,
+                    path,
+                    body=body,
+                    kind="search",
+                    model=model,
+                    read_usage=read_usage,
+                    usage_only_on_success=self.settings.provider != "mimo",
+                )
             except httpx.HTTPError as exc:
                 last_error = WebSearchError(f"联网搜索请求失败：{exc!r}", retryable=True)
                 continue

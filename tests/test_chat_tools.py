@@ -18,7 +18,7 @@ from deployment import FULL_CONFIG_DIR
 from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.conversation import MemoryConversationStore
 from jianshanagent.core.links import strip_unknown_links, urls_in, urls_in_result
-from jianshanagent.core.llm import LLMError, LLMResult, LLMUsage, ToolCall
+from jianshanagent.core.llm import LLMContentBlocked, LLMError, LLMResult, LLMUsage, ToolCall
 from jianshanagent.core.media import MediaError
 from jianshanagent.core.messages import ChatScope, ImageRef, InboundMessage, OutboundMessage
 from jianshanagent.core.plugin import PluginContext, erase_user_data
@@ -54,7 +54,7 @@ class ScriptedLLM:
         self,
         replies: Sequence[Reply],
         decisions: list[Any] | None = None,
-        verdicts: list[Verdict] | None = None,
+        verdicts: list[Verdict | Exception] | None = None,
     ):
         self.settings = SimpleNamespace(history_max_turns=5, history_idle_seconds=7200)
         self.replies = list(replies)
@@ -63,14 +63,26 @@ class ScriptedLLM:
         self.verdicts = list(verdicts or [])
         self.analyst_prompts: list[str] = []
 
-    async def chat(self, messages: Any, *, profile: str, tools: Any = None) -> LLMResult:
-        self.requests.append({"messages": list(messages), "tools": tools})
-        reply = self.replies.pop(0)
-        if reply is HANG:
-            await asyncio.sleep(3600)
-        if isinstance(reply, Exception):
-            raise reply
-        content, calls = reply
+    @staticmethod
+    async def _resolve(item: Any, deadline: float | None) -> Any:
+        if item is HANG:
+            assert deadline is not None, "a hanging model must have a deadline"
+            async with asyncio.timeout_at(deadline):
+                await asyncio.sleep(3600)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def chat(
+        self,
+        messages: Any,
+        *,
+        profile: str,
+        tools: Any = None,
+        deadline: float | None = None,
+    ) -> LLMResult:
+        self.requests.append({"messages": list(messages), "tools": tools, "deadline": deadline})
+        content, calls = await self._resolve(self.replies.pop(0), deadline)
         message: dict[str, Any] = {"role": "assistant", "content": content}
         if calls:
             message["tool_calls"] = [
@@ -92,15 +104,21 @@ class ScriptedLLM:
         )
 
     async def chat_json(
-        self, messages: Any, schema: Any, *, profile: str, attempts: int = 2
+        self,
+        messages: Any,
+        schema: Any,
+        *,
+        profile: str,
+        attempts: int = 2,
+        retrying: bool = False,
+        deadline: float | None = None,
     ) -> Any:
         if schema is Verdict:
-            return self.verdicts.pop(0) if self.verdicts else Verdict(ok=True)
-        self.analyst_prompts.append(messages[0]["content"])
-        item = self.decisions.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
+            item = self.verdicts.pop(0) if self.verdicts else Verdict(ok=True)
+        else:
+            self.analyst_prompts.append(messages[0]["content"])
+            item = self.decisions.pop(0)
+        return await self._resolve(item, deadline)
 
 
 class KnowledgeBase:
@@ -115,7 +133,7 @@ class KnowledgeBase:
 def _setup(
     replies: Sequence[Reply],
     decisions: list[Any] | None = None,
-    verdicts: list[Verdict] | None = None,
+    verdicts: list[Verdict | Exception] | None = None,
     services: dict[str, Any] | None = None,
     **overrides: float,
 ) -> tuple[Any, ScriptedLLM, MemoryConversationStore, list[str]]:
@@ -288,14 +306,32 @@ async def test_empty_entry_reply_is_handed_to_research() -> None:
     assert [m["role"] for m in await store.history("c2c:c1")] == ["user", "assistant"]
 
 
+async def test_blocked_review_names_the_stage_without_sending_or_saving_the_draft() -> None:
+    blocked = LLMContentBlocked("拦截", status=200)
+    blocked.stage = "review"
+    draft = "没有通过复核的草稿"
+    handler, _llm, store, _ = _setup(
+        [("", [ASK])], [Decision(answer=draft, sources=[1])], [blocked]
+    )
+    reply = await handler(_message()[0])
+
+    assert reply is not None
+    assert "结论复核阶段" in reply.content and "平台审核拦截" in reply.content
+    assert "换个问法" not in reply.content and draft not in reply.content
+    assert await store.history("c2c:c1") == []
+
+
 async def test_entry_model_that_hangs_is_bypassed_when_research_is_available() -> None:
     # 对话模型卡住不返回：不干等，直接交给查证
     handler, llm, _store, _ = _setup(
         [HANG], [Decision(answer="3 日开", sources=[1])], entry_timeout_seconds=0.01
     )
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     reply = await handler(_message()[0])
     assert reply is not None and reply.content.startswith("3 日开")
     assert "用户的问题：\n问题\n" in llm.analyst_prompts[0]
+    assert started < llm.requests[0]["deadline"] <= loop.time()
 
     # 没有查证工作流可交：回「有点忙」
     handler, _llm, store, _ = _setup([HANG], entry_timeout_seconds=0.01)
@@ -452,6 +488,8 @@ async def test_model_that_refuses_images_is_asked_again_without_them() -> None:
 
     assert reply is not None and reply.content == "是「花合战」皮肤"
     first, second = (request["messages"][1]["content"] for request in llm.requests)
+    deadline = llm.requests[0]["deadline"]
+    assert deadline is not None and llm.requests[1]["deadline"] == deadline
     assert first[0]["type"] == "image_url"
     assert second == "这是哪个皮肤（用户发了 1 张图片，你看不到，图片已交给 research 识别）"
     assert research.calls[0]["images"] == [FIRST]  # 模型看不了，原图照样交给查证
@@ -461,6 +499,22 @@ async def test_model_that_refuses_images_is_asked_again_without_them() -> None:
     reply = await handler(_message("这是哪个皮肤", images=["https://qq.example/1"])[0])
     assert reply is not None and "有点忙" in reply.content
     assert len(llm.requests) == 1 and research.calls == []
+
+
+async def test_blocked_entry_keeps_images_and_does_not_fall_back_to_research() -> None:
+    blocked = LLMContentBlocked("拦截", status=421)
+    blocked.stage = "entry"
+    handler, llm, store, research = _with_images([blocked])
+    message, progress = _message("这是哪个皮肤", images=["https://qq.example/1"])
+    reply = await handler(message)
+
+    assert reply is not None
+    assert "对话入口阶段" in reply.content and "平台审核拦截" in reply.content
+    assert "换个问法" not in reply.content
+    assert len(llm.requests) == 1
+    assert llm.requests[0]["messages"][1]["content"][0]["type"] == "image_url"
+    assert research.calls == [] and progress == []
+    assert await store.history("c2c:c1") == []
 
 
 async def test_without_research_the_model_still_sees_the_image() -> None:

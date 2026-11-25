@@ -17,6 +17,23 @@ def test_sliding_window_and_single_notice() -> None:
     assert limiter.allow("u", 0) is True  # 0 表示不限
 
 
+def test_idle_keys_expire_and_capacity_never_evicts_active_limits() -> None:
+    now = [0.0]
+    limiter = RateLimiter(window_seconds=60, max_keys=2, clock=lambda: now[0])
+    assert limiter.allow("a", 1)
+    assert limiter.should_notify("a")
+    now[0] = 15.0
+    assert limiter.allow("b", 1)
+    assert limiter.should_notify("b")
+    assert not limiter.allow("overflow", 1)
+    assert not limiter.should_notify("overflow")
+    assert not limiter.allow("a", 1)
+    now[0] = 60.0
+    assert limiter.allow("overflow", 1)
+    assert limiter.should_notify("overflow")
+    assert not limiter.allow("b", 1)
+
+
 async def test_router_blocks_over_limit_and_notifies_once(tmp_path) -> None:
     config = AppConfig(root=tmp_path, files={"core.plugins": {"enabled": []}}, secrets={})
     host = PluginHost(config)

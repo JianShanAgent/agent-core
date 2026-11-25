@@ -32,7 +32,7 @@ from jianshanagent.core.config import (
 from jianshanagent.core.llm import LLMError, user_message
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.manifest import feature_manifests
-from jianshanagent.runtime import RESTART_ONLY
+from jianshanagent.runtime import requires_restart
 
 logger = get_logger(__name__)
 
@@ -85,7 +85,7 @@ def _source(config: AppConfig, name: str) -> str:
 
 
 def _mode(name: str) -> str:
-    return "restart" if name in RESTART_ONLY else "reload"
+    return "restart" if requires_restart(name) else "reload"
 
 
 def _dig(node: Any, path: tuple[str, ...]) -> Any:
@@ -130,7 +130,7 @@ async def save_configs(admin: Admin, edits: dict[str, dict[str, Any]]) -> dict[s
         undo()
         raise
     changed = sorted(edits)
-    if any(name not in RESTART_ONLY for name in edits):
+    if any(not requires_restart(name) for name in edits):
         try:
             await admin.runtime.reload()
         except Exception as exc:
@@ -142,7 +142,7 @@ async def save_configs(admin: Admin, edits: dict[str, dict[str, Any]]) -> dict[s
                 + trace.brief(f"{type(exc).__name__}: {exc}", 500),
             )
     logger.info("admin_config_saved", files=changed)
-    needs_restart = [name for name in changed if name in RESTART_ONLY]
+    needs_restart = [name for name in changed if requires_restart(name)]
     return {"saved": changed, "needs_restart": needs_restart, "status": admin.status()}
 
 
@@ -297,10 +297,11 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         if name not in llm.settings.profiles:
             fail(404, f"正在运行的配置里没有「{name}」这一档（改动要先保存）")
         started = time.perf_counter()
+        deadline = asyncio.get_running_loop().time() + _TEST_TIMEOUT_SECONDS
         try:
             with trace.purpose("test"):
-                result = await asyncio.wait_for(
-                    llm.chat([user_message(_TEST_PROMPT)], profile=name), _TEST_TIMEOUT_SECONDS
+                result = await llm.chat(
+                    [user_message(_TEST_PROMPT)], profile=name, deadline=deadline
                 )
         except TimeoutError:
             return reply(

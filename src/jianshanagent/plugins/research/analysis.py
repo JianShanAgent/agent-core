@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, tzinfo
 from pydantic import BaseModel, Field
 
 from jianshanagent.core.clock import now_text
-from jianshanagent.core.llm import LLMClient, LLMError, user_message
+from jianshanagent.core.llm import LLMClient, LLMContentBlocked, LLMError, user_message
 from jianshanagent.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -200,16 +200,16 @@ async def understand(
     max_names: int = 5,
     wording: Wording | None = None,
 ) -> Understanding:
-    """分析问题并查名字的别名。做不成的部分留空，不抛异常。"""
+    """分析问题并查名字的别名。普通失败留空，内容审核拦截原样传给调用方。"""
     try:
-        analysis = await asyncio.wait_for(
-            llm.chat_json(
-                [user_message(_prompt(question, topics, timezone, wording))],
-                Analysis,
-                profile=profile,
-            ),
-            timeout_seconds,
+        analysis = await llm.chat_json(
+            [user_message(_prompt(question, topics, timezone, wording))],
+            Analysis,
+            profile=profile,
+            deadline=asyncio.get_running_loop().time() + timeout_seconds,
         )
+    except LLMContentBlocked:
+        raise
     except (LLMError, TimeoutError) as exc:
         logger.warning("research_analysis_failed", error=repr(exc)[:200])
         return Understanding()

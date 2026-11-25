@@ -115,9 +115,11 @@ function StatusCard({ status }: { status: Status }) {
 function UsageTable({
   rows,
   first,
+  showDetails = false,
 }: {
-  rows: (UsageRow & { name: string; note?: string })[];
+  rows: (UsageRow & { key: string; name: string; note?: string })[];
   first: string;
+  showDetails?: boolean;
 }) {
   return (
     <Table>
@@ -125,26 +127,63 @@ function UsageTable({
         <tr>
           <Th>{first}</Th>
           <Th className="text-right">调用</Th>
-          <Th className="text-right">没成</Th>
+          <Th className="text-right">失败</Th>
+          <Th className="text-right">内容拦截</Th>
+          {showDetails && <Th className="text-right">重试</Th>}
           <Th className="text-right">输入 / 输出</Th>
+          {showDetails && (
+            <>
+              <Th className="text-right">缓存命中</Th>
+              <Th className="text-right">未缓存输入</Th>
+            </>
+          )}
           <Th className="text-right">平均</Th>
           <Th className="text-right">九成在</Th>
         </tr>
       </thead>
       <tbody>
         {rows.map((row) => (
-          <Tr key={row.name}>
+          <Tr key={row.key}>
             <Td>
-              <div className="font-medium">{row.name}</div>
+              <div className="font-medium whitespace-nowrap">{row.name}</div>
               {row.note ? <div className="text-muted-foreground text-[11px]">{row.note}</div> : null}
             </Td>
             <Td className="text-right tabular-nums">{formatNumber(row.calls)}</Td>
             <Td className={cn("text-right tabular-nums", row.failed > 0 && "text-destructive")}>
               {row.failed ? `${row.failed}（${formatPercent(row.failed, row.calls)}）` : "0"}
             </Td>
-            <Td className="text-muted-foreground text-right text-xs tabular-nums">
+            <Td className={cn("text-right tabular-nums", row.blocked > 0 && "text-warning")}>
+              {formatNumber(row.blocked)}
+            </Td>
+            {showDetails && (
+              <Td className="text-right whitespace-nowrap tabular-nums">
+                {row.retries == null ? (
+                  <span className="text-muted-foreground text-xs">未追踪</span>
+                ) : row.retry_tracked_calls < row.calls ? (
+                  <>
+                    ≥{formatNumber(row.retries)}
+                    <div className="text-muted-foreground text-[11px]">
+                      覆盖 {formatNumber(row.retry_tracked_calls)} / {formatNumber(row.calls)}
+                    </div>
+                  </>
+                ) : (
+                  formatNumber(row.retries)
+                )}
+              </Td>
+            )}
+            <Td className="text-muted-foreground text-right text-xs whitespace-nowrap tabular-nums">
               {formatTokens(row.prompt_tokens)} / {formatTokens(row.completion_tokens)}
             </Td>
+            {showDetails && (
+              <>
+                <Td className="text-muted-foreground text-right text-xs tabular-nums">
+                  {formatTokens(row.cached_tokens)}
+                </Td>
+                <Td className="text-muted-foreground text-right text-xs tabular-nums">
+                  {formatTokens(row.uncached_tokens)}
+                </Td>
+              </>
+            )}
             <Td className="text-right tabular-nums">{formatSeconds(row.avg_seconds)}</Td>
             <Td className="text-right tabular-nums">{formatSeconds(row.p90_seconds)}</Td>
           </Tr>
@@ -225,8 +264,8 @@ function Stats({ stats, data }: { stats: OverviewStats; data: Overview }) {
           tone={totals.llm_failed > 0 ? "warning" : undefined}
           hint={
             totals.llm_failed
-              ? `${totals.llm_failed} 次没成（超时或报错）`
-              : "都正常返回了"
+              ? `${formatNumber(totals.llm_failed)} 次标记为未成功`
+              : "没有标记为未成功的调用"
           }
           onClick={() => navigate("/calls")}
         />
@@ -484,8 +523,8 @@ function Stats({ stats, data }: { stats: OverviewStats; data: Overview }) {
             </Card>
           </div>
 
-          <div className="grid gap-3 xl:grid-cols-2">
-            <Card>
+          <div className="grid gap-3 2xl:grid-cols-[2fr_3fr]">
+            <Card className="min-w-0">
               <CardHeader>
                 <div>
                   <CardTitle>各档模型</CardTitle>
@@ -501,22 +540,25 @@ function Stats({ stats, data }: { stats: OverviewStats; data: Overview }) {
                 first="档位"
                 rows={stats.profiles.map((row) => ({
                   ...row,
+                  key: row.profile,
                   name: row.profile,
                   note: `${row.model}${row.thinking ? " · 开思考" : ""}`,
                 }))}
               />
             </Card>
-            <Card>
+            <Card className="min-w-0">
               <CardHeader>
                 <div>
                   <CardTitle>各个环节</CardTitle>
-                  <CardDescription>时间和 token 花在处理流程的哪一步上</CardDescription>
+                  <CardDescription>Token 按已记录用量汇总，不代表账单；重试只算自动重发。</CardDescription>
                 </div>
               </CardHeader>
               <UsageTable
                 first="环节"
+                showDetails
                 rows={stats.purposes.map((row) => ({
                   ...row,
+                  key: row.purpose,
                   name: label(STEP_LABELS, row.purpose),
                 }))}
               />
@@ -544,7 +586,7 @@ export default function Dashboard() {
     <div className="flex flex-col gap-3">
       <PageHeader
         title="首页"
-        description="机器人现在怎么样，这段时间处理了多少消息、花了多久、用了多少模型额度。"
+        description="机器人现在怎么样，这段时间处理了多少消息、花了多久、模型用了多少 Token。"
         actions={
           <>
             <SimpleSelect

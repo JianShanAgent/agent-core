@@ -113,11 +113,14 @@ async def test_health_check_reports_a_lost_qq_connection(env: Env) -> None:
         def health(self) -> tuple[bool, str]:
             return not self.problem, self.problem
 
+        async def start(self) -> None:
+            pass
+
         async def stop(self) -> None:
             pass
 
     gateway = Gateway()
-    env.runtime.gateway = gateway  # type: ignore[assignment]
+    env.runtime._started_gateways.append(("qq", gateway))
     assert (await env.get("/healthz")) == {"ok": True, "service": "jianshanagent"}
     # 进程活着不算数：和 QQ 断了又连不回来，机器人什么都收不到，容器要显示成不健康
     gateway.problem = "和 QQ 的连接已经断开 300 秒"
@@ -603,11 +606,13 @@ async def test_a_bad_value_in_a_restart_only_file_does_not_stop_the_bot_from_sta
     monkeypatch.setenv("JIANSHANAGENT_CONFIG_OVERRIDES_DIR", str(overrides))
     monkeypatch.delenv("JIANSHANAGENT_POSTGRES_DSN", raising=False)
     monkeypatch.setattr("jianshanagent.runtime.setup_logging", lambda **_kwargs: None)
-    runtime = Runtime(dry_run=True)
+    monkeypatch.setenv("QQ_BOT_APP_ID", "test")
+    monkeypatch.setenv("QQ_BOT_CLIENT_SECRET", "test")
+    runtime = Runtime(dry_run=False)  # 只验证准备阶段，不启动 QQ 网络连接
     await runtime.prepare()
     try:
         assert "invalid literal" in runtime.overrides_ignored and runtime.config.overrides == {}
-        assert runtime._boot.max_replies == {"c2c": 4, "group": 5}  # 按默认值起来了
+        assert runtime.config.get("gateway.qq")["reply"]["passive"]["c2c_max_replies"] == 4
         assert runtime._boot.health_port == 8080
         runtime.build_app()  # 后台照样挂得上
     finally:
@@ -996,9 +1001,10 @@ async def test_models_page_and_logs(env: Env, monkeypatch: pytest.MonkeyPatch) -
     assert llm is not None
     purposes: list[str] = []
 
-    async def fake_chat(messages: Any, *, profile: str) -> Any:
+    async def fake_chat(messages: Any, *, profile: str, deadline: float | None = None) -> Any:
         from jianshanagent.core.llm import LLMResult, LLMUsage
 
+        assert deadline is not None
         purposes.append(trace._purpose.get())
         return LLMResult(
             message={"role": "assistant", "content": "收到"},
@@ -1031,3 +1037,133 @@ async def test_models_page_and_logs(env: Env, monkeypatch: pytest.MonkeyPatch) -
     assert system["environment"]["token_source"] == "secrets"
     # 没有数据库就没有备份的情况可说：不提醒
     assert system["status"]["backup"] is None and (await env.get("/api/status"))["backup"] is None
+
+
+async def test_unmanaged_integrations_do_not_expose_credentials(env: Env) -> None:
+    await env.get("/api/integrations", 401)
+    await env.login()
+    env.runtime.legacy_integration_ids = ("pinganzhi",)
+    apps = await env.get("/api/integrations")
+    assert apps["managed"] is False
+    assert apps["apps"] == [
+        {
+            "app_id": "pinganzhi",
+            "name": "平安志",
+            "enabled": True,
+            "created_at": None,
+            "last_request_at": None,
+        }
+    ]
+    await env.get("/api/integrations/usage", 503)
+    await env.send("POST", "/api/integrations", {"app_id": "demo", "name": "Demo"}, 503)
+
+
+async def test_admin_and_http_share_integration_auth_and_usage(env: Env) -> None:
+    import asyncio
+    import hashlib
+    import os
+    from uuid import uuid4
+
+    import httpx
+    from aiohttp import ClientSession
+
+    from jianshanagent.core.db import Database
+    from jianshanagent.core.integrations import IntegrationStore
+    from jianshanagent.core.usage import llm_usage, metered_post
+    from jianshanagent.gateway.base import GatewayContext
+    from jianshanagent.gateway.http import HttpGateway
+
+    dsn = os.environ.get("JIANSHANAGENT_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("requires isolated PostgreSQL")
+    db = Database(dsn)
+    await db.connect()
+    await db.migrate()
+    store = IntegrationStore(db)
+    env.runtime.integrations = store
+    suffix = uuid4().hex[:8]
+    a, b = (f"test-{label}-{suffix}" for label in ("a", "b"))
+    legacy = "L" * 32
+
+    async def sent(_message: InboundMessage, _reply: OutboundMessage) -> None:
+        raise AssertionError("HTTP must not send through QQ")
+
+    def mocked_vendor(request: httpx.Request) -> httpx.Response:
+        n = 17 if json.loads(request.content)["text"] == "different" else 11
+        return httpx.Response(200, json={"usage": {"prompt_tokens": n, "completion_tokens": 5}})
+
+    async def handle(message: InboundMessage) -> OutboundMessage:
+        if message.content != "/查":
+            async with httpx.AsyncClient(transport=httpx.MockTransport(mocked_vendor)) as provider:
+                for _ in range(2):
+                    await metered_post(
+                        provider,
+                        "https://provider.invalid",
+                        body={"text": message.content},
+                        kind="llm",
+                        model="test-model",
+                        read_usage=llm_usage,
+                    )
+        return OutboundMessage("test response")
+
+    gateway = HttpGateway(
+        GatewayContext({"port": 0}, {"clients": {a: legacy}}, handle, sent, store)
+    )
+    try:
+        await gateway.start()
+        assert gateway._listener is not None
+        url = f"http://127.0.0.1:{gateway._listener.sockets[0].getsockname()[1]}"
+        await env.get("/api/integrations", 401)
+        await env.login()
+        blocked = await env.client.post("/api/integrations", json={"app_id": b, "name": "应用 B"})
+        assert blocked.status == 403
+        info = await env.send("POST", "/api/integrations", {"app_id": b, "name": "应用 B"}, 201)
+        token_b = info["token"]
+        assert await store.authenticate(hashlib.sha256(token_b.encode()).digest()) == b
+        listing = await env.get("/api/integrations")
+        assert listing["managed"] is True and token_b not in json.dumps(listing)
+        await env.send("POST", "/api/integrations", {"app_id": b, "name": "重复"}, 409)
+
+        async with ClientSession() as http:
+
+            async def chat(token: str, text: str, expected: int = 200) -> None:
+                async with http.post(
+                    f"{url}/v1/chat",
+                    json={"user_id": "same-user", "text": text},
+                    headers={"Authorization": f"Bearer {token}"},
+                ) as response:
+                    assert response.status == expected
+                    if expected == 200:
+                        assert "event: reply" in await response.text()
+
+            async with http.get(f"{url}/api/integrations") as response:
+                assert response.status == 404
+            await asyncio.gather(chat(legacy, "question"), chat(token_b, "different"))
+            await chat(legacy, "/查")
+            rotate = await env.client.post(f"/api/integrations/{a}/rotate", json={}, headers=WRITE)
+            assert rotate.status == 200 and rotate.headers["Cache-Control"] == "no-store"
+            new_token = (await rotate.json())["token"]
+            await chat(legacy, "question", 401)
+            await chat(new_token, "/查")
+            await env.send("PATCH", f"/api/integrations/{a}", {"enabled": False, "name": "停用 A"})
+            await chat(new_token, "question", 401)
+        await gateway.stop()
+        await gateway.start()
+        assert await store.authenticate(hashlib.sha256(legacy.encode()).digest()) is None
+        assert await store.authenticate(hashlib.sha256(new_token.encode()).digest()) is None
+
+        stats = await env.get("/api/integrations/usage?range=7d")
+        by_app = {row["app_id"]: row for row in stats["apps"]}
+        assert (by_app[a]["requests"], by_app[a]["prompt_tokens"]) == (3, 22)
+        assert (by_app[b]["requests"], by_app[b]["prompt_tokens"]) == (1, 34)
+        for app_id in (a, b):
+            assert by_app[app_id]["model_calls"] == 2 and by_app[app_id]["completion_tokens"] == 10
+        first = await env.get(f"/api/integrations/usage?app_id={a}&range=today")
+        assert [row["app_id"] for row in first["apps"]] == [a]
+        assert first["models"][0]["model"] == "test-model"
+        await env.get("/api/integrations/usage?from=2026-02-30&to=2026-03-01", 400)
+        await env.get("/api/integrations/usage?from=2025-01-01&to=2026-03-01", 400)
+    finally:
+        await gateway.stop()
+        env.runtime.integrations = None
+        await db.close()

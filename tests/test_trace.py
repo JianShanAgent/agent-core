@@ -10,7 +10,13 @@ from structlog.contextvars import get_contextvars
 from jianshanagent.core import trace
 from jianshanagent.core.config import load_config
 from jianshanagent.core.llm import LLMClient, LLMError, LLMProfile, LLMSettings, user_message
-from jianshanagent.core.messages import CHANNEL_WEB, ChatScope, InboundMessage, OutboundMessage
+from jianshanagent.core.messages import (
+    CHANNEL_HTTP,
+    CHANNEL_WEB,
+    ChatScope,
+    InboundMessage,
+    OutboundMessage,
+)
 from jianshanagent.core.plugin import CommandSpec, PluginHost, erase_user_data
 from jianshanagent.core.router import MessageRouter
 from jianshanagent.core.trace import LLMCall, Trace, Tracer
@@ -317,6 +323,11 @@ async def test_router_records_route_and_outcome(
     web = _message("/ping web", message_id="g", user_id="web-admin", chat_id="web-admin")
     web.channel = CHANNEL_WEB
     assert (await router.handle(web)) is not None
+    external = _message("/ping http", message_id="h", user_id="http-user", chat_id="http-chat")
+    external.channel = CHANNEL_HTTP
+    outgoing = await router.handle(external)
+    assert outgoing is not None and outgoing.content == "pong http"
+    await router.sent(external, outgoing)
 
     rows = [(t.message_id, t.route, t.command, t.status, t.channel) for t in tracer.recent]
     assert rows == [
@@ -326,6 +337,7 @@ async def test_router_records_route_and_outcome(
         ("d", "limited", "", trace.REPLIED, "qq"),
         ("e", "limited", "", trace.SILENT, "qq"),
         ("g", "command", "ping", trace.REPLIED, "web"),
+        ("h", "command", "ping", trace.REPLIED, "http"),
     ]
     command, chatted, failed = list(tracer.recent)[:3]
     assert [(s.kind, s.title) for s in command.steps] == [("command", "/ping")]

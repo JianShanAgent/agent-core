@@ -7,7 +7,13 @@ from typing import Any
 
 from jianshanagent.core import trace
 from jianshanagent.core.logging import get_logger
-from jianshanagent.core.messages import CHANNEL_WEB, ChatScope, InboundMessage, OutboundMessage
+from jianshanagent.core.messages import (
+    CHANNEL_HTTP,
+    CHANNEL_QQ,
+    ChatScope,
+    InboundMessage,
+    OutboundMessage,
+)
 from jianshanagent.core.plugin import PluginHost
 from jianshanagent.core.ratelimit import RateLimiter
 
@@ -43,7 +49,12 @@ class MessageRouter:
 
     def _check_rate_limit(self, message: InboundMessage) -> tuple[bool, OutboundMessage | None]:
         """返回（是否超限，提示消息）。超限时每分钟只提示一次，其余静默。"""
-        key = f"user:{message.session_key}"
+        # 第三方用户更换 conversation_id 时不应重置个人额度。
+        key = (
+            f"http-user:{message.user_id}"
+            if message.channel == CHANNEL_HTTP
+            else f"user:{message.session_key}"
+        )
         blocked = not self._limiter.allow(key, self._user_limit)
         if not blocked and message.chat_scope == ChatScope.GROUP:
             key = f"group:{message.chat_id}"
@@ -159,12 +170,11 @@ class MessageRouter:
         """一条消息从进到出：分发 + 出站过滤。处理中途发的进度消息也过同样的出站过滤。
 
         旁听的插件先看一眼每一条消息；不是对机器人说的（``addressed`` 为假）到此为止，
-        不过限流、不进命令和对话、不回复。管理后台网页对话里发的消息（``channel`` 是 web）
-        不给旁听的插件看：那是调试，不该混进群聊记录。
+        不过限流、不进命令和对话、不回复。只有 QQ 消息给旁听插件看，其他入口不混进 QQ 群聊记录。
 
         对机器人说的每一条都留一份处理记录（core/trace.py）：走了哪条路、每一步多久、回了什么。
         """
-        if message.channel != CHANNEL_WEB:
+        if message.channel == CHANNEL_QQ:
             for observe in self.host.observers:
                 try:
                     await observe(message)
@@ -198,6 +208,8 @@ class MessageRouter:
 
     async def sent(self, inbound: InboundMessage, outbound: OutboundMessage) -> None:
         """网关把最终回复发出去以后调用：给旁听的插件看一眼（比如记群聊记录）。"""
+        if inbound.channel != CHANNEL_QQ:
+            return
         for observe in self.host.reply_observers:
             try:
                 await observe(inbound, outbound)

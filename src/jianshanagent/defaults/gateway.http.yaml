@@ -1,0 +1,8 @@
+# 独立于管理后台的第三方聊天 API；凭据单独写入 secrets.yaml 的 gateway.http.clients。
+enabled: false
+host: 127.0.0.1
+port: 18081
+requests_per_minute: 30
+max_inflight_per_app: 2
+max_inflight: 8
+timeout_seconds: 300

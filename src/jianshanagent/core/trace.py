@@ -109,6 +109,8 @@ class LLMCall:
     #: 发给模型的内容和它的回复（图片换成了占位）；配置里关了「留提示词」时是 None
     request: dict[str, Any] | None = None
     response: dict[str, Any] | None = None
+    #: 自动重发次数（不含首次请求）；None 表示未追踪，0 表示已追踪且没有重发
+    retry_count: int | None = None
 
 
 def compact_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -15,6 +15,7 @@ class ChatScope(StrEnum):
 
 CHANNEL_QQ = "qq"
 CHANNEL_WEB = "web"
+CHANNEL_HTTP = "http"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +58,8 @@ class InboundMessage:
     #: 这条不是用户发的消息，而是他点了机器人消息上的按钮（``content`` 是按钮带的指令）时，
     #: 这里是平台那次点击事件的 id：回复要挂在它上面。这时 ``message_id`` 不是一条真消息，不能引用
     reply_event_id: str | None = None
-    #: 从哪里来的：qq = QQ 平台；web = 管理后台的网页对话（调试用：处理的流程一样，
-    #: 但不给旁听的插件看——不进群聊记录）
+    #: 从哪里来的：qq = QQ，web = 管理后台，http = 第三方聊天 API。
+    #: 新网关用自己的 channel；只有 QQ 消息进入 QQ 群聊记录。
     channel: str = CHANNEL_QQ
     #: 网关给的「中途先发一句」的出口，见 :meth:`progress`；网关不支持时是 None
     progress_sink: ProgressSink | None = field(default=None, repr=False, compare=False)

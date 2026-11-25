@@ -33,8 +33,8 @@ export function Login({ onDone, locked }: { onDone: () => void; locked: number }
         <div className="mb-6 flex flex-col items-center gap-3 text-center">
           <img src="/favicon.svg" alt="" className="size-12 rounded-xl shadow-sm ring-1 ring-white/15" />
           <div>
-            <h1 className="text-lg font-semibold tracking-tight">JianShanAgent 管理后台</h1>
-            <p className="text-muted-foreground mt-1 text-sm">Wiki QQ 机器人</p>
+            <h1 className="text-lg font-semibold tracking-tight">wiki智能助手</h1>
+            <p className="text-muted-foreground mt-1 text-sm">管理后台</p>
           </div>
         </div>
         <div className="bg-card rounded-xl border p-5 shadow-sm">

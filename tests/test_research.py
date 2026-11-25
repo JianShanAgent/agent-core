@@ -63,12 +63,21 @@ class ScriptedLLM:
         self.fix_prompts: list[str] = []
         #: 每次调用的（要的结果，用的哪一档，最多试几次）
         self.calls: list[tuple[str, str, int]] = []
+        self.retries: list[bool] = []
 
     async def chat_json(
-        self, messages: Any, schema: Any, *, profile: str, attempts: int = 2
+        self,
+        messages: Any,
+        schema: Any,
+        *,
+        profile: str,
+        attempts: int = 2,
+        retrying: bool = False,
+        deadline: float | None = None,
     ) -> Any:
         prompt = messages[0]["content"]
         self.calls.append((schema.__name__, profile, attempts))
+        self.retries.append(retrying)
         if schema is Decision:
             assert profile in ("reason", "quick")
             self.analyst_prompts.append(prompt)
@@ -86,7 +95,8 @@ class ScriptedLLM:
             self.review_prompts.append(prompt)
             item = self.verdicts.pop(0) if self.verdicts else Verdict(ok=True)
         if item is HANG:
-            await asyncio.sleep(3600)
+            async with asyncio.timeout_at(deadline):
+                await asyncio.sleep(3600)
         if isinstance(item, Exception):
             raise item
         return item
@@ -332,13 +342,42 @@ async def test_gives_up_honestly_after_too_many_rejections_or_model_failure() ->
     # 内容被审核拦截要让上层知道
     with pytest.raises(LLMContentBlocked):
         await workflow(ScriptedLLM([LLMContentBlocked("拦截", status=421)]), kb).run("水豚")
-    # 复核那一次被拦也一样：问题和资料查证员那次没被拦，多出来的只有那份回答，不能照发
-    llm = ScriptedLLM([Decision(answer="3 日开")], [LLMContentBlocked("拦截", status=421)])
-    with pytest.raises(LLMContentBlocked):
-        await workflow(llm, kb).run("水豚")
     # 复核过没过必须明说：只列了问题、漏写 ok 的输出不合格（会带着错误让模型重写），不能当成通过
     with pytest.raises(ValidationError):
         Verdict.model_validate({"problems": ["日期在资料里找不到"]})
+
+
+async def test_workflow_does_not_double_retry_exhausted_review_or_release_the_draft() -> None:
+    kb = FakeSource("kb", "知识库", [ev("a", "水豚活动 3 日开")])
+    block = LLMContentBlocked("拦截", status=421)
+    # 替身抛的是客户端已经重试耗尽的拦截。工作流不可再跑一轮或把草稿当结论。
+    llm = ScriptedLLM([Decision(answer="3 日开")], [block, Verdict(ok=True)])
+    with pytest.raises(LLMContentBlocked):
+        await workflow(llm, kb, quick_profile="quick").run("水豚")
+    assert len(llm.review_prompts) == 1 and len(llm.verdicts) == 1
+    assert not llm.fix_prompts
+
+
+@pytest.mark.parametrize("bad_number", ["资料 2 或 3", "资料 2-3", "第2条", True, 2.5])
+def test_research_does_not_guess_ambiguous_source_numbers(bad_number: object) -> None:
+    with pytest.raises(ValidationError):
+        Verdict.model_validate({"ok": False, "sources": [bad_number]})
+
+
+async def test_a_platform_block_during_analysis_or_fix_stops_the_workflow() -> None:
+    kb = FakeSource("kb", "知识库", [ev("a", "水豚活动 3 日开")])
+    block = LLMContentBlocked("拦截", status=200)
+    llm = ScriptedLLM([], analysis=block)
+    with pytest.raises(LLMContentBlocked):
+        await workflow(llm, kb, analysis_profile="quick").run("水豚")
+    assert kb.asked == [] and [name for name, *_ in llm.calls] == ["Analysis"]
+
+    llm = ScriptedLLM(
+        [Decision(answer="5 日开")], [Verdict(ok=False, problems=["日期不符"])], fixes=[block]
+    )
+    with pytest.raises(LLMContentBlocked):
+        await workflow(llm, kb, quick_profile="quick", max_rejections=0).run("水豚")
+    assert [name for name, *_ in llm.calls] == ["Decision", "Verdict", "Fixed"]
 
 
 async def test_out_of_rounds_or_time_fixes_the_flagged_parts_instead_of_giving_up() -> None:
@@ -360,6 +399,17 @@ async def test_out_of_rounds_or_time_fixes_the_flagged_parts_instead_of_giving_u
     # 修正的人看到了原回答、复核意见和资料
     prompt = llm.fix_prompts[0]
     assert "还送皮肤" in prompt and "应删掉" in prompt and "【资料 1】" in prompt
+    # 三个阶段共用完整、有序的原始资料前缀；角色、时间、问题和草稿都在后面。
+    marker = "\n【参考资料结束】\n\n"
+    parts = [
+        text.partition(marker) for text in (llm.analyst_prompts[0], llm.review_prompts[0], prompt)
+    ]
+    assert all(sep == marker and prefix.endswith(render(kb.items)) for prefix, sep, _ in parts)
+    assert len({prefix for prefix, _, _ in parts}) == 1
+    for (_, _, task), role in zip(parts, ("查证员", "复核员", "编辑"), strict=True):
+        assert role in task.splitlines()[0] and "水豚活动什么时候开" in task
+    assert "现在是" in parts[0][2] and "现在是" in parts[1][2]
+    assert "还送皮肤" in parts[1][2] and "应删掉" in parts[2][2]
 
     # 打回次数用完也一样；改完什么都不剩、或者修正的接口出错：才说没查到
     for fix in (Fixed(answer=""), LLMError("挂了")):
@@ -386,6 +436,7 @@ async def test_thinking_calls_that_fail_are_redone_once_without_thinking() -> No
         ("Verdict", "quick", 2),
     ]
     assert llm.analyst_prompts[0] == llm.analyst_prompts[1]  # 问的是同一份提示词
+    assert llm.retries == [False, True, False, True]
 
     # 两档都不成：查证员算失败
     llm = ScriptedLLM([LLMError("a"), LLMError("b")])
@@ -464,6 +515,7 @@ async def test_an_analyst_on_the_fallback_profile_is_asked_again_when_the_call_s
     outcome = await asyncio.wait_for(workflow(llm, kb, **quick).run("水豚活动什么时候开"), 5)
     assert (outcome.status, outcome.answer) == (ANSWERED, "3 日开")
     assert [call[0] for call in llm.calls] == ["Decision", "Decision", "Verdict"]
+    assert llm.retries == [False, True, False]
     assert llm.analyst_prompts[0] == llm.analyst_prompts[1]  # 问的是同一份提示词
 
     # 再问还是卡住：失败。只多问一次，不会一直问下去

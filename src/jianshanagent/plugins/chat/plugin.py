@@ -102,7 +102,13 @@ _RESEARCH_PARAMETERS = {
 }
 _NOT_FOUND = "这个问题我没查到确切的信息，换个问法或说得具体一点试试。"
 _BUSY = "我这会儿有点忙，稍后再试试。"
-_BLOCKED = "这个问题我没法回答，换个问法试试吧。"
+_BLOCKED_STAGES = {
+    "entry": "对话入口",
+    "analyze": "问题分析",
+    "analyst": "查证作答",
+    "review": "结论复核",
+    "fix": "结论修正",
+}
 
 
 def _refused(exc: LLMError) -> bool:
@@ -340,12 +346,22 @@ class ChatPlugin:
             async def ask(system: Message) -> LLMResult:
                 """问对话模型。带着图片被接口拒绝时，去掉图片、在文字里说明，再问一次。"""
                 nonlocal shown
+                deadline = (
+                    asyncio.get_running_loop().time() + entry_timeout if entry_timeout else None
+                )
 
                 def chat() -> Awaitable[LLMResult]:
-                    return llm.chat([system, *history, *turn], profile="chat", tools=specs or None)
+                    return llm.chat(
+                        [system, *history, *turn],
+                        profile="chat",
+                        tools=specs or None,
+                        deadline=deadline,
+                    )
 
                 try:
                     return await chat()
+                except LLMContentBlocked:
+                    raise
                 except LLMError as exc:
                     if not shown or not _refused(exc):
                         raise
@@ -378,7 +394,7 @@ class ChatPlugin:
                     system = await system_message(message, research is not None, bool(originals))
                     try:
                         with trace.span("entry", "对话模型：直接回，还是去查") as record:
-                            result = await asyncio.wait_for(ask(system), entry_timeout or None)
+                            result = await ask(system)
                             record.set(
                                 calls=[call.name for call in result.tool_calls],
                                 reply=trace.brief(result.content),
@@ -430,8 +446,9 @@ class ChatPlugin:
                     )
                     turn.pop()
                     outcome = await investigate(asked)
-            except LLMContentBlocked:
-                return reply(_BLOCKED)
+            except LLMContentBlocked as exc:
+                stage = _BLOCKED_STAGES.get(exc.stage, "消息处理")
+                return reply(f"{stage}阶段遇到平台审核拦截，无法提供回答。")
             except LLMError:
                 logger.exception("chat_llm_failed", session=message.session_key)
                 return reply(_BUSY)

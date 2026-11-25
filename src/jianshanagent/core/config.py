@@ -124,6 +124,7 @@ EXTEND = CAPABILITY_EXTEND
 #: 能在网页上改就等于能让机器人去加载别的代码。后台加的 wiki 只能来自站点目录（见 core/catalog.py）
 LOCKED_PATHS: dict[str, tuple[tuple[str, ...], ...]] = {
     "core.admin": (("enabled",),),
+    "gateway.http": (("enabled",), ("host",), ("port",)),
     "app": (("healthcheck",),),
     WIKI_FILE: ((WIKIS,), (WIKIS_ADDED,)),
     # 从哪个仓库更新、下载走哪个镜像：能在网页上改，就等于能让机器人去下载并运行别人的代码
@@ -140,7 +141,11 @@ def locked_paths(name: str) -> tuple[tuple[str, ...], ...]:
     在网页上改它不会生效——要改那些项，去改它们所在的那份配置。
     """
     paths = LOCKED_PATHS.get(name, ())
-    return (*paths, (EXTEND,)) if name.startswith((SITE_PREFIX, PLATFORM_PREFIX)) else paths
+    if name.startswith((SITE_PREFIX, PLATFORM_PREFIX)):
+        return (*paths, (EXTEND,))
+    if name.startswith("gateway.") and name not in {"gateway.qq", "gateway.http"}:
+        return (*paths, ("enabled",))
+    return paths
 
 
 def is_locked(name: str, path: Sequence[str]) -> bool:

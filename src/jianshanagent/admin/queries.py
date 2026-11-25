@@ -25,7 +25,7 @@ _TRACE_COLUMNS = (
 _CALL_COLUMNS = (
     "id, trace_id, step_id, started_at, seconds, purpose, profile, model, thinking, ok, "
     "finish_reason, error, prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens, "
-    "tool_calls, (request IS NOT NULL OR response IS NOT NULL) AS has_detail"
+    "tool_calls, retry_count, (request IS NOT NULL OR response IS NOT NULL) AS has_detail"
 )
 
 
@@ -183,11 +183,18 @@ class AdminQueries:
             since,
             channel,
         )
+        # 旧调用可能被标为 ok，但只要结束原因为内容审核，就只计入拦截。
+        # SUM 忽略 NULL；整组没追踪过时保留 NULL，不把未知重试当成零。
         grouped = (
-            "count(*) AS calls, count(*) FILTER (WHERE NOT c.ok) AS failed, "
+            "count(*) AS calls, "
+            "count(*) FILTER (WHERE NOT c.ok AND c.finish_reason <> 'content_filter') AS failed, "
+            "count(*) FILTER (WHERE c.finish_reason = 'content_filter') AS blocked, "
             "coalesce(sum(c.prompt_tokens), 0) AS prompt_tokens, "
             "coalesce(sum(c.completion_tokens), 0) AS completion_tokens, "
             "coalesce(sum(c.reasoning_tokens), 0) AS reasoning_tokens, "
+            "coalesce(sum(c.cached_tokens), 0) AS cached_tokens, "
+            "coalesce(sum(greatest(c.prompt_tokens - c.cached_tokens, 0)), 0) AS uncached_tokens, "
+            "sum(c.retry_count) AS retries, count(c.retry_count) AS retry_tracked_calls, "
             "avg(c.seconds) AS avg_seconds, "
             "percentile_cont(0.9) WITHIN GROUP (ORDER BY c.seconds) AS p90_seconds"
         )

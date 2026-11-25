@@ -211,6 +211,7 @@ def test_items_that_cannot_be_changed_from_the_web_are_marked_locked() -> None:
         "platform.bwiki": {"extend"},
         "platform.huiji": {"extend"},
         "core.admin": {"enabled", "token_file"},
+        "gateway.http": {"enabled", "host", "port"},
         # 站点目录在哪：决定有哪些站点插件能下载、从哪下载、wiki 的地址是什么
         "core.catalog": {"repo", "path", "ref", "api_url", "download_prefix"},
         "core.embedding": {

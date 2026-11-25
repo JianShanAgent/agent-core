@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -12,15 +13,12 @@ import httpx
 from jianshanagent.core.links import strip_unknown_links, urls_in
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.messages import Button, ChatScope, ImageRef, InboundMessage, OutboundMessage
+from jianshanagent.gateway.base import GatewayContext, MessageHandler, SentHandler
 
 if TYPE_CHECKING:
     from qqbot_agent_sdk.dto import MessageAttachment
 
 logger = get_logger(__name__)
-
-MessageHandler = Callable[[InboundMessage], Awaitable[OutboundMessage | None]]
-#: 最终回复发出去以后通知一声：（回复的是哪条消息，发出去的内容）
-SentHandler = Callable[[InboundMessage, OutboundMessage], Awaitable[None]]
 
 _SEND_ATTEMPTS = 3  # 发送遇到一时的故障（超时、5xx）最多试几次
 _QUOTE_GIVE_UP = 2  # 同一种引用连着被平台拒绝这么多次，就不再试了
@@ -782,3 +780,25 @@ class QQGateway:
             await self._http.aclose()
             self._http = None
         logger.info("qq_gateway_stopped")
+
+
+def create_gateway(context: GatewayContext) -> QQGateway:
+    """保留 QQ 原有的凭据、回复次数和会话恢复配置。"""
+    settings = context.settings
+    passive = (settings.get("reply") or {}).get("passive") or {}
+    drain = (settings.get("shutdown") or {}).get("drain_seconds")
+    store_dir = os.environ.get("JIANSHANAGENT_SESSION_STORE_DIR") or settings.get(
+        "session_store_dir"
+    )
+    return QQGateway(
+        app_id=str(context.secrets.get("app_id") or ""),
+        client_secret=str(context.secrets.get("client_secret") or ""),
+        on_message=context.handle,
+        on_sent=context.sent,
+        max_replies={
+            "c2c": int(passive.get("c2c_max_replies") or 1),
+            "group": int(passive.get("group_max_replies") or 1),
+        },
+        drain_seconds=max(float(drain), 0.0) if drain is not None else 20.0,
+        session_store_dir=str(store_dir) if store_dir else None,
+    )

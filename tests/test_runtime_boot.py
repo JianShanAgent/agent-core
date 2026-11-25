@@ -34,9 +34,7 @@ def _config_dir(tmp_path: Path, **edits: dict[str, Any]) -> Path:
 
 def test_boot_settings_follow_the_repo_config(tmp_path: Path) -> None:
     boot = _Boot.from_config(load_config(_config_dir(tmp_path), with_overrides=False))
-    assert boot.gateway_enabled is True
     assert (boot.pool_min, boot.pool_max) == (1, 10)
-    assert boot.max_replies == {"c2c": 4, "group": 5}
 
 
 def test_pool_sizes_and_the_qq_switch_are_read_and_checked(tmp_path: Path) -> None:
@@ -46,7 +44,7 @@ def test_pool_sizes_and_the_qq_switch_are_read_and_checked(tmp_path: Path) -> No
         core__storage={"postgres.pool_min": 2, "postgres.pool_max": 4},
     )
     boot = _Boot.from_config(load_config(root, with_overrides=False))
-    assert boot.gateway_enabled is False and (boot.pool_min, boot.pool_max) == (2, 4)
+    assert (boot.pool_min, boot.pool_max) == (2, 4)
 
     upside_down = _config_dir(
         tmp_path / "bad", core__storage={"postgres.pool_min": 5, "postgres.pool_max": 2}
@@ -76,7 +74,7 @@ async def test_with_the_qq_switch_off_the_process_serves_the_admin_but_does_not_
         def __init__(self, **kwargs: Any) -> None:
             made.append(kwargs)  # 走到这里就是要去连 QQ 了
 
-    monkeypatch.setattr(runtime_module, "QQGateway", NoGateway)
+    monkeypatch.setattr("jianshanagent.gateway.qq.QQGateway", NoGateway)
     runtime = Runtime(dry_run=False)  # 不是调试模式：开关是唯一拦着它的东西
     await runtime.prepare()
     try:

@@ -20,6 +20,7 @@ from jianshanagent.admin import (
     routes_chat,
     routes_config,
     routes_data,
+    routes_integrations,
     routes_system,
     routes_traces,
     routes_wikis,
@@ -101,6 +102,7 @@ def setup_admin(app: web.Application, runtime: Runtime) -> Admin:
         routes_traces,
         routes_config,
         routes_chat,
+        routes_integrations,
         routes_data,
         routes_wikis,
     ):
