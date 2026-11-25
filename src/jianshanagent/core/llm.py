@@ -45,7 +45,7 @@ Message = dict[str, Any]
 ModelT = TypeVar("ModelT", bound=BaseModel)
 ResultT = TypeVar("ResultT")
 
-_CONTENT_BLOCK_RETRIES = 3
+_CONTENT_BLOCK_RETRIES = 5
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 #: 连模型接口最多等这么久（等它生成完的时限是配置里的 timeout_seconds，长得多）
 _CONNECT_TIMEOUT_SECONDS = 10.0
@@ -401,7 +401,7 @@ class LLMClient:
         deadline: float | None,
         retrying: bool,
     ) -> ResultT:
-        """各阶段共用一次最多三次的拦截重试预算；开始被拦后不可降级为普通错误。"""
+        """各阶段共用拦截重试策略；开始被拦后不可降级为普通错误。"""
         loop = asyncio.get_running_loop()
         retry_deadline = (
             deadline if deadline is not None else loop.time() + self.settings.timeout_seconds

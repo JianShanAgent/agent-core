@@ -321,7 +321,7 @@ async def test_a_200_that_is_not_a_model_reply_counts_as_a_failed_call() -> None
 
 
 @pytest.mark.parametrize("status", [200, 421])
-async def test_content_moderation_block_retries_three_times_without_releasing_content(
+async def test_content_moderation_block_retries_five_times_without_releasing_content(
     status: int,
 ) -> None:
     response = (
@@ -336,7 +336,7 @@ async def test_content_moderation_block_retries_three_times_without_releasing_co
             ),
         )
     )
-    bodies, _, handler = _recorder([response] * 4)
+    bodies, _, handler = _recorder([response] * 6)
     client = _client(handler)
     calls: list[LLMCall] = []
     client.on_call = calls.append
@@ -347,8 +347,8 @@ async def test_content_moderation_block_retries_three_times_without_releasing_co
         await client.aclose()
 
     assert exc.value.status == status and not exc.value.retryable
-    assert len(bodies) == len(calls) == 4 and all(body == bodies[0] for body in bodies)
-    assert [call.retry_count for call in calls] == [0, 1, 1, 1]
+    assert len(bodies) == len(calls) == 6 and all(body == bodies[0] for body in bodies)
+    assert [call.retry_count for call in calls] == [0, 1, 1, 1, 1, 1]
     for call in calls:
         assert not call.ok and call.finish_reason == "content_filter" and call.response is None
         assert (call.prompt_tokens, call.cached_tokens) == ((20, 5) if status == 200 else (0, 0))
@@ -454,7 +454,7 @@ async def test_content_block_can_recover_in_every_stage_with_the_same_request(
 ) -> None:
     bodies, _, handler = _recorder(
         [
-            *[httpx.Response(421)] * 3,
+            *[httpx.Response(421)] * 5,
             httpx.Response(200, json=_reply({"content": answer})),
         ]
     )
@@ -471,9 +471,9 @@ async def test_content_block_can_recover_in_every_stage_with_the_same_request(
             assert (await client.chat(messages, tools=tools)).content == answer
     finally:
         await client.aclose()
-    assert len(bodies) == 4 and all(body == bodies[0] for body in bodies)
-    assert [call.retry_count for call in calls] == [0, 1, 1, 1]
-    assert [call.ok for call in calls] == [False, False, False, True]
+    assert len(bodies) == 6 and all(body == bodies[0] for body in bodies)
+    assert [call.retry_count for call in calls] == [0, 1, 1, 1, 1, 1]
+    assert [call.ok for call in calls] == [False, False, False, False, False, True]
 
 
 async def test_block_retry_does_not_multiply_http_retries_or_rewrite_invalid_json() -> None:
@@ -483,6 +483,8 @@ async def test_block_retry_does_not_multiply_http_retries_or_rewrite_invalid_jso
             httpx.Response(503),
             httpx.Response(200, json=_reply({"content": '{"missing": "ok"}'})),
             httpx.Response(503),
+            httpx.Response(421),
+            httpx.Response(503),
         ]
     )
     client = _client(handler)
@@ -491,7 +493,7 @@ async def test_block_retry_does_not_multiply_http_retries_or_rewrite_invalid_jso
             await client.chat_json([user_message("同一份资料")], Verdict)
     finally:
         await client.aclose()
-    assert len(bodies) == 4 and all(body == bodies[0] for body in bodies)
+    assert len(bodies) == 6 and all(body == bodies[0] for body in bodies)
 
 
 async def test_block_followed_by_timeout_stays_blocked_and_does_not_overrun() -> None:
