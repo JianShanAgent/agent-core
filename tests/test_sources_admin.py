@@ -520,7 +520,13 @@ async def test_http_real_import_service_two_namespaces_and_restore(
 
 class FakeSessionStore:
     def __init__(self, _root: Path):
+        from jianshanagent.weibo_auth import WeiboCredentialStore
+
         self.configured = False
+        self._lock_store = WeiboCredentialStore(_root)
+
+    def mutation_lock(self) -> Any:
+        return self._lock_store.mutation_lock()
 
     def status(self) -> dict[str, Any]:
         return {

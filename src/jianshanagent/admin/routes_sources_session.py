@@ -9,7 +9,12 @@ from aiohttp import web
 
 from jianshanagent.admin.core import Admin, fail, read_body, reply
 from jianshanagent.core.sources import source_instances
-from jianshanagent.weibo_auth import WeiboCredentialStore, WeiboQrLogin, weibo_login_status
+from jianshanagent.weibo_auth import (
+    WeiboCredentialStore,
+    WeiboQrLogin,
+    WeiboSessionBusy,
+    weibo_login_status,
+)
 
 _BUSY = {"new", "generating", "waiting", "scanned"}
 _PREFIX = "/api/sources/platforms/weibo"
@@ -144,32 +149,36 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         await empty_body(request)
         async with changing:
             credential = store()
-            if admin.weibo_qr is not None and admin.weibo_qr.state in _BUSY:
-                fail(409, "已经有一个微博登录正在进行")
-            local = weibo_login_status()
-            if not local.get("available"):
-                fail(409, str(local.get("message") or "微信扫码登录组件不可用"))
-            if admin.weibo_qr is not None:
-                await admin.weibo_qr.aclose()
-            login = WeiboQrLogin(credential)
-            admin.weibo_qr = login
             try:
-                image = await login.generate()
-            except Exception:
-                await login.aclose()
-                fail(502, "微博微信扫码二维码生成失败，请稍后重试")
-            if not isinstance(image, str) or not image.startswith("data:image/"):
-                await login.aclose()
-                fail(502, "登录组件没有返回可展示的二维码")
-            return reply(
-                {
-                    "image": image,
-                    "state": login_state(login),
-                    "available": login.available,
-                    "login_id": login.login_id,
-                    "method": login_method(login),
-                }
-            )
+                with credential.mutation_lock():
+                    if admin.weibo_qr is not None and admin.weibo_qr.state in _BUSY:
+                        fail(409, "已经有一个微博登录正在进行")
+                    local = weibo_login_status()
+                    if not local.get("available"):
+                        fail(409, str(local.get("message") or "微信扫码登录组件不可用"))
+                    if admin.weibo_qr is not None:
+                        await admin.weibo_qr.aclose()
+                    login = WeiboQrLogin(credential)
+                    admin.weibo_qr = login
+                    try:
+                        image = await login.generate()
+                    except Exception:
+                        await login.aclose()
+                        fail(502, "微博微信扫码二维码生成失败，请稍后重试")
+                    if not isinstance(image, str) or not image.startswith("data:image/"):
+                        await login.aclose()
+                        fail(502, "登录组件没有返回可展示的二维码")
+                    return reply(
+                        {
+                            "image": image,
+                            "state": login_state(login),
+                            "available": login.available,
+                            "login_id": login.login_id,
+                            "method": login_method(login),
+                        }
+                    )
+            except WeiboSessionBusy:
+                fail(409, "本机微博会话正在同步，请稍后重试")
 
     async def poll(request: web.Request) -> web.Response:
         store()
@@ -213,10 +222,14 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         await empty_body(request)
         credential = store()
         async with changing:
-            if admin.weibo_qr is not None:
-                await admin.weibo_qr.aclose()
-                admin.weibo_qr = None
-            credential.clear()
+            try:
+                with credential.mutation_lock():
+                    if admin.weibo_qr is not None:
+                        await admin.weibo_qr.aclose()
+                        admin.weibo_qr = None
+                    credential.clear()
+            except WeiboSessionBusy:
+                fail(409, "本机微博会话正在同步，请稍后重试")
         return reply(session())
 
     return [

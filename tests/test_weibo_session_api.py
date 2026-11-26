@@ -148,6 +148,24 @@ async def test_diagnostics_only_expose_fixed_enumerations(
     assert "private-upstream-value" not in json.dumps([status, polled])
 
 
+async def test_external_handoff_lock_blocks_qr_start_and_clear(
+    local: LocalEnv, fake_login: None
+) -> None:
+    await local.create()
+    await local.send("GET", PREFIX + "/session")
+    store = local.admin.weibo
+    assert store is not None
+    store.configured = True
+    before = len(FakeLogin.instances)
+    with store.mutation_lock():
+        await local.send("POST", PREFIX + "/qr", {}, 409)
+        await local.send("DELETE", PREFIX + "/session", {}, 409)
+        assert store.configured and len(FakeLogin.instances) == before
+    result = await local.send("POST", PREFIX + "/qr", {})
+    assert result["state"] == "waiting"
+    await local.send("POST", PREFIX + "/cancel", {"login_id": result["login_id"]})
+
+
 async def test_auth_csrf_whitelist_and_limits(local: LocalEnv, fake_login: None) -> None:
     await local.create()
     qr = await local.send("POST", PREFIX + "/qr", {})

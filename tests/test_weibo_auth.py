@@ -624,6 +624,35 @@ async def test_save_failure_does_not_overwrite_old_session_or_leak(
     await login.aclose()
 
 
+def test_session_mutation_lock_excludes_other_instances_and_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jianshanagent.weibo_auth import WeiboSessionBusy
+
+    monkeypatch.delenv("JIANSHANAGENT_WEIBO_CREDENTIAL_FILE", raising=False)
+    first = WeiboCredentialStore(tmp_path / "config")
+    second = WeiboCredentialStore(tmp_path / "config")
+    with first.mutation_lock():
+        with pytest.raises(WeiboSessionBusy):
+            with second.mutation_lock():
+                pytest.fail("overlapping session mutation")
+    with second.mutation_lock():
+        assert (second.path.parent / ".session.lock").stat().st_mode & 0o777 == 0o600
+    assert not first.path.exists()
+
+
+def test_session_mutation_lock_rejects_symlink(tmp_path: Path) -> None:
+    store = WeiboCredentialStore(tmp_path / "config")
+    store.path.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.write_text("unchanged")
+    (store.path.parent / ".session.lock").symlink_to(outside)
+    with pytest.raises(ValueError, match="同步锁不安全"):
+        with store.mutation_lock():
+            pytest.fail("symlink lock followed")
+    assert outside.read_text() == "unchanged"
+
+
 def test_operator_credential_file_keeps_session_outside_the_release_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

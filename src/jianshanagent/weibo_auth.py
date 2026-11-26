@@ -9,14 +9,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import errno
 import json
 import math
 import os
 import re
+import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Protocol, TypeGuard
 
@@ -81,6 +83,10 @@ def _has_sub(cookies: list[dict[str, Any]]) -> bool:
     return any(cookie["name"] == "SUB" for cookie in cookies)
 
 
+class WeiboSessionBusy(RuntimeError):
+    """受控的跨进程会话写入冲突，不包含私有路径或凭据。"""
+
+
 class WeiboCredentialStore:
     """所有微博来源共享的平台会话；status/clear 均不联网、不启动浏览器。"""
 
@@ -91,6 +97,39 @@ class WeiboCredentialStore:
         )
         self._verified_at = 0.0
         self._verified_signature: tuple[int, int, int] | None = None
+
+    @contextlib.contextmanager
+    def mutation_lock(self) -> Iterator[None]:
+        """CLI 导入与管理端 QR/清除操作共享非阻塞锁；关闭 fd 即释放。"""
+        if self.path.parent.is_symlink() or self.path.is_symlink():
+            raise ValueError("微博会话存储位置不安全")
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.path.parent, 0o700)
+        lock = self.path.parent / ".session.lock"
+        if lock.is_symlink():
+            raise ValueError("微博会话同步锁不安全")
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    if os.fstat(fd).st_size == 0:
+                        os.write(fd, b"0")
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise WeiboSessionBusy("微博会话正在同步，请稍后重试") from None
+                raise ValueError("微博会话同步锁不可用") from None
+            yield
+        finally:
+            os.close(fd)
 
     def _signature(self) -> tuple[int, int, int] | None:
         try:
