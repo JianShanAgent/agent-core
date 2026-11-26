@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -200,6 +201,32 @@ async def test_batch_request_failure_falls_back_and_continues_next_batch(
     assert source.cache.get(DATA_KIND, 1, wanted[0].rev_id) is None
 
 
+async def test_whole_batch_deadline_stops_slow_responses_and_preserves_old_cache(
+    sources: Callable[..., WikiSource],
+) -> None:
+    calls = 0
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        # MockTransport 不执行 HTTP 读超时；整批期限必须独立终止等待。
+        await asyncio.sleep(1)
+        return echo(request)
+
+    source = sources(slow)
+    source.settings = replace(
+        source.settings, fetch=replace(source.settings.fetch, timeout_seconds=0.01)
+    )
+    wanted = refs(3)
+    source.cache.put(DATA_KIND, 1, 1, {"text": "old"})
+    got = await HuijiKnowledge().data_many(source, wanted, batch_size=2)
+    assert calls == 1  # 超时后不再把其余批次逐个拖到期限。
+    assert got[0].value == {"text": "old"} and not got[0].error
+    assert len(source.stale) == 1
+    assert all("整批期限" in item.error for item in got[1:])
+    assert source.cache.get(DATA_KIND, 1, wanted[0].rev_id) is None
+
+
 async def test_offline_replays_only_current_revision(sources: Callable[..., WikiSource]) -> None:
     source = sources()
     wanted = refs(3)
@@ -215,8 +242,8 @@ async def test_offline_replays_only_current_revision(sources: Callable[..., Wiki
 @pytest.mark.parametrize(
     ("batch_size", "count", "sizes"),
     [
-        (50, 101, [50, 50, 1]),
-        (500, 51, [50, 1]),
+        (50, 101, [25, 25, 25, 25, 1]),
+        (500, 51, [25, 25, 1]),
         (2, 5, [2, 2, 1]),
         (0, 3, [1, 1, 1]),
         (-8, 2, [1, 1]),
@@ -230,8 +257,8 @@ async def test_batch_size_and_request_count_are_bounded(
     def handler(request: httpx.Request) -> httpx.Response:
         batch = query_ids(request)
         seen.append(len(batch))
-        assert len(batch) <= int(request.url.params["limit"]) <= 50
-        assert len(str(request.url).encode()) <= 6000
+        assert len(batch) <= int(request.url.params["limit"]) <= 25
+        assert len(str(request.url).encode()) <= 3000
         return echo(request)
 
     source = sources(handler)
@@ -294,7 +321,7 @@ async def test_long_chinese_paths_split_before_encoded_url_limit(
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        assert len(str(request.url).encode()) <= 6000
+        assert len(str(request.url).encode()) <= 3000
         return echo(request)
 
     source = sources(handler)

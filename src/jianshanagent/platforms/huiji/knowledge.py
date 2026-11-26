@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -31,10 +32,10 @@ from jianshanagent.plugins.knowledge.sources import Fetched, PageRef, Stale, Wik
 
 logger = get_logger(__name__)
 
-#: 每批最多查 50 份，串行发出；所有请求仍走 fetcher 的限速和预算
-_DATA_BATCH_CAP = 50
-#: 中文路径经过百分号编码会膨胀，给常见的 8KB 请求行限制留余量
-_DATA_URL_BYTES_CAP = 6000
+#: 线上大批索引查询可能不结束；25 项已验证可用，仍串行走 fetcher 限速和预算。
+_DATA_BATCH_CAP = 25
+#: 中文路径经过百分号编码会膨胀，同时保守限制整个查询地址。
+_DATA_URL_BYTES_CAP = 3000
 
 #: Data 文档在缓存里、请求计数里算哪一类
 DATA_KIND = "data"
@@ -86,7 +87,7 @@ class HuijiKnowledge(SitePlugin):
         refs: Sequence[PageRef],
         *,
         label: str = "Data",
-        batch_size: int = 50,
+        batch_size: int = 25,
     ) -> list[Fetched]:
         """按输入顺序返回 Data 文档，只把当前修订未缓存的部分分批串行查询。
 
@@ -97,6 +98,7 @@ class HuijiKnowledge(SitePlugin):
         results: list[Fetched] = []
         missing: dict[str, list[int]] = {}
         done = 0
+        deadline_error = ""
 
         def completed() -> None:
             nonlocal done
@@ -137,11 +139,15 @@ class HuijiKnowledge(SitePlugin):
             duplicate_ids: set[str] = set()
             batch_error = ""
             try:
+                if deadline_error:
+                    raise FetchError(deadline_error)
                 if url_size(batch_ids) > _DATA_URL_BYTES_CAP:
                     raise FetchError(f"Data 查询地址过长: {batch_ids[0]}")
-                docs = await self.data_find(
-                    source.need_fetcher(), {"_id": {"$in": batch_ids}}, limit=str(batch_size)
-                )
+                # HTTP 读超时只限制相邻数据块的等待；整批期限也覆盖慢速持续响应。
+                async with asyncio.timeout(source.settings.fetch.timeout_seconds):
+                    docs = await self.data_find(
+                        source.need_fetcher(), {"_id": {"$in": batch_ids}}, limit=str(batch_size)
+                    )
                 for doc in docs:
                     if not isinstance(doc, dict):
                         continue
@@ -154,6 +160,8 @@ class HuijiKnowledge(SitePlugin):
                     if data_id in by_id:
                         duplicate_ids.add(data_id)
                     by_id[data_id] = doc
+            except TimeoutError:
+                deadline_error = batch_error = "Data 批量查询超过整批期限"
             except FetchError as exc:
                 batch_error = str(exc)
 
