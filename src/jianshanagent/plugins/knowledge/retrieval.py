@@ -35,6 +35,7 @@ from dataclasses import dataclass
 
 from jianshanagent.core.embedding import EmbeddingClient, EmbeddingError, EmbeddingProvider
 from jianshanagent.core.logging import get_logger
+from jianshanagent.plugins.knowledge.news import NewsQuery, NewsResult
 from jianshanagent.plugins.knowledge.store import ChunkPlace, Hit, KbChunk, KnowledgeStore
 from jianshanagent.plugins.knowledge.terms import extract_terms
 
@@ -242,6 +243,10 @@ class Retriever:
         #: 嵌入接口刚出过错：到这个时刻（``time.monotonic``）之前不问它，原因记在 ``_embed_error``
         self._embed_off_until = 0.0
         self._embed_error = ""
+
+    async def recent(self, query: NewsQuery) -> NewsResult:
+        """近期公告按发布时间选篇，不算问题向量，也不改变普通检索的相关性排名。"""
+        return await self.store.recent_documents(query, exclude_wikis=self.exclude_wikis)
 
     async def aclose(self) -> None:
         if self.embedder is not None:

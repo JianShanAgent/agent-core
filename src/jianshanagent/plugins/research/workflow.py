@@ -37,18 +37,20 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import tzinfo
+from datetime import date, datetime, tzinfo
 from typing import Annotated, Any, Protocol, TypeVar
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, BeforeValidator, Field
 
 from jianshanagent.core import trace
-from jianshanagent.core.clock import now_text
 from jianshanagent.core.llm import LLMClient, LLMContentBlocked, LLMError, user_message
 from jianshanagent.core.logging import get_logger
+from jianshanagent.plugins.knowledge.news import NewsQuery, NewsResult
 from jianshanagent.plugins.research.analysis import (
     DEFAULT_TOPICS,
     NameLookup,
+    NewsSource,
     Understanding,
     Wording,
     understand,
@@ -130,6 +132,10 @@ class WorkflowSettings:
     deadline_seconds: float = 240.0
     analysis_timeout_seconds: float = 8.0
     analysis_topics: tuple[str, ...] = DEFAULT_TOPICS
+    news_sources: Mapping[str, NewsSource] = field(default_factory=dict)
+    news_latest_documents: int = 10
+    news_max_documents: int = 20
+    news_stale_after_days: int = 14
     #: 提示词里因站而异的说法
     wording: Wording = field(default_factory=Wording)
     #: 一个问题里最多查几个名字的别名
@@ -223,8 +229,9 @@ _ANALYST = """你是{bot}的查证员。根据上面的资料回答下面的用�
    标着「{excerpt}」的资料只是所在页面的一部分，页面上还有没给出来的内容：
    要列全的名单、要数的总数，如果只出现在{excerpt}里，照着列出来的同时说明可能不全。
 4. 资料开头标着它是从哪里查到的。标着「{web}」的是网上搜来的，不是 wiki 的内容：
-   只在别的资料答不了时才用，用到时说明是网上搜到的，和别的资料矛盾时以别的资料为准。
-   其余的都是 wiki 收录的内容（包括 wiki 收录的官方公告），不用特别说明出处。
+   只在别的资料答不了时才用，用到时说明是网上搜到的，普通查询和别的资料矛盾时以别的资料为准。
+   其余的是 wiki 收录的内容（包括收录的官方公告）。资讯回答要区分知识库收录与联网补充，
+   依据发表日期和正文核对新旧、当前状态，不能用旧帖覆盖已经证实的新公告；不能把未收录说成没有。
 5. 只回答用户问的那件事：先说结论，再给必要的依据，用户没问的不要展开。
    概括性的问题（「X 是什么」「X 怎么样」）用两三句话说清是什么、最要紧的一两点，再给页面链接，
    不要把资料里的细节都搬出来——写得越多越容易把不同时期的内容混在一起。
@@ -339,6 +346,7 @@ class ResearchWorkflow:
         image_search: ImageSearcher | None = None,
         page_filler: PageSource | None = None,
         wiki_labels: Sources = NO_SOURCES,
+        clock: Callable[[], datetime] | None = None,
     ):
         """``sources`` 是取证的各级，按先后排；一级可以是一个来源，也可以是一起查的几个来源。
         ``wiki_labels``：挂了不止一个 wiki 时各个 wiki 的叫法（以图搜图的资料上标出处用）。"""
@@ -355,7 +363,8 @@ class ResearchWorkflow:
             {id(source): source for level in self.levels for source in level}.values()
         )
         self.settings = settings or WorkflowSettings()
-        self.timezone = timezone
+        self.timezone = timezone or ZoneInfo("Asia/Shanghai")
+        self.clock = clock or (lambda: datetime.now(self.timezone))
         self.name_lookup = name_lookup
         self.entry_pages = entry_pages
         self.image_search = image_search
@@ -494,7 +503,7 @@ class ResearchWorkflow:
             mixups=wording.mixups,
             analyst_note=f"\n   {wording.analyst_note}" if wording.analyst_note else "",
             task=task,
-            now=now_text(self.timezone),
+            now=f"{self.clock().astimezone(self.timezone):%Y-%m-%d %H:%M %Z}",
             web=next((source.label for source in self.sources if source.name == "web"), "联网搜索"),
             excerpt=EXCERPT,
             max_citations=self.settings.max_citations,
@@ -533,7 +542,7 @@ class ResearchWorkflow:
             facts=wording.facts,
             mixups=wording.mixups,
             reviewer_note=f"\n   {wording.reviewer_note}" if wording.reviewer_note else "",
-            now=now_text(self.timezone),
+            now=f"{self.clock().astimezone(self.timezone):%Y-%m-%d %H:%M %Z}",
             max_citations=self.settings.max_citations,
             question=question,
             notes=self._notes(notes),
@@ -650,6 +659,46 @@ class ResearchWorkflow:
         used = 0  # 已有资料的总字数
         level = -1  # 查到第几级了
         searched: dict[str, list[str]] = {}  # 各个来源用过的搜索词
+        current = self.clock().astimezone(self.timezone)
+        news_query: NewsQuery | None = None
+        news_reason = "尚未检索资讯"
+
+        def news_notes(result: NewsResult) -> None:
+            nonlocal news_reason
+            latest = result.source_latest_date
+            matching_latest = max((part.date for part in result.chunks if part.date), default=None)
+            threshold = max(0, settings.news_stale_after_days)
+            source_stale = (
+                not latest or (current.date() - date.fromisoformat(latest)).days > threshold
+            )
+            matching_stale = (
+                not matching_latest
+                or (current.date() - date.fromisoformat(matching_latest)).days > threshold
+            )
+            explicit_range = bool(understanding.date_from or understanding.date_to)
+            stale = source_stale or (matching_stale and not explicit_range)
+            if not result.chunks:
+                news_reason = "知识库在所选来源/发表日期/主题条件下为空"
+            elif explicit_range:
+                news_reason = "用户明确指定发表日期范围；历史命中按该区间核对，不因历史日期强制联网"
+            elif matching_stale:
+                news_reason = "本次主题最新命中发表日过旧或未知，需要核实补充，不能被全来源新帖掩盖"
+            elif source_stale:
+                news_reason = "来源最近收录发表日距当前时间过久"
+            else:
+                news_reason = "知识库已有近期资料；只有缺当天或具体内容缺口时才需联网补充"
+            notes.append(
+                f"知识库实际来源：{understanding.source_label or understanding.source}"
+                f"（平台 {', '.join(news_query.source_platforms) if news_query else ''}）；"
+                f"资料截止日 {current.date().isoformat()}；"
+                f"来源全库最新可靠发表日 {latest or '未知'}；"
+                f"本次命中最新发表日 {matching_latest or '未知'}；"
+                f"命中文档 {result.matching_documents}，无可靠日期文档 {result.undated_documents}；"
+                f"本次返回 {len(result.chunks)} 篇；"
+                f"{'陈旧/新鲜度未知' if stale else '未超过陈旧阈值'}。"
+                f"{news_reason}。足够回答优先用知识库，不因存在一条就强答；"
+                "这些是库中收录，不代表已实时查明来源的全部最新动态。"
+            )
 
         async def step(stage: str) -> None:
             steps.append(stage)
@@ -697,7 +746,7 @@ class ResearchWorkflow:
 
         async def collect(keywords: str) -> int:
             """查下一级（里面的来源挨个查，后面的不重复取前面取到的），返回新增了几条资料。"""
-            nonlocal level, used
+            nonlocal level, used, news_reason
             level += 1
             start = len(evidence)  # 这一级的资料从这里开始
             group = self.levels[level]
@@ -711,7 +760,13 @@ class ResearchWorkflow:
                     f"查{source.label}",
                     keywords=keywords if source.keywords_hint else "",
                 ) as record:
-                    if position == 0 and level == 0 and entries and self.entry_pages is not None:
+                    if (
+                        understanding.intent == "lookup"
+                        and position == 0
+                        and level == 0
+                        and entries
+                        and self.entry_pages is not None
+                    ):
                         # 点到名的条目自己的内容排在最前面
                         own = 0
                         try:
@@ -725,14 +780,65 @@ class ResearchWorkflow:
                         added += own
                         record.set(entries=entries, from_entries=own)
                     try:
-                        found = await source.collect(
-                            outcome.query, keywords, {e.key for e in evidence}
-                        )
+                        if understanding.intent != "lookup" and source.name == "kb":
+                            record.set(
+                                mode=understanding.intent,
+                                filters={
+                                    "source": understanding.source,
+                                    "source_platforms": list(news_query.source_platforms)
+                                    if news_query
+                                    else [],
+                                    "date_from": understanding.date_from,
+                                    "date_to": understanding.date_to,
+                                    "as_of": current.date().isoformat(),
+                                    "keywords": list(understanding.news_keywords),
+                                },
+                            )
+                            collect_news = getattr(source, "collect_news", None)
+                            if news_query is None or collect_news is None:
+                                found = []
+                                news_reason = "所选来源未注册/不支持资讯检索，不能取消来源过滤"
+                                notes.append(news_reason + "；不能据此声称该来源没有新动态。")
+                                record.set(unsupported=True)
+                            else:
+                                found, result = await collect_news(news_query)
+                                news_notes(result)
+                                record.set(
+                                    latest_source_date=result.source_latest_date,
+                                    latest_matching_date=max(
+                                        (part.date for part in result.chunks if part.date),
+                                        default=None,
+                                    ),
+                                    matching_documents=result.matching_documents,
+                                    undated_documents=result.undated_documents,
+                                    documents=[
+                                        {
+                                            "doc_key": item.doc_key,
+                                            "date": item.date,
+                                            "source_platform": item.source_platform,
+                                        }
+                                        for item in found
+                                    ],
+                                )
+                        elif understanding.intent != "lookup" and source.name == "site":
+                            # 普通站内相似度检索没有来源/发表日期过滤，不能污染资讯集合。
+                            found = []
+                            record.set(skipped="资讯查询仅用受限知识库及必要联网补充")
+                        else:
+                            if understanding.intent != "lookup" and source.name == "web":
+                                record.set(reason=news_reason)
+                                logger.info("research_news_web", reason=news_reason)
+                            found = await source.collect(
+                                outcome.query, keywords, {e.key for e in evidence}
+                            )
                     except Exception as exc:
                         logger.warning(
                             "research_source_failed", source=source.name, error=repr(exc)[:300]
                         )
                         record.set(error=trace.brief(repr(exc)))
+                        if understanding.intent != "lookup" and source.name == "kb":
+                            news_reason = "资讯知识库检索失败，尚未查明最新情况"
+                            notes.append(news_reason + "，需要可核实的联网补充或如实说明。")
                         found = []
                     new = add(found)
                     added += new
@@ -750,9 +856,10 @@ class ResearchWorkflow:
                 # 同一个页面挑中了好几片的，把这一页剩下的也补上
                 with trace.span("fill", "把挑中的页面补全") as record:
                     try:
-                        filled = await self.page_filler.fill(
-                            evidence, start, settings.evidence_chars - used
-                        )
+                        filler = self.page_filler.fill
+                        if news_query is not None:
+                            filler = getattr(self.page_filler, "fill_news", filler)
+                        filled = await filler(evidence, start, settings.evidence_chars - used)
                     except Exception as exc:
                         logger.warning("research_page_fill_failed", error=repr(exc)[:300])
                         record.ok = False
@@ -841,10 +948,18 @@ class ResearchWorkflow:
                     timeout_seconds=settings.analysis_timeout_seconds,
                     max_names=settings.max_names,
                     wording=settings.wording,
+                    news_sources=dict(settings.news_sources),
+                    now=current,
                 )
                 record.set(
                     topic=understanding.topic,
                     time=understanding.time,
+                    intent=understanding.intent,
+                    source=understanding.source,
+                    source_scope=list(understanding.source_scope),
+                    date_error=understanding.date_error,
+                    date_bounds={"from": understanding.date_from, "to": understanding.date_to},
+                    analysis_failed=understanding.analysis_failed,
                     names=[
                         {
                             "written": n.written,
@@ -857,7 +972,32 @@ class ResearchWorkflow:
                     query=understanding.search_query(question),
                 )
         notes = understanding.notes()
+        if understanding.intent != "lookup":
+            if understanding.source_scope and not understanding.date_error:
+                news_query = NewsQuery(
+                    source_platforms=tuple(
+                        dict.fromkeys(
+                            settings.news_sources[key].source_platform
+                            for key in understanding.source_scope
+                        )
+                    ),
+                    date_from=understanding.date_from,
+                    date_to=understanding.date_to,
+                    as_of=current.date().isoformat(),
+                    keywords=understanding.news_keywords,
+                    limit=max(1, min(settings.news_latest_documents, settings.news_max_documents)),
+                )
+            elif not understanding.date_error:
+                news_reason = "请求的资讯来源未注册或不受支持"
+                notes.append(news_reason + "，必须明确说明，不能静默改查其它来源。")
         outcome.query = understanding.search_query(question)
+        if understanding.date_error:
+            # 不能撤掉日期过滤后拿最新公告冒充答案，也不把无效范围交给联网重试。
+            outcome.answer = (
+                "无法确认这段公告发表日期范围：日期无效、区间倒置或超出安全查询范围。"
+                "本次未执行资讯检索，请改用有效日期范围后再查询。"
+            )
+            return done(ANSWERED)
         #: 问题里点到名、在 wiki 上确实有的条目（正式名）
         entries = list(dict.fromkeys(n.title for n in understanding.names if n.exact))
         if images:

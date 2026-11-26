@@ -30,6 +30,7 @@ from typing import Any, Protocol
 
 from jianshanagent.core.links import strip_unknown_links
 from jianshanagent.core.websearch import WebPage
+from jianshanagent.plugins.knowledge.news import NewsQuery, NewsResult
 from jianshanagent.plugins.knowledge.plugin import TYPE_NAMES
 from jianshanagent.plugins.knowledge.retrieval import Retriever
 from jianshanagent.plugins.knowledge.store import KbChunk
@@ -51,6 +52,9 @@ class Evidence:
     excerpt: bool = False
     #: 出自哪个 wiki，给人看的叫法；只挂一个 wiki 时、以及不是 wiki 上的内容（网页）时为空
     source: str = ""
+    #: 原始文档标识，不用标题合并历年同名公告
+    doc_key: str = ""
+    source_platform: str = ""
 
 
 #: 各个 wiki 给人看的叫法：``core.wiki.yaml`` 里的 id → 叫法。只挂一个 wiki 时是空的（不标出处）
@@ -148,6 +152,8 @@ def _from_chunk(chunk: KbChunk, origin: str, sources: Sources = NO_SOURCES) -> E
         date=date,
         key=chunk.chunk_id,
         source=sources.get(chunk.wiki, ""),
+        doc_key=chunk.doc_key,
+        source_platform=str(chunk.meta.get("source_platform") or ""),
     )
 
 
@@ -165,6 +171,11 @@ class KnowledgeSource:
     async def collect(self, question: str, keywords: str, have: Collection[str]) -> list[Evidence]:
         result = await self.retriever.search(question)
         return [_from_chunk(hit.chunk, self.label, self.sources) for hit in result.hits]
+
+    async def collect_news(self, query: NewsQuery) -> tuple[list[Evidence], NewsResult]:
+        """日期优先的来源资讯查询；不把请求过滤条件写入共享来源实例。"""
+        result = await self.retriever.recent(query)
+        return [_from_chunk(chunk, self.label, self.sources) for chunk in result.chunks], result
 
 
 class EntryPages:
@@ -230,7 +241,15 @@ class PageFiller:
         self.min_hits = min_hits
         self.max_chars = max_chars
 
-    async def fill(self, evidence: Sequence[Evidence], start: int, room: int) -> list[Evidence]:
+    async def fill_news(
+        self, evidence: Sequence[Evidence], start: int, room: int
+    ) -> list[Evidence]:
+        """资讯每文档只有一代表片，按该片所属 doc_key 补全，不按同名标题查页。"""
+        return await self.fill(evidence, start, room, min_hits=1)
+
+    async def fill(
+        self, evidence: Sequence[Evidence], start: int, room: int, *, min_hits: int | None = None
+    ) -> list[Evidence]:
         """``evidence[start:]`` 是这一级刚查到的，最多还能加 ``room`` 字；返回补齐以后的全部资料。
 
         ``start`` 之前的资料位置不动（查证员、复核员已经按编号引用过它们）。这一级的资料里，
@@ -238,7 +257,10 @@ class PageFiller:
         """
         keys = [item.key for item in evidence if item.key]
         plan, chunks = await self.retriever.fill_pages(
-            keys, room=max(room, 0), min_hits=self.min_hits, max_chars=self.max_chars
+            keys,
+            room=max(room, 0),
+            min_hits=self.min_hits if min_hits is None else min_hits,
+            max_chars=self.max_chars,
         )
 
         def marked(item: Evidence) -> Evidence:

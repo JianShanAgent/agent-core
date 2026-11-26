@@ -26,7 +26,13 @@ from jianshanagent.core.plugin import PluginContext
 from jianshanagent.core.websearch import WebSearchClient, WebSearchSettings
 from jianshanagent.core.wiki import WikiSubject, wiki_labels, wiki_subject
 from jianshanagent.plugins.knowledge.retrieval import Retriever
-from jianshanagent.plugins.research.analysis import DEFAULT_TOPICS, NameLookup, NameNote, Wording
+from jianshanagent.plugins.research.analysis import (
+    DEFAULT_TOPICS,
+    NameLookup,
+    NameNote,
+    NewsSource,
+    Wording,
+)
 from jianshanagent.plugins.research.evidence import (
     EntryPages,
     EvidenceSource,
@@ -106,6 +112,20 @@ class ResearchPlugin:
         labels = cfg.get("labels") or {}
         profiles = cfg.get("profiles") or {}
         analysis = cfg.get("analysis") or {}
+        news = cfg.get("news") or {}
+        news_sources: dict[str, NewsSource] = {}
+        for key, definition in (analysis.get("news_sources") or {}).items():
+            if not isinstance(definition, dict):
+                raise ValueError("analysis.news_sources 的来源定义必须是映射")
+            platform = str(definition.get("source_platform") or "").strip()
+            label = str(definition.get("label") or key).strip()
+            if not platform or not label:
+                raise ValueError("analysis.news_sources 的来源必须有 label/source_platform")
+            news_sources[str(key)] = NewsSource(
+                label=label,
+                aliases=tuple(str(alias) for alias in definition.get("aliases") or [] if alias),
+                source_platform=platform,
+            )
         images = cfg.get("images") or {}
         defaults = WorkflowSettings()
         subject = wiki_subject(ctx.config)
@@ -135,6 +155,10 @@ class ResearchPlugin:
             ),
             analysis_topics=tuple(str(t) for t in analysis.get("topics") or DEFAULT_TOPICS),
             wording=wording,
+            news_sources=news_sources,
+            news_latest_documents=int(news.get("latest_documents") or 10),
+            news_max_documents=int(news.get("max_documents") or 20),
+            news_stale_after_days=int(news.get("stale_after_days", 14)),
             max_names=int(analysis.get("max_names") or defaults.max_names),
             max_images=int(images.get("max_images") or defaults.max_images),
             image_label=str(labels.get("image") or defaults.image_label),

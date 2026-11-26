@@ -39,11 +39,18 @@ analysis:
   enabled: true                    # false = 不分析，按用户的原话查
   timeout_seconds: 10              # 分析或查别名超过这么久就不等了，按原话查（平时 1～4 秒）
   max_names: 5                     # 一个问题里最多查几个名字的别名
+  news_sources: {}                  # 站点注册 ID → {label, aliases, source_platform} 来源白名单
   # 点到名、在 wiki 上确实有的条目（站点插件认得的条目、页面）：从它自己的页面里挑和问题最接近的几片，排在资料最前面
   entry_chunks_per_name: 2         # 每个条目最多几片
   entry_chunks: 4                  # 一个问题合计最多几片
   # topics：问题归哪一类（告诉查证员，也记进日志，方便以后看用户都在问什么）。因站而异，由站点插件给
   # （阴阳师的在 site.huiji_yys 的 extend 段）；都没写时是：人物、事物、事件、规则机制、其它
+
+# 资讯模式按来源的可靠发表日期排序；默认最近 N 篇，不把陈旧阈值当用户时间范围。
+news:
+  latest_documents: 10
+  max_documents: 20
+  stale_after_days: 14
 
 # 提示词里因站而异的说法。这里是对什么 wiki 都说得通的；站点插件在自己配置的 extend 段里换成那个站的
 # （阴阳师的在 site.huiji_yys）。这个 wiki 叫什么不在这里，在 core.wiki.yaml 的 name / about

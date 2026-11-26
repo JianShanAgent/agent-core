@@ -24,10 +24,17 @@ import json
 import time
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Protocol
 
 from jianshanagent.core.db import Database
 from jianshanagent.core.embedding import dot
+from jianshanagent.plugins.knowledge.news import (
+    PUBLISHED_AT_PATTERN,
+    NewsQuery,
+    NewsResult,
+    select_recent_documents,
+)
 from jianshanagent.plugins.knowledge.terms import bm25_score, extract_terms, term_weights
 
 #: （切片，向量或 None）。没有向量的切片只能被关键词查到
@@ -246,6 +253,11 @@ class KnowledgeStore(Protocol):
         ``titles``、``wiki``、``exclude_wikis`` 和 :meth:`vector_search` 一样。
         """
 
+    async def recent_documents(
+        self, query: NewsQuery, *, exclude_wikis: Collection[str] | None = None
+    ) -> NewsResult:
+        """按可靠发布日期返回不同公告文档的首片，并报告同来源的日期覆盖情况。"""
+
     async def outline(self, chunk_ids: Collection[str]) -> list[ChunkPlace]:
         """这些切片所在的页面的全部切片（不带正文），按页面、页内先后排。库里没有的 id 不管。"""
 
@@ -397,6 +409,11 @@ class MemoryKnowledgeStore:
         average_chars = (await self.info()).average_chars
         return _best_by_bm25(pool, weights, average_chars, limit)
 
+    async def recent_documents(
+        self, query: NewsQuery, *, exclude_wikis: Collection[str] | None = None
+    ) -> NewsResult:
+        return select_recent_documents(self._chunks.values(), query, exclude_wikis=exclude_wikis)
+
     async def outline(self, chunk_ids: Collection[str]) -> list[ChunkPlace]:
         docs = {self._chunks[cid].doc_key for cid in chunk_ids if cid in self._chunks}
         places = [
@@ -467,6 +484,64 @@ scored AS (
 SELECT {_COLUMNS}, s.score
 FROM scored s JOIN kb_chunks c USING (chunk_id)
 ORDER BY s.score DESC, c.chunk_id
+"""
+
+# PostgreSQL 17：先在库内按完整文档筛选、统计、限篇数，最后只传每篇的首片。
+# 历史 date 是文本；形状与有效性都过关才参与 ISO 日期比较，绝不拿 updated_at 补。
+# 主题用切片×去重词集合聚合覆盖篇目；禁止按每篇相关子查询重扫全部 candidates。
+_RECENT_DOCUMENTS = f"""
+WITH candidates AS MATERIALIZED (
+    SELECT {_COLUMNS},
+           CASE WHEN c.date ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
+                     AND pg_input_is_valid(c.date, 'date')
+                THEN c.date ELSE NULL END AS published_date,
+           CASE WHEN c.meta->>'published_at' ~ '^{PUBLISHED_AT_PATTERN}$'
+                     AND pg_input_is_valid(c.meta->>'published_at', 'timestamptz')
+                THEN (c.meta->>'published_at')::timestamptz ELSE NULL END AS published_at
+    FROM kb_chunks c
+    WHERE c.type = 'announcement' AND c.meta->>'source_platform' = ANY($1::text[])
+      AND ($2::text[] IS NULL OR c.wiki <> ALL($2::text[]))
+),
+documents AS MATERIALIZED (
+    SELECT doc_key, max(published_date) AS published_date, max(published_at) AS published_at
+    FROM candidates GROUP BY doc_key
+),
+coverage AS (
+    SELECT max(published_date) FILTER (WHERE published_date <= $3::text) AS source_latest_date,
+           count(*) FILTER (WHERE published_date IS NULL) AS undated_documents
+    FROM documents
+),
+query_words AS MATERIALIZED (
+    SELECT DISTINCT lower(word) AS word FROM unnest($6::text[]) AS q(word)
+),
+topic_documents AS MATERIALIZED (
+    SELECT p.doc_key FROM candidates p JOIN query_words q
+      ON strpos(lower(p.title), q.word) > 0 OR strpos(lower(p.text), q.word) > 0
+    GROUP BY p.doc_key
+    HAVING count(DISTINCT q.word) = (SELECT count(*) FROM query_words)
+),
+matching AS MATERIALIZED (
+    SELECT d.doc_key, d.published_date, d.published_at FROM documents d
+    WHERE d.published_date <= $3::text
+      AND ($4::text IS NULL OR d.published_date >= $4::text)
+      AND ($5::text IS NULL OR d.published_date <= $5::text)
+      AND (NOT EXISTS (SELECT 1 FROM query_words)
+           OR d.doc_key IN (SELECT doc_key FROM topic_documents))
+),
+selected AS (
+    SELECT doc_key, published_date, published_at FROM matching
+    ORDER BY published_date DESC, published_at DESC NULLS LAST, doc_key LIMIT $7
+)
+SELECT c.chunk_id, c.doc_key, c.type, c.title, c.text, c.url, c.source, c.section_path, c.seq,
+       s.published_date AS date, c.date_inferred, c.entities, c.meta, c.wiki,
+       coverage.source_latest_date, coverage.undated_documents,
+       (SELECT count(*) FROM matching) AS matching_documents
+FROM coverage LEFT JOIN selected s ON TRUE
+LEFT JOIN LATERAL (
+    SELECT p.* FROM candidates p WHERE p.doc_key = s.doc_key
+    ORDER BY p.seq, p.chunk_id LIMIT 1
+) c ON TRUE
+ORDER BY s.published_date DESC, s.published_at DESC NULLS LAST, s.doc_key, c.chunk_id
 """
 
 _OUTLINE = """
@@ -699,6 +774,28 @@ class PostgresKnowledgeStore:
             list(exclude_wikis) if exclude_wikis else None,
         )
         return _best_by_bm25((_chunk(row) for row in rows), weights, info.average_chars, limit)
+
+    async def recent_documents(
+        self, query: NewsQuery, *, exclude_wikis: Collection[str] | None = None
+    ) -> NewsResult:
+        if not query.source_platforms:
+            return NewsResult(chunks=[])
+        rows = await self._db.pool.fetch(
+            _RECENT_DOCUMENTS,
+            list(query.source_platforms),
+            list(exclude_wikis) if exclude_wikis else None,
+            query.as_of or date.today().isoformat(),
+            query.date_from,
+            query.date_to,
+            list(query.keywords),
+            query.limit,
+        )
+        return NewsResult(
+            chunks=[_chunk(row) for row in rows if row["chunk_id"] is not None],
+            source_latest_date=rows[0]["source_latest_date"],
+            matching_documents=int(rows[0]["matching_documents"]),
+            undated_documents=int(rows[0]["undated_documents"]),
+        )
 
     async def outline(self, chunk_ids: Collection[str]) -> list[ChunkPlace]:
         if not chunk_ids:
