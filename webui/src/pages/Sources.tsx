@@ -826,6 +826,7 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
   const [qrOpen, setQrOpen] = useState(false);
   const [qrImage, setQrImage] = useState<string | null>(null);
   const [qrState, setQrState] = useState("");
+  const [qrError, setQrError] = useState("");
   const [qrBusy, setQrBusy] = useState(false);
   const [clearBusy, setClearBusy] = useState(false);
   const [qrLoginId, setQrLoginId] = useState<string | null>(null);
@@ -855,10 +856,12 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
         if (!current()) return;
         if (res.login_id !== qrLoginId) {
           setQrState("cancelled");
+          setQrError("登录会话已变化，请关闭弹窗后刷新页面");
           toast.error("登录会话已变化，请关闭弹窗后刷新页面");
           return;
         }
         setQrState(res.state);
+        setQrError(res.error || "");
         if (res.state === "confirmed") {
           setQrOpen(false);
           setQrImage(null);
@@ -882,6 +885,7 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
         if (!current()) return;
         if (e instanceof ApiError && [400, 401, 403, 409].includes(e.status)) {
           setQrState("cancelled");
+          setQrError(e.message);
           toast.error(e.message);
           return; // 仅停止自己的轮询，绝不无 ID 取消全局会话。
         }
@@ -894,6 +898,7 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
   }, [qrOpen, qrImage, qrLoginId, refreshStatus]);
 
   const startQr = async () => {
+    setQrError("");
     setQrBusy(true);
     try {
       const res = await api.weiboSessionQr();
@@ -1045,15 +1050,19 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
               请本人用微信扫描官方二维码并确认，无需服务器浏览器。此登录身份与帖子作者无关；资料采集仍未配置。
             </DialogDescription>
           </DialogHeader>
-          {qrImage ? (
+          {["expired", "error", "cancelled"].includes(qrState) ? (
+            <div className="text-warning flex justify-center py-8"><AlertTriangle className="size-10" /></div>
+          ) : qrImage ? (
             <img src={qrImage} alt="微信扫码登录微博的官方二维码" className="mx-auto size-56" />
           ) : (
             <div className="flex justify-center py-8"><Spinner className="size-8" /></div>
           )}
-          <div className="text-muted-foreground text-center text-xs">
+          <div role={qrState === "error" ? "alert" : "status"} className="text-muted-foreground text-center text-xs leading-relaxed">
             {qrState === "scanned" ? "微信已扫描，请在手机上确认；微博身份仍待验证" :
              qrState === "confirmed" ? "正在检查微博身份…" :
-             ["expired", "error", "cancelled"].includes(qrState) ? "本次登录已停止，请关闭后重试" :
+             qrState === "error" ? (qrError || "微信扫码流程出错，服务端尚未完成微博登录验证；请关闭后重试") :
+             qrState === "expired" ? "二维码已过期，请关闭后重新获取" :
+             qrState === "cancelled" ? (qrError || "本次扫码已取消，请关闭后重新获取") :
              "等待本人用微信扫码，尚未登录"}
           </div>
           <DialogFooter>

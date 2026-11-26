@@ -220,6 +220,10 @@ class WeiboQrLogin:
         self.login_id = uuid.uuid4().hex
         self.state = "new"
         self.error = ""
+        self.stage = "weibo_init"
+        self.error_code = ""
+        self.callback_route = ""
+        self.callback_scheme = ""
         self.verified = False
         self.method = "browser" if browser_factory is not None else "http_wechat"
         self.available = True
@@ -316,11 +320,17 @@ class WeiboQrLogin:
                 )
                 if self._closing:
                     raise asyncio.CancelledError
+                if isinstance(transport, WechatHttpSession):
+                    self.stage = getattr(transport, "stage", "")
+                    self.error_code = getattr(transport, "error_code", "")
+                    self.callback_route = getattr(transport, "callback_route", "")
+                    self.callback_scheme = getattr(transport, "callback_scheme", "")
                 filtered = _filtered_cookies(rows)
                 if _has_sub(filtered):
                     verified = getattr(transport, "verified", False) is True
                     if self.method == "http_wechat" and not verified:
                         raise ValueError("微博身份尚未确认，不保存临时会话")
+                    self.stage = "credential_save"
                     if verified:
                         self.store.save(filtered, verified=True)
                     else:
@@ -346,9 +356,16 @@ class WeiboQrLogin:
                 await self._close_browser()
             except Exception as exc:
                 self.state = "error"
+                self.error_code = (
+                    exc.code
+                    if isinstance(exc, WechatHttpError)
+                    else ("save" if self.stage == "credential_save" else "network")
+                )
                 self.error = (
                     exc.public_message
                     if isinstance(exc, WechatHttpError)
+                    else WechatHttpError("save").public_message
+                    if self.stage == "credential_save"
                     else "微博扫码会话确认或保存失败，请重新扫码"
                 )
                 await self._close_browser()

@@ -90,7 +90,22 @@ async def test_status_never_infers_remote_validity(
     assert "private-cookie" not in json.dumps([status, polled])
 
 
-@pytest.mark.parametrize("code", ["callback", "identity", "untrusted"])
+@pytest.mark.parametrize(
+    "code",
+    [
+        "init",
+        "qr",
+        "unsafe",
+        "poll",
+        "callback",
+        "identity",
+        "network",
+        "expired",
+        "closed",
+        "save",
+        "untrusted",
+    ],
+)
 async def test_only_fixed_manual_verification_errors_are_displayed(
     local: LocalEnv, fake_login: None, code: str
 ) -> None:
@@ -109,6 +124,28 @@ async def test_only_fixed_manual_verification_errors_are_displayed(
     assert status["error"] == polled["error"] == expected
     assert "upstream-secret-cookie" not in json.dumps([status, polled])
     assert "evil.example" not in json.dumps([status, polled])
+
+
+@pytest.mark.parametrize("trusted", [True, False])
+async def test_diagnostics_only_expose_fixed_enumerations(
+    local: LocalEnv, fake_login: None, trusted: bool
+) -> None:
+    await local.create()
+    qr = await local.send("POST", PREFIX + "/qr", {})
+    login = FakeLogin.instances[-1]
+    values = {
+        "stage": "weibo_callback",
+        "error_code": "unsafe",
+        "callback_route": "weibo_logincallback",
+        "callback_scheme": "http",
+    }
+    for key, value in values.items():
+        setattr(login, key, value if trusted else {"secret": "private-upstream-value"})
+    status = await local.send("GET", PREFIX + "/session")
+    polled = await local.send("GET", PREFIX + "/poll?login_id=" + qr["login_id"])
+    for key, value in values.items():
+        assert status[key] == polled[key] == (value if trusted else "")
+    assert "private-upstream-value" not in json.dumps([status, polled])
 
 
 async def test_auth_csrf_whitelist_and_limits(local: LocalEnv, fake_login: None) -> None:

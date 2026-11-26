@@ -719,6 +719,32 @@ async def test_http_terminal_poll_and_cancel_do_not_interrupt_transport_cleanup(
     assert login._watcher is None
 
 
+async def test_http_error_stage_is_kept_after_transport_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jianshanagent import weibo_http
+
+    class DiagnosticHttp(FakeBrowser):
+        stage = "weibo_callback"
+        error_code = "unsafe"
+        callback_route = "weibo_logincallback"
+        callback_scheme = "http"
+        state = "error"
+        error = weibo_http.WechatHttpError("unsafe").public_message
+
+    fake = DiagnosticHttp()
+    monkeypatch.setattr(weibo_http, "WechatHttpSession", DiagnosticHttp)
+    login = WeiboQrLogin(WeiboCredentialStore(tmp_path / "config"), transport_factory=lambda: fake)
+    await login.generate()
+    assert login._watcher is not None
+    await asyncio.wait_for(login._watcher, timeout=1)
+    assert login.state == "error" and fake.closed
+    assert login.stage == "weibo_callback" and login.error_code == "unsafe"
+    assert login.callback_route == "weibo_logincallback" and login.callback_scheme == "http"
+    assert not login.store.status()["configured"]
+    await login.aclose()
+
+
 async def test_http_long_poll_does_not_block_status_or_cancellation(tmp_path: Path) -> None:
     entered = asyncio.Event()
 

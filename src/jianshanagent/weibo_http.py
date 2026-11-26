@@ -41,6 +41,7 @@ _MESSAGES = {
     "network": "官方登录服务暂时不可用，请稍后重试",
     "expired": "微信二维码已过期，请重新获取",
     "closed": "微信扫码会话已关闭，请重新获取",
+    "save": "服务端保存微博会话失败，请联系管理员",
 }
 # httpx INFO logs include the complete URL; httpcore DEBUG may include raw headers.
 # Scope redaction to THIS request context, not unrelated concurrent HTTP traffic.
@@ -194,6 +195,10 @@ class WechatHttpSession:
         self._verified_cookies: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
         self.state = "new"
+        self.stage = "weibo_init"
+        self.error_code = ""
+        self.callback_route = ""
+        self.callback_scheme = ""
         self.error = ""
         self.verified = False
         # An injected client's previous identity must not authenticate a new QR attempt.
@@ -205,6 +210,7 @@ class WechatHttpSession:
     def _fail(self, code: str) -> WechatHttpError:
         error = WechatHttpError(code)
         self.state = "error"
+        self.error_code = error.code
         self.error = error.public_message
         self.verified = False
         return error
@@ -281,6 +287,25 @@ class WechatHttpSession:
         for _ in range(_MAX_REDIRECTS + 1):
             response = await self._request("GET", url)
             if response.status_code in {301, 302, 303, 307, 308}:
+                if phase == "callback":
+                    try:
+                        target = urlsplit(
+                            urljoin(str(response.url), response.headers.get("location", ""))
+                        )
+                        self.callback_scheme = (
+                            target.scheme if target.scheme in {"https", "http"} else "other"
+                        )
+                        self.callback_route = {
+                            ("weibo.com", "/sso/logincallback"): "weibo_logincallback",
+                            ("weibo.com", "/"): "weibo_root",
+                            ("www.weibo.com", "/"): "weibo_root",
+                            ("passport.weibo.com", "/wbsso/login"): "weibo_wbsso",
+                            ("passport.weibo.com", "/othersitebind/auth"): "weibo_auth",
+                            ("login.sina.com.cn", "/sso/login.php"): "sina_login",
+                            ("login.sina.com.cn", "/sso/crossdomain.php"): "sina_crossdomain",
+                        }.get((target.hostname, target.path), "other")
+                    except ValueError:
+                        self.callback_route = self.callback_scheme = "other"
                 url = _safe_url(response.headers.get("location", ""), base=str(response.url))
                 host = urlsplit(url).hostname
                 if phase == "qr" and host not in {"passport.weibo.com", "open.weixin.qq.com"}:
@@ -304,6 +329,7 @@ class WechatHttpSession:
                 raise WechatHttpError("closed")
             try:
                 await self._initialize()
+                self.stage = "wechat_qr"
                 page = await self._follow(self._callback, phase="qr")
                 if (page.url.host, page.url.path) != ("open.weixin.qq.com", "/connect/qrconnect"):
                     raise WechatHttpError("qr")
@@ -426,6 +452,7 @@ class WechatHttpSession:
                 return []
             try:
                 self._remaining()
+                self.stage = "wechat_poll"
                 url = "https://long.open.weixin.qq.com/connect/l/qrconnect?" + urlencode(
                     {
                         "uuid": self._uuid,
@@ -466,6 +493,7 @@ class WechatHttpSession:
                 return []
 
     async def _complete(self, code: str) -> None:
+        self.stage = "weibo_callback"
         parts = urlsplit(self._callback)
         callback = urlunsplit(
             (
@@ -481,6 +509,7 @@ class WechatHttpSession:
         # register or bind an account. A normal HTTP redirect must reach Weibo.
         if landing.url.host not in {"weibo.com", "www.weibo.com"} or landing.url.path != "/":
             raise WechatHttpError("callback")
+        self.stage = "weibo_identity"
         response = await self._request(
             "GET",
             _IDENTITY,

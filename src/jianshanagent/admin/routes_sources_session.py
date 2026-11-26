@@ -40,11 +40,63 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         # 只展示本地固定提示，既说明人工验证阶段，也绝不透传上游错误或凭据。
         from jianshanagent.weibo_http import WechatHttpError
 
-        for code in ("callback", "identity"):
+        for code in (
+            "init",
+            "qr",
+            "unsafe",
+            "poll",
+            "callback",
+            "identity",
+            "network",
+            "expired",
+            "closed",
+            "save",
+        ):
             message = WechatHttpError(code).public_message
             if login.error == message:
                 return message
         return "登录未完成，请重试"
+
+    def login_diagnostics(login: Any) -> dict[str, str]:
+        # 仅保留固定枚举，不保存/展示原始 URL、响应正文、code、state 或 Cookie。
+        choices = {
+            "stage": {
+                "weibo_init",
+                "wechat_qr",
+                "wechat_poll",
+                "weibo_callback",
+                "weibo_identity",
+                "credential_save",
+            },
+            "error_code": {
+                "init",
+                "qr",
+                "unsafe",
+                "poll",
+                "callback",
+                "identity",
+                "network",
+                "expired",
+                "closed",
+                "save",
+            },
+            "callback_route": {
+                "weibo_logincallback",
+                "weibo_root",
+                "weibo_wbsso",
+                "weibo_auth",
+                "sina_login",
+                "sina_crossdomain",
+                "other",
+            },
+            "callback_scheme": {"https", "http", "other"},
+        }
+        return {
+            key: value
+            if isinstance(value := getattr(login, key, ""), str) and value in allowed
+            else ""
+            for key, allowed in choices.items()
+        }
 
     def session() -> dict[str, Any]:
         state = store().status()
@@ -53,7 +105,6 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         return {
             "configured": bool(state.get("configured")),
             "locally_usable": bool(state.get("locally_usable")),
-            # Only a recent, explicit remote identity check can establish validity.
             "valid": True if state.get("valid") is True else None,
             "updated_at": state.get("updated_at"),
             "available": bool(local.get("available")),
@@ -65,6 +116,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             "verified": bool(login is not None and getattr(login, "verified", False))
             and state.get("valid") is True,
             "error": login_error(login),
+            **login_diagnostics(login),
         }
 
     async def empty_body(request: web.Request) -> None:
@@ -138,6 +190,10 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                     "verified": state["verified"],
                     "valid": state["valid"],
                     "error": login_error(login),
+                    "stage": state["stage"],
+                    "error_code": state["error_code"],
+                    "callback_route": state["callback_route"],
+                    "callback_scheme": state["callback_scheme"],
                 }
             )
 

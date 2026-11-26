@@ -215,6 +215,21 @@ async def test_sub_alone_or_ambiguous_identity_is_never_success(identity: Any) -
     await login.aclose()
 
 
+async def test_rejected_callback_keeps_only_safe_route_and_stage_after_close() -> None:
+    fixture = OfficialFixture()
+    fixture.callback = httpx.Response(
+        302, headers={"Location": "https://weibo.com/sso/logincallback?ticket=" + _SUB}
+    )
+    login = session(fixture)
+    await login.generate_qr()
+    assert await login.cookies() == []
+    await login.aclose()
+    assert login.state == "error" and not login.verified
+    assert login.stage == "weibo_callback" and login.error_code == "unsafe"
+    assert login.callback_route == "weibo_logincallback" and login.callback_scheme == "https"
+    assert not login._callback and not list(login._client.cookies.jar)
+
+
 async def test_identity_positive_without_sub_rejected() -> None:
     fixture = OfficialFixture()
     fixture.set_sub = False
