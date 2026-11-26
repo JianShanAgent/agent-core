@@ -236,6 +236,17 @@ class AdminQueries:
 
     # ---- 处理记录 ----
 
+    async def integration_sources(self, message_ids: list[str]) -> dict[str, dict[str, str]]:
+        """用接入账本的请求编号匹配处理记录，不从匿名用户标识猜应用。"""
+        if not message_ids:
+            return {}
+        rows = await self._db.pool.fetch(
+            "SELECT r.request_id, r.app_id, a.name FROM integration_requests r "
+            "JOIN integration_apps a USING (app_id) WHERE r.request_id = ANY($1::text[])",
+            message_ids,
+        )
+        return {row["request_id"]: {"app_id": row["app_id"], "name": row["name"]} for row in rows}
+
     async def traces(
         self,
         *,

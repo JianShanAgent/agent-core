@@ -136,6 +136,8 @@ export interface TraceRow {
   completion_tokens: number;
   reasoning_tokens: number;
   summary: TraceSummary;
+  /** 第三方请求账本登记的应用；旧请求没有可核对的来源时省略。 */
+  integration_source?: { app_id: string; name: string };
   /** 还在处理的记录：现在走到哪一步了 */
   stage?: string;
   /** 在后台里给这个会话（群）、这个人起的备注名；没起就是空的 */

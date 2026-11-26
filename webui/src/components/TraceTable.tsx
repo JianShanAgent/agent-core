@@ -8,13 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Hint, Spinner, Table, Td, Th, Tr } from "@/components/ui/misc";
 import { formatSeconds, formatTime, formatTokens } from "@/lib/format";
 import {
-  CHANNEL_LABELS,
   label,
   ROUTE_LABELS,
-  SCOPE_LABELS,
   STEP_LABELS,
   traceResult,
-  who,
+  traceSource,
 } from "@/lib/labels";
 import type { TraceRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -61,6 +59,16 @@ export function TraceResultBadge({ row }: { row: TraceRow }) {
   );
 }
 
+function TraceSourceCell({ row }: { row: TraceRow }) {
+  const { primary, secondary } = traceSource(row);
+  return (
+    <Td className="max-w-36">
+      <div className="truncate text-sm" title={primary}>{primary}</div>
+      <div className="text-muted-foreground truncate text-[11px]" title={secondary}>{secondary}</div>
+    </Td>
+  );
+}
+
 export function TraceTable({
   rows,
   compact = false,
@@ -77,7 +85,7 @@ export function TraceTable({
       <thead>
         <tr>
           <Th className="w-24">时间</Th>
-          {showWho ? <Th className="w-36">谁</Th> : null}
+          {showWho ? <Th className="w-36">来源 / 用户</Th> : null}
           <Th>消息</Th>
           <Th className="w-20">走哪条路</Th>
           <Th className="w-32">结果</Th>
@@ -91,17 +99,7 @@ export function TraceTable({
             <Td className="text-muted-foreground text-xs whitespace-nowrap tabular-nums">
               {formatTime(row.started_at)}
             </Td>
-            {showWho ? (
-              <Td className="max-w-36">
-                <div className="truncate text-sm">{who(row)}</div>
-                <div className="text-muted-foreground truncate text-[11px]">
-                  {label(CHANNEL_LABELS, row.channel)} ·{" "}
-                  {row.scope === "group" && row.chat_label
-                    ? row.chat_label
-                    : label(SCOPE_LABELS, row.scope)}
-                </div>
-              </Td>
-            ) : null}
+            {showWho ? <TraceSourceCell row={row} /> : null}
             <Td className="max-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="truncate font-medium">{row.question || "（只发了图片）"}</span>

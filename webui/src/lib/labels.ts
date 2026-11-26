@@ -25,7 +25,11 @@ export const STATUS_LABELS: Record<string, string> = {
   error: "出错",
 };
 
-export const CHANNEL_LABELS: Record<string, string> = { qq: "QQ", web: "网页对话" };
+export const CHANNEL_LABELS: Record<string, string> = {
+  qq: "QQ",
+  web: "网页对话",
+  http: "第三方接入",
+};
 export const SCOPE_LABELS: Record<string, string> = {
   c2c: "单聊",
   group: "群聊",
@@ -95,6 +99,20 @@ export function who(row: {
   user_id?: string;
 }): string {
   return row.user_label || row.user_name || (row.user_id ? row.user_id.slice(0, 8) : "—");
+}
+
+/** 处理记录同时显示接入来源和发消息的人，不把 HTTP 标识的固定前缀当名字。 */
+export function traceSource(row: TraceRow): { primary: string; secondary: string } {
+  if (row.channel === "http") {
+    const digest = /^http-user-([\da-f]{64})$/.exec(row.user_id)?.[1];
+    const user = row.user_label || row.user_name || (digest ? `用户 #${digest.slice(0, 8)}` : "用户未识别");
+    return {
+      primary: row.integration_source?.name || row.integration_source?.app_id || "第三方接入",
+      secondary: `第三方 · ${user}`,
+    };
+  }
+  const scope = row.scope === "group" && row.chat_label ? row.chat_label : label(SCOPE_LABELS, row.scope);
+  return { primary: who(row), secondary: `${label(CHANNEL_LABELS, row.channel)} · ${scope}` };
 }
 
 export const RANGES: { hours: number; label: string }[] = [

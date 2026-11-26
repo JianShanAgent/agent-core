@@ -34,14 +34,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Hint, Pre, Spinner } from "@/components/ui/misc";
 import { api } from "@/lib/api";
 import { formatDateTime, formatNumber, formatSeconds, formatTokens } from "@/lib/format";
-import {
-  CHANNEL_LABELS,
-  label,
-  ROUTE_LABELS,
-  SCOPE_LABELS,
-  STEP_LABELS,
-  who,
-} from "@/lib/labels";
+import { label, ROUTE_LABELS, STEP_LABELS, traceSource } from "@/lib/labels";
 import type { EvidenceItem, LlmCall, TraceDetail as Trace, TraceStep } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -516,6 +509,7 @@ function StepRow({
 
 function Summary({ trace }: { trace: Trace }) {
   const research = trace.summary.research;
+  const source = traceSource(trace);
   return (
     <Card>
       <CardHeader>
@@ -523,12 +517,9 @@ function Summary({ trace }: { trace: Trace }) {
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
         <Field label="时间">{formatDateTime(trace.started_at)}</Field>
-        <Field label="谁">
-          {who(trace)}
-          <span className="text-muted-foreground">
-            {" "}
-            · {label(CHANNEL_LABELS, trace.channel)} · {label(SCOPE_LABELS, trace.scope)}
-          </span>
+        <Field label="来源 / 用户">
+          {source.primary}
+          <span className="text-muted-foreground"> · {source.secondary}</span>
         </Field>
         <Field label="会话">
           <Link

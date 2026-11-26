@@ -236,7 +236,20 @@ class Admin:
         names = await queries.user_names(
             sorted({str(item["user_id"]) for item in items if item.get("user_id")})
         )
+        sources = await queries.integration_sources(
+            sorted(
+                {
+                    str(item["message_id"])
+                    for item in items
+                    if item.get("channel") == "http" and item.get("message_id")
+                }
+            )
+        )
         for item in items:
+            if item.get("channel") == "http":
+                source = sources.get(str(item.get("message_id") or ""))
+                if source is not None:
+                    item["integration_source"] = source
             chat_id, user_id = str(item.get("chat_id") or ""), str(item.get("user_id") or "")
             item["chat_label"] = labels["chat"].get(chat_id, "")
             # 单聊里对方就是这个会话：给会话起的名字也就是他的名字

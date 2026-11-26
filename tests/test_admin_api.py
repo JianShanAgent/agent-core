@@ -1069,6 +1069,7 @@ async def test_admin_and_http_share_integration_auth_and_usage(env: Env) -> None
 
     from jianshanagent.core.db import Database
     from jianshanagent.core.integrations import IntegrationStore
+    from jianshanagent.core.trace_store import PostgresTraceStore
     from jianshanagent.core.usage import llm_usage, metered_post
     from jianshanagent.gateway.base import GatewayContext
     from jianshanagent.gateway.http import HttpGateway
@@ -1081,6 +1082,7 @@ async def test_admin_and_http_share_integration_auth_and_usage(env: Env) -> None
     await db.migrate()
     store = IntegrationStore(db)
     env.runtime.integrations = store
+    previous_db = env.runtime.db
     suffix = uuid4().hex[:8]
     a, b = (f"test-{label}-{suffix}" for label in ("a", "b"))
     legacy = "L" * 32
@@ -1092,7 +1094,13 @@ async def test_admin_and_http_share_integration_auth_and_usage(env: Env) -> None
         n = 17 if json.loads(request.content)["text"] == "different" else 11
         return httpx.Response(200, json={"usage": {"prompt_tokens": n, "completion_tokens": 5}})
 
+    recorded: list[trace.Trace] = []
+
     async def handle(message: InboundMessage) -> OutboundMessage:
+        row = trace.Trace(message)
+        row.status = trace.REPLIED
+        await PostgresTraceStore(db).save_trace(row)
+        recorded.append(row)
         if message.content != "/查":
             async with httpx.AsyncClient(transport=httpx.MockTransport(mocked_vendor)) as provider:
                 for _ in range(2):
@@ -1163,7 +1171,21 @@ async def test_admin_and_http_share_integration_auth_and_usage(env: Env) -> None
         assert first["models"][0]["model"] == "test-model"
         await env.get("/api/integrations/usage?from=2026-02-30&to=2026-03-01", 400)
         await env.get("/api/integrations/usage?from=2025-01-01&to=2026-03-01", 400)
+
+        env.runtime.db = db
+        records = (await env.get("/api/traces?channel=http"))["items"]
+        owned = {row.id: row for row in recorded}
+        matched = {row["question"]: row for row in records if row["id"] in owned}
+        assert matched["question"]["integration_source"] == {"app_id": a, "name": "停用 A"}
+        assert matched["different"]["integration_source"] == {"app_id": b, "name": "应用 B"}
+        assert matched["question"]["user_id"] != matched["different"]["user_id"]
+        detail = await env.get(f"/api/traces/{matched['question']['id']}")
+        assert detail["integration_source"] == matched["question"]["integration_source"]
+        assert "same-user" not in json.dumps(detail)
     finally:
         await gateway.stop()
+        env.runtime.db = previous_db
         env.runtime.integrations = None
+        for row in recorded:
+            await PostgresTraceStore(db).erase_trace(row.id)
         await db.close()
