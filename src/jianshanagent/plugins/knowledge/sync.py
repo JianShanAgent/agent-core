@@ -83,6 +83,7 @@ from jianshanagent.core.db import Database
 from jianshanagent.core.embedding import EmbeddingProvider, EmbeddingSettings
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.manifest import clear_caches, downloaded_sites_dir, read_sites_state
+from jianshanagent.core.sources import retained_source_ids
 from jianshanagent.core.update import restart_needed
 from jianshanagent.core.wiki import load_wikis
 from jianshanagent.plugins.knowledge.changes import (
@@ -1138,7 +1139,8 @@ async def run_wikis(
 
     有数据库就连上、导入，没有（或者连不上）就只更新文件。``keep_going``：一个 wiki 这一轮
     出了岔子（上一轮还没跑完、配置写坏了……）记下来接着做下一个，不抛出去。
-    ``forget_others``：库里已经不在 ``core.wiki.yaml`` 里的 wiki 的内容顺手删掉。
+    ``forget_others``：文本仅清理不在完整来源登记表中的命名空间；停用来源仍保留。
+    图库仍使用原 Wiki 所有权名单，不能把独立文档来源当成旧 Wiki 清掉。
     """
     db = None if plan_only else await _connect(config)
     records: dict[str, dict[str, Any]] = {}
@@ -1162,9 +1164,10 @@ async def run_wikis(
                     raise
                 logger.exception("kb_sync_round_crashed", wiki=wiki)
         if db is not None and forget_others:
-            keep = [entry.id for entry in config.wikis]
-            chunks = await PostgresKnowledgeStore(db).keep_only(keep)
-            images = await PostgresImageStore(db).keep_only(keep)
+            keep_text = sorted(retained_source_ids(config))
+            keep_images = [entry.id for entry in config.wikis]
+            chunks = await PostgresKnowledgeStore(db).keep_only(keep_text)
+            images = await PostgresImageStore(db).keep_only(keep_images)
             if chunks or images:
                 logger.warning("kb_sync_forgot_removed_wikis", chunks=chunks, images=images)
     finally:

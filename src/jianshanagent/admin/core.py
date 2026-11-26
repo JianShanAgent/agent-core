@@ -176,6 +176,12 @@ class Admin:
         self._backup: dict[str, Any] | None = None
         self._backup_checked: float | None = None
         self._restarting: set[asyncio.Task[None]] = set()
+        # Source imports outlive reloadable plugin hosts; configuration changes share this lock.
+        self.source_mutation_lock = asyncio.Lock()
+        self.source_imports: Any | None = None
+        # Platform login sessions are shared by all instances, not by captured authors.
+        self.weibo: Any | None = None
+        self.weibo_qr: Any | None = None
         config_root = getattr(getattr(runtime, "config", None), "root", Path("config"))
         self.bilibili = BilibiliCredentialStore(config_root)
         self.bilibili_qr: Any | None = None
@@ -374,6 +380,21 @@ def guard(admin: Admin) -> Any:
                     request.headers.get(CSRF_HEADER) != CSRF_VALUE
                 ):
                     fail(403, "请求缺少必要的请求头")
+            config_change = request.method not in {"GET", "HEAD"} and (
+                request.path.startswith(("/api/config", "/api/plugins", "/api/wikis"))
+                or request.path
+                in {
+                    "/api/system/reload",
+                    "/api/system/restart",
+                    "/api/update/apply",
+                    "/api/update/revert",
+                }
+            )
+            if config_change:
+                async with admin.source_mutation_lock:
+                    if admin.source_imports is not None and admin.source_imports.active():
+                        fail(409, "资料导入运行中，完成或取消后才能修改配置或重新装配")
+                    return await handler(request)
             return await handler(request)
         except ApiError as exc:
             return reply({"error": exc.message}, exc.status)

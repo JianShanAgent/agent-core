@@ -44,6 +44,7 @@ from jianshanagent.core.manifest import (
     read_sites_state,
     site_source,
 )
+from jianshanagent.core.sources import source_instances
 from jianshanagent.plugins.knowledge.settings import kb_root, load_settings
 from jianshanagent.plugins.knowledge.sync import (
     KB_NONE,
@@ -168,7 +169,12 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             "sync_alive": alive,
         }
 
+    def require_bilibili_wiki() -> None:
+        if not admin.disk_config().wikis:
+            fail(409, "没有 Wiki 来源，文档来源不支持 B 站登录")
+
     async def bilibili_status(_request: web.Request) -> web.Response:
+        require_bilibili_wiki()
         credential = admin.bilibili.credential()
         valid = await admin.bilibili.refresh_if_needed() if credential else False
         return reply(
@@ -180,8 +186,11 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         )
 
     async def bilibili_qr(_request: web.Request) -> web.Response:
+        require_bilibili_wiki()
         if admin.bilibili_qr is not None and admin.bilibili_qr.state in {
-            "waiting", "scanned", "confirmed"
+            "waiting",
+            "scanned",
+            "confirmed",
         }:
             fail(409, "已经有一个扫码登录在进行")
         login = BilibiliQrLogin(admin.bilibili)
@@ -193,6 +202,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         return reply({"image": image, "state": login.state})
 
     async def bilibili_poll(_request: web.Request) -> web.Response:
+        require_bilibili_wiki()
         login = admin.bilibili_qr
         if login is None:
             fail(409, "还没有待确认的二维码")
@@ -217,6 +227,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 "platforms": [
                     {"id": item.id, "name": item.name, "description": item.description}
                     for item in platforms().values()
+                    if item.driver == "mediawiki"
                 ],
                 "wikis": [describe(disk, entry) for entry in disk.wikis],
                 #: 这台机器上的站点插件，按平台归在一起。不靠站点目录：目录是组织里还能下载的，
@@ -317,7 +328,9 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             for entry in disk.wikis:
                 if entry.site is not None and entry.site.id == site.id:
                     fail(409, f"这个站已经挂着了（wiki「{entry.id}」）")
-            taken = {entry.id for entry in disk.wikis} | {str(item.get("id")) for item in stored}
+            taken = {entry.id for entry in source_instances(disk)} | {
+                str(item.get("id")) for item in stored
+            }
             if wiki_id in taken:
                 fail(409, f"已经有一个叫「{wiki_id}」的 wiki 了，换一个名字")
 

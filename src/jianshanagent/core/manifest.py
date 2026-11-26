@@ -140,6 +140,8 @@ FEATURES_PACKAGE = "jianshanagent.plugins"
 PLATFORMS_PACKAGE = "jianshanagent.platforms"
 #: 不在哪个平台上的 MediaWiki 站算在这个平台上：它什么都不多带
 DEFAULT_PLATFORM = "mediawiki"
+DRIVER_MEDIAWIKI = "mediawiki"
+DRIVER_DOCUMENTS = "documents"
 #: 别的发行包登记插件用的 entry points 组：名字 = 插件 id，值 = 插件的包路径
 ENTRY_POINTS = {KIND_FEATURE: "jianshanagent.plugins", KIND_SITE: "jianshanagent.sites"}
 #: 实例目录下放自己写的站点插件的子目录
@@ -157,7 +159,7 @@ _KEYS = {
     KIND_FEATURE: {"id", "kind", "name", "description", "after", "extension_points"},
     KIND_SITE: {"id", "kind", "name", "description", "platform", "capabilities"},
     KIND_DEPLOY: {"id", "kind", "name", "description", "services"},
-    KIND_PLATFORM: {"id", "name", "description", "capabilities"},
+    KIND_PLATFORM: {"id", "name", "description", "capabilities", "driver"},
 }
 _CONFIG_PREFIX = {KIND_FEATURE: "plugin.", KIND_SITE: "site.", KIND_PLATFORM: "platform."}
 _MANIFEST_FILES = {KIND_PLATFORM: PLATFORM_FILE}
@@ -195,6 +197,8 @@ class Manifest:
     extension_points: tuple[str, ...] = ()
     #: 部署插件：它的 Compose 片段里有哪些服务
     services: tuple[str, ...] = ()
+    #: 平台驱动明确声明；旧清单默认仍然是 MediaWiki。
+    driver: str = DRIVER_MEDIAWIKI
 
     @property
     def config_name(self) -> str:
@@ -275,6 +279,9 @@ def read_manifest(directory: Path, package: str, kind: str, plugin_id: str = "")
                 f"{where} 的 capabilities 里有不认识的能力：{'、'.join(wrong)}"
                 f"（现在有 {'、'.join(sorted(allowed))}）"
             )
+    driver = raw.get("driver", DRIVER_MEDIAWIKI)
+    if driver not in (DRIVER_MEDIAWIKI, DRIVER_DOCUMENTS):
+        raise PluginError(f"{where} 的 driver 应该是 mediawiki 或 documents")
     return Manifest(
         id=plugin_id,
         kind=kind,
@@ -287,6 +294,7 @@ def read_manifest(directory: Path, package: str, kind: str, plugin_id: str = "")
         after=_names(raw, "after", where),
         extension_points=_names(raw, "extension_points", where),
         services=_services(raw, where) if kind == KIND_DEPLOY else (),
+        driver=driver,
     )
 
 

@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
+from jianshanagent.plugins.knowledge.source_filter import SourceFilter, canonical_document_id
+
 if TYPE_CHECKING:
     from jianshanagent.plugins.knowledge.store import KbChunk
 
@@ -43,12 +45,22 @@ def _iso_date(value: str | None) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class NewsQuery:
-    source_platforms: tuple[str, ...]
+    source_platforms: tuple[str, ...] | None
     date_from: str | None = None
     date_to: str | None = None
     as_of: str | None = None
     keywords: tuple[str, ...] = ()
     limit: int = 10
+    source_ids: tuple[str, ...] | None = None
+    author_ids: tuple[str, ...] | None = None
+    source_filter: SourceFilter | None = None
+
+    def filters(self) -> SourceFilter:
+        return SourceFilter(
+            source_ids=self.source_ids,
+            source_platforms=self.source_platforms,
+            author_ids=self.author_ids,
+        ).intersect(self.source_filter)
 
     def __post_init__(self) -> None:
         for name in ("date_from", "date_to", "as_of"):
@@ -59,8 +71,10 @@ class NewsQuery:
             raise ValueError("date_from 不能晚于 date_to")
         if type(self.limit) is not int or not 1 <= self.limit <= MAX_NEWS_LIMIT:
             raise ValueError(f"limit 必须是 1..{MAX_NEWS_LIMIT} 的整数")
-        for name in ("source_platforms", "keywords"):
+        for name in ("source_platforms", "keywords", "source_ids", "author_ids"):
             values = getattr(self, name)
+            if values is None and name in ("source_platforms", "source_ids", "author_ids"):
+                continue
             if not isinstance(values, (tuple, list)) or any(
                 not isinstance(value, str) or not value.strip() for value in values
             ):
@@ -86,31 +100,29 @@ def select_recent_documents(
     exclude_wikis: Collection[str] | None = None,
 ) -> NewsResult:
     """内存实现；与 PG 的文档级查询保持同义，先聚合再筛主题、日期及限篇数。"""
-    if not query.source_platforms:
+    if query.source_platforms == ():
         return NewsResult(chunks=[])
-    sources = frozenset(query.source_platforms)
-    excluded = frozenset(exclude_wikis or ())
+    source_filter = query.filters().intersect(
+        SourceFilter(exclude_source_ids=tuple(exclude_wikis or ()))
+    )
     as_of = query.as_of or date.today().isoformat()
     documents: dict[str, list[KbChunk]] = {}
     for chunk in chunks:
-        platform = chunk.meta.get("source_platform")
-        if (
-            chunk.kind == "announcement"
-            and isinstance(platform, str)
-            and platform in sources
-            and chunk.wiki not in excluded
-        ):
+        if chunk.kind in ("announcement", "post") and source_filter.allows(chunk):
             documents.setdefault(chunk.doc_key, []).append(chunk)
 
     latest: str | None = None
-    undated = 0
+    undated_ids: set[str] = set()
+    dated_ids: set[str] = set()
     matching: list[tuple[str, datetime | None, KbChunk]] = []
     keywords = tuple(word.lower() for word in query.keywords)
     for parts in documents.values():
+        identity = canonical_document_id(parts[0]) or f"doc:{parts[0].doc_key}"
         published = max((_iso_date(part.date) or "" for part in parts), default="")
         if not published:
-            undated += 1
+            undated_ids.add(identity)
             continue
+        dated_ids.add(identity)
         if published > as_of:
             continue
         latest = max(latest or "", published)
@@ -134,9 +146,33 @@ def select_recent_documents(
     matching.sort(key=lambda item: (item[2].doc_key, item[2].chunk_id))
     matching.sort(key=lambda item: (item[1] is not None, item[1]), reverse=True)
     matching.sort(key=lambda item: item[0], reverse=True)
+    unique: dict[str, KbChunk] = {}
+    captures: dict[str, list[dict[str, str]]] = {}
+    for _, _, first in matching:
+        identity = canonical_document_id(first) or f"doc:{first.doc_key}"
+        unique.setdefault(identity, first)
+        captures.setdefault(identity, []).append(
+            {
+                "source_id": first.wiki,
+                "doc_key": first.doc_key,
+                "url": first.url,
+            }
+        )
+    for identity, first in unique.items():
+        if len(captures[identity]) > 1:
+            unique[identity] = replace(
+                first,
+                meta={
+                    **first.meta,
+                    "captures": sorted(
+                        captures[identity],
+                        key=lambda capture: capture["doc_key"],
+                    ),
+                },
+            )
     return NewsResult(
-        chunks=[first for _, _, first in matching[: query.limit]],
+        chunks=list(unique.values())[: query.limit],
         source_latest_date=latest,
-        matching_documents=len(matching),
-        undated_documents=undated,
+        matching_documents=len(unique),
+        undated_documents=len(undated_ids - dated_ids),
     )

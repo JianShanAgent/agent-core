@@ -842,6 +842,113 @@ export interface WikisInfo {
   state: ConfigState;
 }
 
+// ---- 资料来源 ----
+
+/** 来源的能力标志 */
+export interface SourceCapabilities {
+  /** 支持文档导入 */
+  import?: boolean;
+  /** 支持向量检索 */
+  search?: boolean;
+  /** 支持近期资讯查询 */
+  recent?: boolean;
+  /** 有采集器（否则只能手动导入） */
+  collect?: boolean;
+  [key: string]: unknown;
+}
+
+/** 来源当前的知识库统计 */
+export interface SourceKnowledge {
+  documents: number;
+  chunks: number;
+  latest_document_at: string | null;
+  loaded_at: string | null;
+}
+
+/** 导入任务状态 */
+export type ImportState =
+  | "validating"
+  | "embedding"
+  | "committing"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "recovery_required"
+  /** 进程重启导致的中断，可重新正常导入（走预览→确认流程） */
+  | "interrupted";
+
+export interface ImportStatus {
+  state: ImportState;
+  job_id?: string | null;
+  /** 进度说明 */
+  message?: string | null;
+  /** 错误详情 */
+  error?: string | null;
+  /** 处理记录数 */
+  records?: number | null;
+  new?: number | null;
+  updated?: number | null;
+  unchanged?: number | null;
+  chunks?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** 一个来源实例 */
+export interface SourceInfo {
+  id: string;
+  label: string;
+  /** 平台 ID，如 "weibo"、"documents" */
+  platform: string;
+  /** 驱动类型，如 "documents"、"mediawiki" */
+  driver: string;
+  /** 是否参与问答（挂载状态） */
+  mounted: boolean;
+  /** 来源身份角色：unknown / official / community */
+  role: "unknown" | "official" | "community";
+  capabilities: SourceCapabilities;
+  knowledge: SourceKnowledge | null;
+  /** 最新导入任务状态；没有导入记录时是 null */
+  import_status: ImportStatus | null;
+  /** 采集器状态；"not_configured" = 尚未配置采集器 */
+  collector_status: "not_configured" | string;
+}
+
+/** 文档平台 manifest（GET /api/sources 返回的 platforms 只含 documents 平台） */
+export interface SourcePlatformManifest {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface SourcesInfo {
+  sources: SourceInfo[];
+  platforms: SourcePlatformManifest[];
+  /** 是否有配置覆写目录（可写才允许新建来源） */
+  writable: boolean;
+}
+
+/** 预览响应 */
+export interface ImportPreview {
+  source_id: string;
+  records: number;
+  new: number;
+  updated: number;
+  unchanged: number;
+  total_documents: number;
+  chunks: number;
+  /** 整个批次无记录（空批次不会删除已有资料） */
+  empty: boolean;
+  /** 前几条样本（不含向量，可安全展示） */
+  sample: Record<string, unknown>[];
+}
+
+/** 导入响应（202）：初始 state='validating'，附带和 preview 相同的校验结果 */
+export interface ImportJob extends ImportPreview {
+  job_id?: string | null;
+  state: ImportState;
+}
+
 /** 站点目录里的一项 */
 export interface CatalogSite {
   id: string;

@@ -47,12 +47,15 @@ from jianshanagent.core import trace
 from jianshanagent.core.llm import LLMClient, LLMContentBlocked, LLMError, user_message
 from jianshanagent.core.logging import get_logger
 from jianshanagent.plugins.knowledge.news import NewsQuery, NewsResult
+from jianshanagent.plugins.knowledge.source_filter import SourceFilter
 from jianshanagent.plugins.research.analysis import (
     DEFAULT_TOPICS,
     NameLookup,
     NewsSource,
     Understanding,
     Wording,
+    explicit_source_scope,
+    source_filter_for,
     understand,
 )
 from jianshanagent.plugins.research.evidence import (
@@ -61,6 +64,7 @@ from jianshanagent.plugins.research.evidence import (
     Evidence,
     EvidenceSource,
     Sources,
+    deduplicate_evidence,
     image_evidence,
     render,
 )
@@ -230,7 +234,8 @@ _ANALYST = """你是{bot}的查证员。根据上面的资料回答下面的用�
    要列全的名单、要数的总数，如果只出现在{excerpt}里，照着列出来的同时说明可能不全。
 4. 资料开头标着它是从哪里查到的。标着「{web}」的是网上搜来的，不是 wiki 的内容：
    只在别的资料答不了时才用，用到时说明是网上搜到的，普通查询和别的资料矛盾时以别的资料为准。
-   其余的是 wiki 收录的内容（包括收录的官方公告）。资讯回答要区分知识库收录与联网补充，
+   其余是资料库收录：可能是 Wiki 解释、直接导入的微博或社区讨论，按出处与当前来源身份区分，
+   不能把 Wiki 或社区资料笼统当成官方。资讯回答要区分知识库收录与联网补充，
    依据发表日期和正文核对新旧、当前状态，不能用旧帖覆盖已经证实的新公告；不能把未收录说成没有。
 5. 只回答用户问的那件事：先说结论，再给必要的依据，用户没问的不要展开。
    概括性的问题（「X 是什么」「X 怎么样」）用两三句话说清是什么、最要紧的一两点，再给页面链接，
@@ -661,6 +666,7 @@ class ResearchWorkflow:
         searched: dict[str, list[str]] = {}  # 各个来源用过的搜索词
         current = self.clock().astimezone(self.timezone)
         news_query: NewsQuery | None = None
+        query_filter: SourceFilter | None = None
         news_reason = "尚未检索资讯"
 
         def news_notes(result: NewsResult) -> None:
@@ -687,9 +693,14 @@ class ResearchWorkflow:
                 news_reason = "来源最近收录发表日距当前时间过久"
             else:
                 news_reason = "知识库已有近期资料；只有缺当天或具体内容缺口时才需联网补充"
+            platforms = dict.fromkeys(
+                settings.news_sources[key].source_platform
+                for key in understanding.source_scope
+                if settings.news_sources[key].source_platform
+            )
             notes.append(
                 f"知识库实际来源：{understanding.source_label or understanding.source}"
-                f"（平台 {', '.join(news_query.source_platforms) if news_query else ''}）；"
+                f"（平台 {', '.join(platforms) or '不限原平台'}）；"
                 f"资料截止日 {current.date().isoformat()}；"
                 f"来源全库最新可靠发表日 {latest or '未知'}；"
                 f"本次命中最新发表日 {matching_latest or '未知'}；"
@@ -712,15 +723,15 @@ class ResearchWorkflow:
         def add(found: Sequence[Evidence]) -> int:
             """把新查到的资料并进来（重复的、放不下的不要），返回新增了几条。"""
             nonlocal used
-            have = {item.key for item in evidence}
             added = 0
             for item in found:
-                if item.key in have or (
-                    evidence and used + len(item.text) > settings.evidence_chars
-                ):
+                merged = deduplicate_evidence([*evidence, item])
+                if len(merged) == len(evidence):
+                    evidence[:] = merged  # 保留合并后的采集副本，不消耗另一份正文预算。
                     continue
-                have.add(item.key)
-                evidence.append(item)
+                if evidence and used + len(item.text) > settings.evidence_chars:
+                    continue
+                evidence[:] = merged
                 used += len(item.text)
                 added += 1
             return added
@@ -765,6 +776,7 @@ class ResearchWorkflow:
                         and position == 0
                         and level == 0
                         and entries
+                        and query_filter is None
                         and self.entry_pages is not None
                     ):
                         # 点到名的条目自己的内容排在最前面
@@ -785,9 +797,10 @@ class ResearchWorkflow:
                                 mode=understanding.intent,
                                 filters={
                                     "source": understanding.source,
-                                    "source_platforms": list(news_query.source_platforms)
+                                    "source_platforms": list(news_query.source_platforms or ())
                                     if news_query
                                     else [],
+                                    "source_scope": list(understanding.source_scope),
                                     "date_from": understanding.date_from,
                                     "date_to": understanding.date_to,
                                     "as_of": current.date().isoformat(),
@@ -824,6 +837,17 @@ class ResearchWorkflow:
                             # 普通站内相似度检索没有来源/发表日期过滤，不能污染资讯集合。
                             found = []
                             record.set(skipped="资讯查询仅用受限知识库及必要联网补充")
+                        elif query_filter is not None and not (
+                            understanding.intent != "lookup" and source.name == "web"
+                        ):
+                            filtered = getattr(source, "collect_filtered", None)
+                            if filtered is None:
+                                found = []
+                                record.set(skipped="此来源不支持请求级来源过滤，不无范围补查")
+                            else:
+                                found = await filtered(
+                                    outcome.query, keywords, {e.key for e in evidence}, query_filter
+                                )
                         else:
                             if understanding.intent != "lookup" and source.name == "web":
                                 record.set(reason=news_reason)
@@ -856,10 +880,25 @@ class ResearchWorkflow:
                 # 同一个页面挑中了好几片的，把这一页剩下的也补上
                 with trace.span("fill", "把挑中的页面补全") as record:
                     try:
-                        filler = self.page_filler.fill
-                        if news_query is not None:
-                            filler = getattr(self.page_filler, "fill_news", filler)
-                        filled = await filler(evidence, start, settings.evidence_chars - used)
+                        if query_filter is not None:
+                            filtered_fill = getattr(self.page_filler, "fill_filtered", None)
+                            if filtered_fill is None:
+                                filled = list(evidence)
+                                record.set(skipped="补全器不支持来源过滤，不做无范围补全")
+                            else:
+                                filled = await filtered_fill(
+                                    evidence,
+                                    start,
+                                    settings.evidence_chars - used,
+                                    query_filter,
+                                    news=news_query is not None,
+                                )
+                        else:
+                            filler = self.page_filler.fill
+                            if news_query is not None:
+                                filler = getattr(self.page_filler, "fill_news", filler)
+                            filled = await filler(evidence, start, settings.evidence_chars - used)
+                        filled = deduplicate_evidence(filled)
                     except Exception as exc:
                         logger.warning("research_page_fill_failed", error=repr(exc)[:300])
                         record.ok = False
@@ -971,16 +1010,21 @@ class ResearchWorkflow:
                     ],
                     query=understanding.search_query(question),
                 )
+        if not settings.analysis_profile:
+            scope = explicit_source_scope(question, settings.news_sources)
+            understanding.source_scope = scope
+            understanding.source = scope[0] if len(scope) == 1 else ""
+            understanding.source_label = "、".join(
+                settings.news_sources[key].label for key in scope
+            )
         notes = understanding.notes()
+        if understanding.source_scope:
+            query_filter = source_filter_for(understanding.source_scope, settings.news_sources)
         if understanding.intent != "lookup":
             if understanding.source_scope and not understanding.date_error:
                 news_query = NewsQuery(
-                    source_platforms=tuple(
-                        dict.fromkeys(
-                            settings.news_sources[key].source_platform
-                            for key in understanding.source_scope
-                        )
-                    ),
+                    source_platforms=None,
+                    source_filter=query_filter,
                     date_from=understanding.date_from,
                     date_to=understanding.date_to,
                     as_of=current.date().isoformat(),
@@ -1000,7 +1044,7 @@ class ResearchWorkflow:
             return done(ANSWERED)
         #: 问题里点到名、在 wiki 上确实有的条目（正式名）
         entries = list(dict.fromkeys(n.title for n in understanding.names if n.exact))
-        if images:
+        if images and query_filter is None:
             await step(IMAGE)
             with trace.span(IMAGE, settings.image_label, images=len(images)) as record:
                 found, note, identified = await self._look_at_images(images)

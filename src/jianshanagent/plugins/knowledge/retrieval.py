@@ -30,12 +30,13 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 
 from jianshanagent.core.embedding import EmbeddingClient, EmbeddingError, EmbeddingProvider
 from jianshanagent.core.logging import get_logger
 from jianshanagent.plugins.knowledge.news import NewsQuery, NewsResult
+from jianshanagent.plugins.knowledge.source_filter import SourceFilter, canonical_document_id
 from jianshanagent.plugins.knowledge.store import ChunkPlace, Hit, KbChunk, KnowledgeStore
 from jianshanagent.plugins.knowledge.terms import extract_terms
 
@@ -108,6 +109,37 @@ def merge(
             keyword_rank=keyword_rank.get(chunk_id),
         )
         for chunk_id in order
+    ]
+
+
+def _deduplicate_copies(hits: list[Ranked]) -> list[Ranked]:
+    """只去跨采集副本；选中页内的多切片保留，顺序及名次不动。"""
+    selected: dict[str, str] = {}
+    captures: dict[str, dict[str, dict[str, str]]] = {}
+    kept = []
+    for hit in hits:
+        chunk = hit.chunk
+        identity = canonical_document_id(chunk)
+        if identity is not None:
+            captures.setdefault(identity, {})[chunk.doc_key] = {
+                "source_id": chunk.wiki,
+                "doc_key": chunk.doc_key,
+                "url": chunk.url,
+            }
+            if selected.setdefault(identity, chunk.doc_key) != chunk.doc_key:
+                continue
+        kept.append(hit)
+    return [
+        dataclasses.replace(
+            hit,
+            chunk=dataclasses.replace(
+                hit.chunk,
+                meta={**hit.chunk.meta, "captures": list(captures[identity].values())},
+            ),
+        )
+        if (identity := canonical_document_id(hit.chunk)) and len(captures[identity]) > 1
+        else hit
+        for hit in kept
     ]
 
 
@@ -233,19 +265,65 @@ class Retriever:
         embedder: EmbeddingClient | None,
         settings: RetrievalSettings | None = None,
         exclude_wikis: Collection[str] = (),
+        legacy_source_id: str | None = None,
+        source_filter: SourceFilter | None = None,
+        source_filter_provider: Callable[[], SourceFilter] | None = None,
     ):
         self.store = store
         self.embedder = embedder
         self.settings = settings or RetrievalSettings()
         #: 卸下了挂载的 wiki。空的表示都挂着
         self.exclude_wikis = frozenset(exclude_wikis)
+        self.legacy_source_id = legacy_source_id
+        self.source_filter = source_filter
+        self.source_filter_provider = source_filter_provider
         self._vectors: dict[str, Sequence[float]] = {}
         #: 嵌入接口刚出过错：到这个时刻（``time.monotonic``）之前不问它，原因记在 ``_embed_error``
         self._embed_off_until = 0.0
         self._embed_error = ""
 
+    def _filter(self, source_filter: SourceFilter | None = None) -> SourceFilter:
+        # 退休host仍供在途消息使用；每次读都与runtime最新范围取交集，只收紧不扩权。
+        current_filter = None
+        if self.source_filter_provider is not None:
+            try:
+                current_filter = self.source_filter_provider()
+                if not isinstance(current_filter, SourceFilter):
+                    raise TypeError("实时来源过滤必须返回SourceFilter")
+            except Exception:
+                logger.warning("kb_live_source_filter_unavailable")
+                current_filter = SourceFilter(source_ids=())
+        return (
+            SourceFilter(exclude_source_ids=tuple(self.exclude_wikis))
+            .intersect(self.source_filter)
+            .intersect(current_filter)
+            .intersect(source_filter)
+            .with_legacy_source(self.legacy_source_id)
+        )
+
+    async def get(
+        self, chunk_ids: Collection[str], *, source_filter: SourceFilter | None = None
+    ) -> list[KbChunk]:
+        return await self.store.get(chunk_ids, source_filter=self._filter(source_filter))
+
     async def recent(self, query: NewsQuery) -> NewsResult:
         """近期公告按发布时间选篇，不算问题向量，也不改变普通检索的相关性排名。"""
+        if (
+            self.legacy_source_id
+            or self.source_filter is not None
+            or self.source_filter_provider is not None
+        ):
+            query = dataclasses.replace(
+                query,
+                source_ids=None,
+                author_ids=None,
+                source_filter=self._filter(
+                    SourceFilter(
+                        source_ids=query.source_ids,
+                        author_ids=query.author_ids,
+                    ).intersect(query.source_filter)
+                ),
+            )
         return await self.store.recent_documents(query, exclude_wikis=self.exclude_wikis)
 
     async def aclose(self) -> None:
@@ -291,6 +369,7 @@ class Retriever:
         limit: int,
         exclude: Collection[str] = (),
         wiki: str | None = None,
+        source_filter: SourceFilter | None = None,
     ) -> list[KbChunk]:
         """只在给定标题的页面里，找和问题最接近的几片（向量用不了时按关键词挑）。
 
@@ -311,6 +390,7 @@ class Retriever:
                 wiki=wiki,
                 fingerprint=self._fingerprint,
                 exclude_wikis=left_out,
+                source_filter=self._filter(source_filter),
             )
         else:
             hits = await self.store.keyword_search(
@@ -320,10 +400,18 @@ class Retriever:
                 titles=titles,
                 wiki=wiki,
                 exclude_wikis=left_out,
+                source_filter=self._filter(source_filter),
             )
         return [hit.chunk for hit in hits if hit.chunk.chunk_id not in exclude][:limit]
 
-    async def page_text(self, title: str, *, chars: int, url_prefix: str = "") -> str:
+    async def page_text(
+        self,
+        title: str,
+        *,
+        chars: int,
+        url_prefix: str = "",
+        source_filter: SourceFilter | None = None,
+    ) -> str:
         """知识库里标题是 ``title`` 的页面的正文，从头起约 ``chars`` 字；没有这一页返回空串。
 
         给 ``/查`` 用：有的页面是模板拼出来的，wiki 接口给不出正文摘要。不算向量，只查一次库。
@@ -332,21 +420,34 @@ class Retriever:
         title = title.strip()
         if not title or chars <= 0:
             return ""
-        return stitch_page(await self.store.page(title, url_prefix=url_prefix), chars=chars)
+        return stitch_page(
+            await self.store.page(
+                title, url_prefix=url_prefix, source_filter=self._filter(source_filter)
+            ),
+            chars=chars,
+        )
 
     async def fill_pages(
-        self, picked: Sequence[str], *, room: int, min_hits: int = 2, max_chars: int = 8000
+        self,
+        picked: Sequence[str],
+        *,
+        room: int,
+        min_hits: int = 2,
+        max_chars: int = 8000,
+        source_filter: SourceFilter | None = None,
     ) -> tuple[PagePlan, list[KbChunk]]:
         """把已经挑中的切片（``picked`` 是它们的 id）所在的页面补齐：返回（怎么补，补进来的切片）。
 
         规则见 :func:`plan_pages`。不算向量，只查两次库。
         """
-        places = await self.store.outline(picked)
+        places = await self.store.outline(picked, source_filter=self._filter(source_filter))
         plan = plan_pages(places, picked, min_hits=min_hits, max_chars=max_chars, room=room)
-        chunks = await self.store.get(plan.missing) if plan.missing else []
+        chunks = await self.get(plan.missing, source_filter=source_filter) if plan.missing else []
         return plan, chunks
 
-    async def search(self, query: str, *, top_k: int | None = None) -> RetrievalResult:
+    async def search(
+        self, query: str, *, top_k: int | None = None, source_filter: SourceFilter | None = None
+    ) -> RetrievalResult:
         started = time.perf_counter()
         settings = self.settings
         limit = top_k or settings.top_k
@@ -357,7 +458,11 @@ class Retriever:
         left_out = self.exclude_wikis or None
         vector_hits = (
             await self.store.vector_search(
-                vector, limit=limit, fingerprint=self._fingerprint, exclude_wikis=left_out
+                vector,
+                limit=limit,
+                fingerprint=self._fingerprint,
+                exclude_wikis=left_out,
+                source_filter=self._filter(source_filter),
             )
             if vector is not None
             else []
@@ -367,10 +472,37 @@ class Retriever:
             limit=limit,
             max_df_ratio=settings.max_df_ratio,
             exclude_wikis=left_out,
+            source_filter=self._filter(source_filter),
         )
         hits = merge(
             vector_hits, keyword_hits, top_k=limit, keyword_slots=min(settings.keyword_slots, limit)
         )
+        unique = _deduplicate_copies(hits)
+        if len(unique) < len(hits):
+            # 仅发现跨副本挤占名额时扩大一次召回；硬上限避免无边界补足。
+            pool_limit = min(1000, max(100, limit * 8))
+            if vector is not None:
+                vector_hits = await self.store.vector_search(
+                    vector,
+                    limit=pool_limit,
+                    fingerprint=self._fingerprint,
+                    source_filter=self._filter(source_filter),
+                )
+            keyword_hits = await self.store.keyword_search(
+                extract_terms(query),
+                limit=pool_limit,
+                max_df_ratio=settings.max_df_ratio,
+                source_filter=self._filter(source_filter),
+            )
+            unique = _deduplicate_copies(
+                merge(
+                    vector_hits,
+                    keyword_hits,
+                    top_k=pool_limit,
+                    keyword_slots=min(settings.keyword_slots, limit),
+                )
+            )
+        hits = unique[:limit]
         if vector_hits and keyword_hits:
             mode = MODE_HYBRID
         elif vector_hits:

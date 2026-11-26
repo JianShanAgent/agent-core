@@ -34,6 +34,7 @@ from jianshanagent.core.manifest import (
 )
 from jianshanagent.core.plugin import PluginHost
 from jianshanagent.core.sites import EXTENSION_KNOWLEDGE, EXTENSION_WIKI, SiteSetup, load_sites
+from jianshanagent.core.sources import EXTENSION_DOCUMENTS
 from jianshanagent.core.wiki import WikiSite, load_wikis
 from jianshanagent.platforms.huiji.knowledge import HuijiKnowledge
 from jianshanagent.platforms.huiji.wiki import HuijiData
@@ -53,7 +54,7 @@ def config_for(site: str, **files: dict[str, Any]) -> AppConfig:
 
 def test_the_core_ships_the_platforms() -> None:
     found = platforms()
-    assert set(found) == {"huiji", "bwiki", DEFAULT_PLATFORM}
+    assert set(found) == {"huiji", "bwiki", "weibo", DEFAULT_PLATFORM}
     packages = {p.parent.name for p in (SOURCE / "platforms").glob("*/platform.yaml")}
     assert packages == set(found)  # platforms/ 下面的每个目录都有清单
     for manifest in found.values():
@@ -66,6 +67,10 @@ def test_the_core_ships_the_platforms() -> None:
             if capability == "extend":
                 extend = yaml.safe_load(manifest.config_path.read_text("utf-8"))["extend"]
                 assert extend, manifest.id
+            elif capability == EXTENSION_DOCUMENTS:
+                module = importlib.import_module(manifest.package)
+                assert callable(module.create_source_adapter), (manifest.id, capability)
+                assert manifest.driver == "documents"
             else:
                 module = importlib.import_module(f"{manifest.package}.{capability}")
                 assert callable(module.create), (manifest.id, capability)
@@ -120,10 +125,10 @@ def test_every_shipped_feature_plugin_is_a_directory_with_a_manifest_config_and_
     for manifest in features.values():
         for earlier in manifest.after:
             assert enabled.index(earlier) < enabled.index(manifest.id)
-    # 扩展点：查询和知识库各开一个，平台、站点插件的能力只能是这两个加上「对通用配置的补充」
+    # Wiki 扩展点保持不变，标准文档来源使用不要求 WikiSite 的独立扩展点。
     assert features["wiki_query"].extension_points == (EXTENSION_WIKI,)
-    assert features["knowledge"].extension_points == (EXTENSION_KNOWLEDGE,)
-    assert extension_points() == {EXTENSION_WIKI, EXTENSION_KNOWLEDGE}
+    assert features["knowledge"].extension_points == (EXTENSION_KNOWLEDGE, EXTENSION_DOCUMENTS)
+    assert extension_points() == {EXTENSION_WIKI, EXTENSION_KNOWLEDGE, EXTENSION_DOCUMENTS}
 
 
 def test_defaults_ship_with_the_package_and_a_deployment_only_writes_what_differs(
@@ -291,7 +296,9 @@ def test_a_manifest_that_breaks_the_format_is_rejected_with_the_reason(
     with pytest.raises(PluginError, match="有不认识的项：capabilites"):
         read("typo")
     write_site(sites / "unknown", capabilities=("wiki", "search"))
-    with pytest.raises(PluginError, match="不认识的能力：search（现在有 extend、knowledge、wiki）"):
+    with pytest.raises(
+        PluginError, match="不认识的能力：search（现在有 documents、extend、knowledge、wiki）"
+    ):
         read("unknown")
     write_site(sites / "feature", manifest={"kind": "feature"})
     with pytest.raises(PluginError, match="kind 应该是 site"):

@@ -6,6 +6,7 @@ import {
   Cpu,
   Globe,
   LayoutDashboard,
+  Library,
   LogOut,
   Menu,
   MessageSquare,
@@ -66,6 +67,7 @@ const NAV: { title?: string; items: NavItem[] }[] = [
       { to: "/plugins", label: "插件", icon: Puzzle },
       { to: "/integrations", label: "第三方接入", icon: Plug },
       { to: "/wikis", label: "Wiki", icon: Globe },
+      { to: "/sources", label: "资料来源", icon: Library },
     ],
   },
   {

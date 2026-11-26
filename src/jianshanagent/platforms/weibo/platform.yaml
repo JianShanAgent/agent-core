@@ -1,0 +1,5 @@
+id: weibo
+name: 微博
+description: 独立文档来源，接收标准资料导入；未配置采集器时不会抓取或访问微博。
+driver: documents
+capabilities: [documents]

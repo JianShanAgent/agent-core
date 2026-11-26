@@ -11,7 +11,7 @@ from jianshanagent.core import trace
 from jianshanagent.core.llm import LLMError
 from jianshanagent.plugins.knowledge.news import NewsQuery, NewsResult
 from jianshanagent.plugins.knowledge.retrieval import Retriever
-from jianshanagent.plugins.knowledge.store import KbChunk, MemoryKnowledgeStore
+from jianshanagent.plugins.knowledge.store import KbChunk, MemoryKnowledgeStore, scoped
 from jianshanagent.plugins.research.analysis import Analysis, NameNote, NewsSource, understand
 from jianshanagent.plugins.research.evidence import Evidence, KnowledgeSource, PageFiller
 from jianshanagent.plugins.research.workflow import Decision, ResearchWorkflow, WorkflowSettings
@@ -31,13 +31,13 @@ def chunk(
     text: str = "",
     *,
     platform: str = "weibo",
-    wiki: str = "main",
+    wiki: str = "",
     seq: int = 0,
     doc: str | None = None,
 ) -> KbChunk:
     return KbChunk(
-        chunk_id=key,
-        doc_key=doc or key,
+        chunk_id=scoped(wiki, key),
+        doc_key=scoped(wiki, doc or key),
         kind="announcement",
         title=title,
         text=text or title,
@@ -50,8 +50,23 @@ def chunk(
 
 async def knowledge(*chunks: KbChunk, excluded: tuple[str, ...] = ()) -> KnowledgeSource:
     store = MemoryKnowledgeStore()
-    await store.sync([(part, None) for part in chunks], fingerprint="test")
+    for wiki in sorted({part.wiki for part in chunks}):
+        await store.sync(
+            [(part, None) for part in chunks if part.wiki == wiki],
+            fingerprint="test",
+            wiki=wiki,
+        )
     return KnowledgeSource(Retriever(store, None, exclude_wikis=excluded))
+
+
+def allowed_platforms(query: NewsQuery) -> tuple[str, ...]:
+    filters = query.filters()
+    assert not filters.allows(chunk("other", "2026-11-24", "其它来源", platform="other"))
+    return tuple(
+        platform
+        for platform in SOURCES
+        if filters.allows(chunk(platform, "2026-11-24", platform, platform=platform))
+    )
 
 
 def flow(llm: ScriptedLLM, *levels: Any, **settings: Any) -> ResearchWorkflow:
@@ -261,7 +276,9 @@ async def test_shared_source_does_not_leak_filters_between_concurrent_requests()
         async def collect_news(self, query: NewsQuery) -> tuple[list[Evidence], NewsResult]:
             seen.append(query)
             await asyncio.sleep(0)
-            key = query.source_platforms[0]
+            platforms = allowed_platforms(query)
+            assert len(platforms) == 1
+            key = platforms[0]
             item = ev(key, key)
             return [item], NewsResult([], "2026-11-24", 1, 0)
 
@@ -288,7 +305,7 @@ async def test_shared_source_does_not_leak_filters_between_concurrent_requests()
     )
     assert [item.key for item in a.evidence] == ["weibo"]
     assert [item.key for item in b.evidence] == ["board"]
-    assert {(q.source_platforms, q.date_from, q.keywords) for q in seen} == {
+    assert {(allowed_platforms(q), q.date_from, q.keywords) for q in seen} == {
         (("weibo",), "2026-11-25", ("花合战",)),
         (("board",), "2025-11-01", ("维护",)),
     }
@@ -481,7 +498,7 @@ async def test_news_without_explicit_media_uses_registered_source_set(
         ),
     )
     await flow(llm, ScopedKnowledge()).run(question)
-    assert seen[0].source_platforms == ("weibo", "board")
+    assert allowed_platforms(seen[0]) == ("weibo", "board")
     assert seen[0].keywords == tuple(keywords)
     one = ScriptedLLM(
         [Decision(answer="库里没有匹配的收录。")],
@@ -492,7 +509,7 @@ async def test_news_without_explicit_media_uses_registered_source_set(
         ),
     )
     await flow(one, ScopedKnowledge(), news_sources={"weibo": SOURCES["weibo"]}).run(question)
-    assert seen[1].source_platforms == ("weibo",)
+    assert allowed_platforms(seen[1]) == ("weibo",)
 
 
 async def test_plain_recent_character_skill_stays_lookup_without_media() -> None:

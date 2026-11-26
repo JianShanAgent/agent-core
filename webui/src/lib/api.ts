@@ -9,6 +9,9 @@ import type {
   ConfigState,
   ConfigValues,
   ImageSearchHit,
+  ImportJob,
+  ImportPreview,
+  ImportStatus,
   IntegrationApp,
   IntegrationUsage,
   IntegrationUsageRange,
@@ -29,6 +32,8 @@ import type {
   SaveResult,
   SessionDetail,
   SessionRow,
+  SourceInfo,
+  SourcesInfo,
   Status,
   SystemInfo,
   TraceDetail,
@@ -257,6 +262,48 @@ export const api = {
 
   resetChat: (user: string, scope: string) =>
     post<{ session: string; deleted: number }>("/api/chat/reset", { user, scope }),
+
+  // ---- 资料来源 ----
+  sources: () => get<SourcesInfo>("/api/sources"),
+  createSource: (body: { id: string; label: string; platform: string; mounted: boolean; role: SourceInfo["role"] }) =>
+    post<{ source: SourceInfo }>("/api/sources", body),
+  updateSource: (id: string, body: { label?: string; role?: SourceInfo["role"]; mounted?: boolean }) =>
+    put<{ source: SourceInfo }>(`/api/sources/${seg(id)}`, body),
+  setSourceMounted: (id: string, mounted: boolean) =>
+    post<{ source: SourceInfo }>(`/api/sources/${seg(id)}/mount`, { mounted }),
+  previewImport: (id: string, content: string) =>
+    post<ImportPreview>(`/api/sources/${seg(id)}/preview`, { content }),
+  startImport: (id: string, content: string) =>
+    post<ImportJob>(`/api/sources/${seg(id)}/import`, { content }),
+  importStatus: (id: string) =>
+    get<{ import_status: ImportStatus | null }>(`/api/sources/${seg(id)}/status`),
+  cancelImport: (id: string) =>
+    post<{ cancelled: boolean }>(`/api/sources/${seg(id)}/cancel`),
+
+  // ---- 微博平台共享采集会话（多个微博来源共用，不等于帖子作者） ----
+  weiboSessionStatus: () =>
+    get<{
+      configured: boolean;
+      locally_usable: boolean;
+      /** null = 尚未验证 */
+      valid: null | boolean;
+      updated_at: number | null;
+      available: boolean;
+      message: string;
+      login: string;
+      error?: string;
+    }>("/api/sources/platforms/weibo/session"),
+  weiboSessionQr: () =>
+    post<{ image: string; state: string; available: boolean }>(
+      "/api/sources/platforms/weibo/qr",
+    ),
+  /** 轮询 — GET，无需 CSRF header，由 request() 自动跳过 */
+  weiboSessionPoll: () =>
+    get<{ state: string; error: string }>("/api/sources/platforms/weibo/poll"),
+  weiboSessionCancel: () =>
+    post<{ state: "cancelled" }>("/api/sources/platforms/weibo/cancel"),
+  weiboSessionClear: () =>
+    request<{ configured: boolean }>("DELETE", "/api/sources/platforms/weibo/session"),
 };
 
 // ---- 网页对话：回应是一条事件流 ----

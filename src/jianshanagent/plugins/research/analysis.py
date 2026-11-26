@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Any, Literal
@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from jianshanagent.core.llm import LLMClient, LLMContentBlocked, LLMError, user_message
 from jianshanagent.core.logging import get_logger
+from jianshanagent.plugins.knowledge.source_filter import SourceFilter
 
 logger = get_logger(__name__)
 
@@ -73,7 +74,26 @@ class NewsSource:
 
     label: str
     aliases: tuple[str, ...]
-    source_platform: str
+    source_platform: str = ""
+    source_ids: tuple[str, ...] | None = None
+    author_ids: tuple[str, ...] | None = None
+
+
+def source_filter_for(scope: Sequence[str], registry: Mapping[str, NewsSource]) -> SourceFilter:
+    """每个登记选择器内部 AND，多个选择器 OR；未知/空范围不退回全库。"""
+    if not scope or any(key not in registry for key in scope):
+        return SourceFilter(source_ids=())
+    branches = tuple(
+        SourceFilter(
+            source_ids=registry[key].source_ids,
+            source_platforms=(registry[key].source_platform,)
+            if registry[key].source_platform
+            else None,
+            author_ids=registry[key].author_ids,
+        )
+        for key in dict.fromkeys(scope)
+    )
+    return branches[0] if len(branches) == 1 else SourceFilter(any_of=branches)
 
 
 class Analysis(BaseModel):
@@ -168,6 +188,11 @@ class Understanding:
                 )
         elif self.topic:
             lines.append(f"这个问题问的是「{self.topic}」一类。")
+        if self.intent == "lookup" and self.source_scope:
+            lines.append(
+                f"用户明确限定资料来源：{self.source_label or self.source}；"
+                "本次普通检索只使用该范围，不以其它来源的同名资料替代。"
+            )
         if self.analysis_failed and (self.intent != "lookup" or self.source_label):
             lines.append(
                 "问题分析失败；只能使用明确的来源与检索结果，不能声称已经查明实时最新情况。"
@@ -266,17 +291,34 @@ def _unquoted(question: str) -> str:
 
 def _explicit_sources(question: str, sources: dict[str, NewsSource]) -> tuple[str, ...]:
     plain = _plain(_unquoted(question))
-    matched = [
-        key
-        for key, source in sources.items()
-        if any(
-            _plain(alias) in plain
-            and not re.search(re.escape(_plain(alias)) + r"(?:之夜|庆典|大会|杯)", plain)
-            for alias in (source.label, *source.aliases)
-            if alias
-        )
-    ]
-    return tuple(matched)
+    matches: list[tuple[int, int, str, bool]] = []
+    for key, source in sources.items():
+        specific = source.source_ids is not None or source.author_ids is not None
+        for alias in dict.fromkeys((source.label, *source.aliases)):
+            alias = _plain(alias)
+            if not alias:
+                continue
+            pattern = re.escape(alias)
+            if re.fullmatch(r"[a-z0-9_]+", alias):
+                pattern = rf"(?<![a-z0-9_]){pattern}(?![a-z0-9_])"
+            for match in re.finditer(pattern, plain):
+                if re.match(r"(?:之夜|庆典|大会|杯)", plain[match.end() :]):
+                    continue
+                matches.append((match.start(), match.end(), key, specific))
+    # 「甲微博」里的「微博」不是第二个泛来源选择器；单独再说一次微博则仍可并选。
+    picked: list[tuple[int, int, str, bool]] = []
+    for candidate in sorted(matches, key=lambda item: (-(item[1] - item[0]), -item[3], item[0])):
+        start, end, key, _ = candidate
+        if any(left <= start and end <= right and other != key for left, right, other, _ in picked):
+            continue
+        picked.append(candidate)
+    selected = {candidate[2] for candidate in picked}
+    return tuple(key for key in sources if key in selected)
+
+
+def explicit_source_scope(question: str, sources: Mapping[str, NewsSource]) -> tuple[str, ...]:
+    """确定性来源提及识别，也适用于关闭模型分析的普通查询。"""
+    return _explicit_sources(question, dict(sources))
 
 
 def _explicit_source(question: str, sources: dict[str, NewsSource]) -> str:
@@ -460,7 +502,7 @@ def _news_fields(
     explicit = _explicit_sources(question, sources)
     intent = "news_overview" if safe else analysis.intent
     source_id = safe or (explicit[0] if len(explicit) == 1 else "")
-    unsupported = bool(requested_source and requested_source not in sources)
+    unsupported = bool(requested_source and requested_source not in sources and not explicit)
     if unsupported and not safe:
         source_id = requested_source
     # 明确资讯但未指定媒体：查询所有注册来源，而非全库相似度，也不接受模型自行缩窄来源。
@@ -480,7 +522,12 @@ def _news_fields(
             if failed and explicit_id and re.search(r"最近|最新|近期|新消息", question)
             else ""
         )
-        return {"analysis_failed": failed, "source_label": uncertain_source}
+        return {
+            "analysis_failed": failed,
+            "source": explicit_id,
+            "source_scope": explicit,
+            "source_label": "、".join(sources[key].label for key in explicit) or uncertain_source,
+        }
     lower, upper, date_error = _publication_bounds(question, today, analysis)
     aliases = {
         _plain(alias) for key in scope for alias in (sources[key].label, *sources[key].aliases)

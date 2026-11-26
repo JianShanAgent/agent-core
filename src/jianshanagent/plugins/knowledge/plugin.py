@@ -14,20 +14,36 @@ from jianshanagent.core.config import AppConfig, disabled_wiki_ids
 from jianshanagent.core.embedding import EmbeddingClient, EmbeddingError, EmbeddingSettings
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.plugin import PluginContext
+from jianshanagent.core.sources import disabled_source_ids, retained_source_ids
 from jianshanagent.plugins.knowledge.image_store import PostgresImageStore
 from jianshanagent.plugins.knowledge.images import ImageSearch, ImageSettings
 from jianshanagent.plugins.knowledge.retrieval import RetrievalSettings, Retriever, query_provider
+from jianshanagent.plugins.knowledge.source_filter import SourceFilter
 from jianshanagent.plugins.knowledge.store import PostgresKnowledgeStore
 
 logger = get_logger(__name__)
 
-TYPE_NAMES = {"entry": "条目", "announcement": "公告", "story": "剧情", "data": "数据"}
+TYPE_NAMES = {
+    "entry": "条目",
+    "announcement": "公告",
+    "post": "帖子",
+    "story": "剧情",
+    "data": "数据",
+}
 
 
 def left_out_wikis(config: AppConfig) -> set[str]:
     """回答时不引用的 wiki。卸下挂载的不算；主 wiki 卸下时，没标出处的旧内容也算它的。"""
     disabled = set(disabled_wiki_ids(config))
     if config.wikis and config.wikis[0].id in disabled:
+        disabled.add("")
+    return disabled
+
+
+def left_out_sources(config: AppConfig) -> set[str]:
+    """文本来源统一停用；没有Wiki时旧空命名空间不归属新文档来源。"""
+    disabled = set(disabled_source_ids(config))
+    if not config.wikis or config.wikis[0].id in disabled:
         disabled.add("")
     return disabled
 
@@ -74,9 +90,29 @@ class KnowledgePlugin:
             # 嵌入配置有问题不该让机器人起不来：退回只用关键词
             logger.warning("knowledge_embedding_unavailable", error=str(exc))
         left_out = left_out_wikis(ctx.config)
+
+        def current_source_filter() -> SourceFilter:
+            # 不能缓存旧host的config：reload成功后在途消息也必须看到当前停用/移除。
+            runtime = ctx.services.get("runtime")
+            config = runtime.config if runtime is not None else ctx.config
+            return SourceFilter(
+                source_ids=tuple(sorted(retained_source_ids(config))),
+                exclude_source_ids=tuple(sorted(left_out_sources(config))),
+            )
+
         ctx.register_service(
             "knowledge",
-            Retriever(PostgresKnowledgeStore(db), embedder, settings, exclude_wikis=left_out),
+            Retriever(
+                PostgresKnowledgeStore(db),
+                embedder,
+                settings,
+                exclude_wikis=left_out_sources(ctx.config),
+                legacy_source_id=ctx.config.wikis[0].id if ctx.config.wikis else None,
+                source_filter=SourceFilter(
+                    source_ids=tuple(sorted(retained_source_ids(ctx.config)))
+                ),
+                source_filter_provider=current_source_filter,
+            ),
         )
         logger.info(
             "knowledge_retrieval_enabled",

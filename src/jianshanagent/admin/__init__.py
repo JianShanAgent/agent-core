@@ -21,6 +21,7 @@ from jianshanagent.admin import (
     routes_config,
     routes_data,
     routes_integrations,
+    routes_sources,
     routes_system,
     routes_traces,
     routes_wikis,
@@ -105,8 +106,10 @@ def setup_admin(app: web.Application, runtime: Runtime) -> Admin:
         routes_integrations,
         routes_data,
         routes_wikis,
+        routes_sources,
     ):
         app.add_routes(module.routes(admin))
+    app.on_cleanup.append(routes_sources.imports(admin).close)
     app.router.add_get("/{tail:.*}", _page)
     logger.info("admin_enabled", token_source=source, static=(STATIC_DIR / "index.html").is_file())
     return admin

@@ -19,6 +19,7 @@ from jianshanagent.admin.core import (
     text_param,
 )
 from jianshanagent.admin.queries import CHAT_DAYS, SESSION_DAYS
+from jianshanagent.admin.routes_sources import safe_provenance, safe_url, source_overview
 from jianshanagent.core.embedding import EmbeddingError
 from jianshanagent.core.images import ImageError
 from jianshanagent.core.trace import brief
@@ -67,6 +68,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             "settings": None,
             # 挂着的各个 wiki：库里各有多少、自动更新的状态
             "wikis": [],
+            "sources": await source_overview(admin),
         }
         if not admin.has_database:
             return reply(result)
@@ -140,22 +142,44 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             fail(409, str(exc))
         return reply({"id": wiki_id, "enabled": enabled})
 
+    def source_fields(row: dict[str, Any]) -> dict[str, Any]:
+        from jianshanagent.core.sources import source_instances
+
+        source_id = str(row.get("wiki") or "")
+        sources = {item.id: item for item in source_instances(admin.config)}
+        # Legacy unlabelled rows belong only to the original first Wiki, never a documents source.
+        if not source_id and admin.config.wikis:
+            source_id = admin.config.wikis[0].id
+        source = sources.get(source_id)
+        result = {
+            **row,
+            "source_id": source_id,
+            "source_label": source.label if source is not None else source_id,
+        }
+        if "meta" in result:
+            result["meta"] = safe_provenance(result["meta"])
+        if source is not None and not source.is_wiki:
+            result.pop("fingerprint", None)
+            if "url" in result:
+                result["url"] = safe_url(result["url"])
+        return result
+
     async def kb_chunks(request: web.Request) -> web.Response:
-        return reply(
-            await admin.queries.kb_chunks(
-                limit=int_param(request, "limit", 30, 1, 200),
-                offset=int_param(request, "offset", 0, 0, 10**7),
-                kind=text_param(request, "type"),
-                search=text_param(request, "q"),
-                wiki=text_param(request, "wiki"),
-            )
+        result = await admin.queries.kb_chunks(
+            limit=int_param(request, "limit", 30, 1, 200),
+            offset=int_param(request, "offset", 0, 0, 10**7),
+            kind=text_param(request, "type"),
+            search=text_param(request, "q"),
+            wiki=text_param(request, "source_id") or text_param(request, "wiki"),
         )
+        result["items"] = [source_fields(item) for item in result["items"]]
+        return reply(result)
 
     async def kb_chunk(request: web.Request) -> web.Response:
         found = await admin.queries.kb_chunk(request.match_info["id"])
         if found is None:
             fail(404, "没有这个切片（知识库可能重新导入过）")
-        return reply(found)
+        return reply(source_fields(found))
 
     async def kb_search(request: web.Request) -> web.Response:
         """用和机器人一样的检索查一次：看一个问题会捞到哪几片、各是哪一路找到的。"""
@@ -175,42 +199,54 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 "vector_skipped": result.vector_skipped,
                 "seconds": result.seconds,
                 "hits": [
-                    {
-                        "chunk_id": hit.chunk.chunk_id,
-                        "wiki": hit.chunk.wiki,
-                        "type": hit.chunk.kind,
-                        "title": hit.chunk.title,
-                        "section_path": list(hit.chunk.section_path),
-                        "date": hit.chunk.date,
-                        "date_inferred": hit.chunk.date_inferred,
-                        "url": hit.chunk.url,
-                        "chars": len(hit.chunk.text),
-                        "text": hit.chunk.text,
-                        "vector_rank": hit.vector_rank,
-                        "keyword_rank": hit.keyword_rank,
-                    }
+                    source_fields(
+                        {
+                            "chunk_id": hit.chunk.chunk_id,
+                            "meta": hit.chunk.meta,
+                            "wiki": hit.chunk.wiki,
+                            "type": hit.chunk.kind,
+                            "title": hit.chunk.title,
+                            "section_path": list(hit.chunk.section_path),
+                            "date": hit.chunk.date,
+                            "date_inferred": hit.chunk.date_inferred,
+                            "url": hit.chunk.url,
+                            "chars": len(hit.chunk.text),
+                            "text": hit.chunk.text,
+                            "vector_rank": hit.vector_rank,
+                            "keyword_rank": hit.keyword_rank,
+                        }
+                    )
                     for hit in result.hits
                 ],
             }
         )
 
+    def require_image_wiki(source_id: str | None) -> None:
+        if source_id and not any(item.id == source_id for item in admin.config.wikis):
+            fail(409, "文档来源不支持图库操作")
+
     async def kb_images(request: web.Request) -> web.Response:
+        require_image_wiki(text_param(request, "source_id") or text_param(request, "wiki"))
         return reply(
             await admin.queries.kb_images(
                 limit=int_param(request, "limit", 48, 1, 200),
                 offset=int_param(request, "offset", 0, 0, 10**7),
                 kind=text_param(request, "kind"),
                 search=text_param(request, "q"),
-                wiki=text_param(request, "wiki"),
+                wiki=text_param(request, "source_id") or text_param(request, "wiki"),
             )
         )
 
     async def kb_image_search(request: web.Request) -> web.Response:
         """传一张图，用和机器人一样的以图搜图查一次。"""
+        require_image_wiki(text_param(request, "source_id") or text_param(request, "wiki"))
         image_search = admin.service("image_search")
         if image_search is None:
             fail(503, "以图搜图没有启用（要有数据库和嵌入接口）")
         body = await read_body(request)
+        requested_source = body.get("source_id") or body.get("wiki")
+        if requested_source:
+            require_image_wiki(str(requested_source))
         raw = str(body.get("image") or "")
         encoded = raw.split(",", 1)[1] if raw.startswith("data:") and "," in raw else raw
         try:

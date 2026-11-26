@@ -17,12 +17,16 @@ chat 插件发现有这个服务时，对话模型就只负责判断「要不要
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from jianshanagent.core.config import AppConfig
 from jianshanagent.core.llm import LLMClient
 from jianshanagent.core.logging import get_logger
 from jianshanagent.core.plugin import PluginContext
+from jianshanagent.core.sources import source_instances, source_labels
 from jianshanagent.core.websearch import WebSearchClient, WebSearchSettings
 from jianshanagent.core.wiki import WikiSubject, wiki_labels, wiki_subject
 from jianshanagent.plugins.knowledge.retrieval import Retriever
@@ -95,6 +99,73 @@ def wiki_name_lookup(wiki: Any) -> NameLookup:
     return lookup
 
 
+def news_sources_from(config: AppConfig, configured: Mapping[str, Any]) -> dict[str, NewsSource]:
+    """汇总平台选择器与采集实例；Wiki 实例限制 namespace，不假造内容原平台。"""
+    result: dict[str, NewsSource] = {}
+    for key, definition in configured.items():
+        if not isinstance(definition, dict):
+            raise ValueError("analysis.news_sources 的来源定义必须是映射")
+        platform = str(definition.get("source_platform") or "").strip()
+        label = str(definition.get("label") or key).strip()
+        if not label or (
+            not platform
+            and definition.get("source_ids") is None
+            and definition.get("author_ids") is None
+        ):
+            raise ValueError("analysis.news_sources 的来源必须有 label 和受限的平台/来源/作者条件")
+        for name in ("source_ids", "author_ids", "aliases"):
+            values = definition.get(name)
+            if values is not None and (
+                not isinstance(values, (list, tuple))
+                or any(not isinstance(item, str) for item in values)
+            ):
+                raise ValueError(f"analysis.news_sources 的 {name} 必须是字符串数组")
+        result[str(key)] = NewsSource(
+            label=label,
+            aliases=tuple(str(alias) for alias in definition.get("aliases") or [] if alias),
+            source_platform=platform,
+            source_ids=tuple(str(item) for item in definition["source_ids"])
+            if definition.get("source_ids") is not None
+            else None,
+            author_ids=tuple(str(item) for item in definition["author_ids"])
+            if definition.get("author_ids") is not None
+            else None,
+        )
+    registered = source_instances(config)
+    if any(not item.is_wiki and item.platform.id == "weibo" for item in registered):
+        # 泛微博是原文平台，不限制在某个导入实例：Wiki 镜像与直接副本一起查。
+        result["weibo"] = NewsSource("微博", ("微博", "weibo"), "weibo")
+    for item in registered:
+        result[f"source:{item.id}"] = NewsSource(
+            label=item.label,
+            aliases=(item.id,),
+            source_ids=(item.id,),
+        )
+    return result
+
+
+class CurrentSourceRoles(Mapping[str, str]):
+    """读取当前受控配置，不让旧向量元信息中的 official 越过角色降级。"""
+
+    def __init__(self, config: AppConfig):
+        self.config = config
+
+    def _values(self) -> dict[str, str]:
+        values = {item.id: item.role for item in source_instances(self.config)}
+        if self.config.wikis:
+            values[""] = values[self.config.wikis[0].id]
+        return values
+
+    def __getitem__(self, key: str) -> str:
+        return self._values()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values())
+
+    def __len__(self) -> int:
+        return len(self._values())
+
+
 class ResearchPlugin:
     id = "research"
 
@@ -113,23 +184,15 @@ class ResearchPlugin:
         profiles = cfg.get("profiles") or {}
         analysis = cfg.get("analysis") or {}
         news = cfg.get("news") or {}
-        news_sources: dict[str, NewsSource] = {}
-        for key, definition in (analysis.get("news_sources") or {}).items():
-            if not isinstance(definition, dict):
-                raise ValueError("analysis.news_sources 的来源定义必须是映射")
-            platform = str(definition.get("source_platform") or "").strip()
-            label = str(definition.get("label") or key).strip()
-            if not platform or not label:
-                raise ValueError("analysis.news_sources 的来源必须有 label/source_platform")
-            news_sources[str(key)] = NewsSource(
-                label=label,
-                aliases=tuple(str(alias) for alias in definition.get("aliases") or [] if alias),
-                source_platform=platform,
-            )
+        news_sources = news_sources_from(ctx.config, analysis.get("news_sources") or {})
         images = cfg.get("images") or {}
         defaults = WorkflowSettings()
         subject = wiki_subject(ctx.config)
         wording = wording_from(cfg.get("wording") or {}, subject)
+        if not ctx.config.wikis:
+            wording = replace(
+                wording, bot=f"{subject.name}资料库助手", intro=f"{subject.name}资料库"
+            )
         rejections = cfg.get("max_rejections")
         retries = cfg.get("quick_retries")
         settings = WorkflowSettings(
@@ -187,10 +250,21 @@ class ResearchPlugin:
         timezone = ZoneInfo(str(ctx.config.app.get("timezone") or "Asia/Shanghai"))
 
         # 挂了不止一个 wiki 时，资料上标出处；只有一个就不标
-        sources = wiki_labels(ctx.config)
+        registered = source_instances(ctx.config)
+        sources = (
+            source_labels(ctx.config)
+            if any(not item.is_wiki for item in registered)
+            else wiki_labels(ctx.config)
+        )
+        if sources and ctx.config.wikis:
+            # 旧空 namespace 仍只归首 Wiki；纯非 Wiki 不接管旧资料。
+            sources[""] = sources.get(ctx.config.wikis[0].id, "")
+        source_roles = CurrentSourceRoles(ctx.config)
         kb_label = str(labels.get("kb") or "知识库")
         available: dict[str, EvidenceSource] = {
-            "kb": KnowledgeSource(retriever, label=kb_label, sources=sources)
+            "kb": KnowledgeSource(
+                retriever, label=kb_label, sources=sources, source_roles=source_roles
+            )
         }
         wiki = ctx.services.get("wiki_query")  # wiki_query 插件启用时才有
         if wiki is not None:
@@ -210,6 +284,7 @@ class ResearchPlugin:
                 timeout_seconds=float(site.get("timeout_seconds") or 5),
                 keywords_hint=site_keywords_hint(wording.keyword_nouns, wording.keyword_example),
                 sources=sources,
+                source_roles=source_roles,
             )
         web_settings = WebSearchSettings.from_config(ctx.config)  # 没打开、没填密钥时是 None
         if web_settings is not None:
@@ -247,6 +322,7 @@ class ResearchPlugin:
                 min_hits=1,
                 max_chars=sys.maxsize,
                 sources=sources,
+                source_roles=source_roles,
             )
         elif whole_mode == WHOLE_EXCERPT:
             page_filler = PageFiller(
@@ -255,6 +331,7 @@ class ResearchPlugin:
                 min_hits=int(whole.get("min_hits") or 2),
                 max_chars=int(whole.get("max_chars") or 8000),
                 sources=sources,
+                source_roles=source_roles,
             )
         workflow = ResearchWorkflow(
             llm,
@@ -268,6 +345,7 @@ class ResearchPlugin:
                 per_name=int(analysis.get("entry_chunks_per_name") or 2),
                 total=int(analysis.get("entry_chunks") or 4),
                 sources=sources,
+                source_roles=source_roles,
             ),
             image_search=image_search,
             wiki_labels=sources,

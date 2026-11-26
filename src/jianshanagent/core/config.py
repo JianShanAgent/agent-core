@@ -33,7 +33,8 @@
 覆写文件里某一项写成 ``null`` 表示「删掉这一项」（当作默认值里没写它）。
 列表是整个替换的，只有插件启用清单（``core.plugins`` 的 ``enabled``）例外：它还要跟上默认清单
 后来的变化，不然后台动过一次开关，以后发布新加的插件就再也不会启用（见 :func:`merge_enabled`）。
-覆写文件坏了（不是合法的 YAML、不是键值结构）不拦启动：跳过它，原因记在 ``override_errors`` 里。
+覆写文件坏了（不是合法的 YAML、不是键值结构）通常不拦启动：跳过它，原因记在
+``override_errors`` 里。来源登记 ``core.sources`` 是清理保留白名单，损坏时拒绝加载，避免误删资料。
 凭据（``secrets.yaml``）不在这三层里，也不能被覆写。
 
 在管理后台的「Wiki」页里从站点目录加的 wiki 也存在覆写目录里：``core.wiki.yaml`` 的
@@ -49,18 +50,22 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from jianshanagent.core.manifest import (
     CAPABILITY_EXTEND,
+    DRIVER_MEDIAWIKI,
     Manifest,
     feature_manifests,
     installed_sites,
     platforms,
     wiki_plugins,
 )
+
+if TYPE_CHECKING:
+    from jianshanagent.core.sources import SourceInstance
 
 OVERRIDES_ENV = "JIANSHANAGENT_CONFIG_OVERRIDES_DIR"
 _SECRET_NAMES = {"secrets", "secrets.example"}
@@ -103,6 +108,8 @@ LOCKED_KEYS = frozenset(
 #: 写着「挂哪几个 wiki、各用哪个站点插件」的那份配置，和里面的那张名单
 WIKI_FILE = "core.wiki"
 WIKIS = "wikis"
+SOURCE_FILE = "core.sources"
+SOURCE_INSTANCES = "sources"
 #: 覆写目录的 ``core.wiki.yaml`` 里的一项：在管理后台里从站点目录加的 wiki，接在 ``wikis`` 后面。
 #: 只在覆写文件里有，读配置时并进 ``wikis`` 就拿掉
 WIKIS_ADDED = "wikis_added"
@@ -127,6 +134,7 @@ LOCKED_PATHS: dict[str, tuple[tuple[str, ...], ...]] = {
     "gateway.http": (("enabled",), ("host",), ("port",)),
     "app": (("healthcheck",),),
     WIKI_FILE: ((WIKIS,), (WIKIS_ADDED,)),
+    SOURCE_FILE: ((SOURCE_INSTANCES,),),
     # 从哪个仓库更新、下载走哪个镜像：能在网页上改，就等于能让机器人去下载并运行别人的代码
     "core.update": (("repo",), ("download_prefix",)),
     # 站点目录在哪：它说了算「有哪些站点插件、从哪个仓库下载、wiki 的地址是什么」
@@ -319,6 +327,11 @@ def wiki_entries(
         platform, site = wiki_plugins(
             str(item.get("platform") or ""), str(item.get("site") or ""), workspace_root
         )
+        if platform.driver != DRIVER_MEDIAWIKI:
+            raise ValueError(
+                f"{where} 的「{wiki_id}」使用 documents 平台「{platform.id}」，"
+                "请登记到 core.sources.yaml，不能作为 Wiki 加载"
+            )
         entries.append(WikiEntry(wiki_id, dict(item), platform, site))
     return tuple(entries)
 
@@ -541,6 +554,23 @@ class AppConfig:
         return self._views.get(wiki_id, self)
 
     @property
+    def source_instances(self) -> list[SourceInstance]:
+        """全部已登记来源；独立于配置文件路径映射 ``sources``。"""
+        from jianshanagent.core.sources import source_instances
+
+        return source_instances(self)
+
+    def source(self, source_id: str) -> SourceInstance:
+        from jianshanagent.core.sources import source_instance
+
+        return source_instance(self, source_id)
+
+    def for_source(self, source_id: str) -> AppConfig:
+        """Wiki 沿用原来的配置视图，文档来源不创建 Wiki 客户端。"""
+        source = self.source(source_id)
+        return self.for_wiki(source_id) if source.is_wiki else self
+
+    @property
     def sites(self) -> list[str]:
         """用到的站点插件的 id，按 wiki 的顺序，不重复。"""
         return list(dict.fromkeys(entry.site.id for entry in self.wikis if entry.site is not None))
@@ -724,8 +754,13 @@ def load_config(
             try:
                 override = _load_yaml(path)
             except (yaml.YAMLError, ValueError, OSError) as exc:
+                if key == SOURCE_FILE:
+                    # 来源登记是清理保留白名单；不能因损坏覆写退回空名单而误删存量。
+                    raise ValueError(f"来源登记覆写读不了：{exc}") from exc
                 errors[key] = f"读不了：{exc}"[:300]
                 continue
+            if key == SOURCE_FILE and SOURCE_INSTANCES not in override:
+                raise ValueError("来源登记覆写必须包含 sources 列表，不能使用空或截断的文件")
             if key == WIKI_FILE:  # 后台加的 wiki 上面已经并进名单了，不算对配置的改动
                 override = {k: v for k, v in override.items() if k != WIKIS_ADDED}
             if override:
@@ -761,8 +796,17 @@ def load_config(
                         view_base.get(key, {}), override, base[key]
                     )
             view_files[PLUGINS_FILE] = files.get(PLUGINS_FILE, {})  # 启用哪些插件只有一份
+        # 来源登记全局只有一份，不随 Wiki 的平台补充或列表差异发生变化。
+        view_files[SOURCE_FILE] = files.get(SOURCE_FILE, {})
+        view_base[SOURCE_FILE] = base.get(SOURCE_FILE, {})
         views[entry.id] = AppConfig(files=view_files, base_files=view_base, views=views, **shared)
-    return AppConfig(files=files, base_files=base, views=views, **shared)
+    config = AppConfig(files=files, base_files=base, views=views, **shared)
+    # 配置解析时就验证来源，不能等到第一次检索才发现 ID 冲突或平台类型错误。
+    from jianshanagent.core.sources import source_instances
+
+    # 来源也是清理保留白名单；无效时拒绝加载，不降级为空来源而危及已有资料。
+    source_instances(config)
+    return config
 
 
 def write_override(config: AppConfig, name: str, edited: dict[str, Any]) -> dict[str, Any]:
@@ -780,6 +824,10 @@ def write_override(config: AppConfig, name: str, edited: dict[str, Any]) -> dict
     if name == PLUGINS_FILE:
         edited = {key: value for key, value in edited.items() if key != ENABLED_BASELINE}
     override = diff_overrides(base, edited)
+    if name == SOURCE_FILE and edited.get(SOURCE_INSTANCES, []) != config.get(name).get(
+        SOURCE_INSTANCES, []
+    ):
+        raise ValueError("来源名单只能通过专用来源管理保存")
     # 在后台加的 wiki 和配置的改动存在同一个文件里：改配置不动它们
     added = _stored_added_wikis(path) if name == WIKI_FILE else []
     if not override and not added:
@@ -793,6 +841,34 @@ def write_override(config: AppConfig, name: str, edited: dict[str, Any]) -> dict
         override[ENABLED_BASELINE] = _names(base.get("enabled"))
     _write_override_file(path, name, override)
     return override
+
+
+def write_source_instances(config: AppConfig, items: Sequence[dict[str, Any]]) -> None:
+    """专用来源管理：严格校验后原子保存，调用方 reload 失败可用 restore_override 回滚。
+
+    停用只修改 mounted，不能删除已有登记或复用 ID 给另一平台。
+    """
+    from jianshanagent.core.sources import document_source_instances
+
+    path = config.override_path(SOURCE_FILE)
+    if path is None:
+        raise ValueError(f"没有配置覆写目录（环境变量 {OVERRIDES_ENV}），来源没有地方存")
+    listed = list(items)
+    validated = document_source_instances(listed, wiki_ids={entry.id for entry in config.wikis})
+    next_platforms = {source.id: source.platform.id for source in validated}
+    for source in config.source_instances:
+        if source.is_wiki:
+            continue
+        if source.id not in next_platforms:
+            raise ValueError(f"来源「{source.id}」不能删除登记，请设 mounted: false 停用")
+        if next_platforms[source.id] != source.platform.id:
+            raise ValueError(f"来源「{source.id}」不能更换平台或复用存储命名空间")
+    edited = {**config.get(SOURCE_FILE), SOURCE_INSTANCES: [dict(item) for item in listed]}
+    override = diff_overrides(config.base_files[SOURCE_FILE], edited)
+    if override:
+        _write_override_file(path, SOURCE_FILE, override)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def _write_override_file(path: Path, name: str, override: dict[str, Any]) -> None:

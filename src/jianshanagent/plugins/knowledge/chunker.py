@@ -35,6 +35,7 @@ from jianshanagent.plugins.knowledge.models import (
     BLOCK_PARA,
     BLOCK_TABLE,
     KIND_ANNOUNCEMENT,
+    KIND_POST,
     Block,
     Chunk,
     Document,
@@ -349,7 +350,7 @@ def make_header(doc: Document, path: tuple[str, ...] | list[str]) -> str:
         # 推断出来的年份要让读到这一片的人（和模型）知道它是推断的
         label = SOURCE_LABELS.get(str((doc.date_source or {}).get("kind")), "推断")
         header = f"{header}（时间：{doc.date_inferred}，{label}）"
-    if doc.kind == KIND_ANNOUNCEMENT:
+    if doc.kind in {KIND_ANNOUNCEMENT, KIND_POST}:
         extras = [f"发布于 {doc.date}" if doc.date else "", doc.source]
         header = " ｜ ".join([header, *(e for e in extras if e)])
     return header

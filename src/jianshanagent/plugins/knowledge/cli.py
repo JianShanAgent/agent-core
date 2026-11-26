@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 from pathlib import Path
@@ -59,6 +60,7 @@ from jianshanagent.core.config import AppConfig, load_config
 from jianshanagent.core.db import Database
 from jianshanagent.core.embedding import EmbeddingError, EmbeddingProvider, EmbeddingSettings
 from jianshanagent.core.logging import setup_logging
+from jianshanagent.core.sources import retained_source_ids
 from jianshanagent.core.wiki import load_wikis
 from jianshanagent.plugins.knowledge import image_cli, sync_cli
 from jianshanagent.plugins.knowledge.embed import (
@@ -73,7 +75,12 @@ from jianshanagent.plugins.knowledge.pipeline import ProcessResult, run_pipeline
 from jianshanagent.plugins.knowledge.report import write_outputs
 from jianshanagent.plugins.knowledge.settings import Settings, is_primary, load_settings
 from jianshanagent.plugins.knowledge.sink import CHUNKS_FILE, JsonlSink
-from jianshanagent.plugins.knowledge.store import PostgresKnowledgeStore, StoreInfo
+from jianshanagent.plugins.knowledge.source_import import MAX_FILE_BYTES, SourceImportService
+from jianshanagent.plugins.knowledge.store import (
+    MemoryKnowledgeStore,
+    PostgresKnowledgeStore,
+    StoreInfo,
+)
 
 #: 单独重算的向量和存下来的相似度低于这个值，就当作有问题
 VERIFY_MIN_SIMILARITY = 0.99
@@ -86,7 +93,9 @@ def _parser() -> argparse.ArgumentParser:
         "以及以图搜图用的图片索引（images）",
     )
     parser.add_argument("--config-dir", help="配置目录（默认仓库的 config/）")
-    parser.add_argument(
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--source", metavar="ID", help="标准资料的目标来源 ID")
+    target.add_argument(
         "--wiki",
         metavar="ID",
         help="只做这个 wiki（core.wiki.yaml 的 wikis 里的 id）；不写就挨个做每个 wiki",
@@ -133,6 +142,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     load.add_argument("--status", action="store_true", help="只看库里现在有什么，不导入")
     load.add_argument("--output-dir", help="切片所在的目录（默认是知识库目录下这个 wiki 的那一层）")
+    for command in ("preview", "import"):
+        source = sub.add_parser(
+            command, help="预览标准资料" if command == "preview" else "导入标准资料"
+        )
+        source.add_argument("file", help="本地 UTF-8 JSONL 文件（不接受 URL）")
+    sub.add_parser("status", help="查看标准资料来源的持久化导入状态")
     image_cli.add_parser(sub)
     sync_cli.add_parser(sub)
     return parser
@@ -207,19 +222,23 @@ async def _load_async(
         await db.close()
 
 
-async def _forget_other_wikis(dsn: str, wikis: list[str]) -> None:
-    """库里已经不在 ``core.wiki.yaml`` 里的 wiki 的切片和图片：删掉。"""
+async def _forget_other_wikis(
+    dsn: str, wikis: list[str], *, sources: list[str] | None = None
+) -> None:
+    """文本保留全部登记来源（含停用）；图库保留原来的 Wiki 集合。"""
     db = Database(dsn, pool_max=2)
     await db.connect()
     try:
         await db.migrate()
-        chunks = await PostgresKnowledgeStore(db).keep_only(wikis)
+        chunks = await PostgresKnowledgeStore(db).keep_only(
+            sources if sources is not None else wikis
+        )
         images = await PostgresImageStore(db).keep_only(wikis)
     finally:
         await db.close()
     if chunks or images:
         print(
-            f"库里有已经不在 core.wiki.yaml 里的 wiki 的内容，删掉了：{chunks} 片、{images} 张图",
+            f"清理未登记资料（文本按全部来源，图片按 Wiki）：{chunks} 片、{images} 张图",
             file=sys.stderr,
         )
 
@@ -342,12 +361,56 @@ def _one_wiki(args: argparse.Namespace, config: AppConfig, settings: Settings) -
     return _run(args, settings)
 
 
+async def _source_command(args: argparse.Namespace, config: AppConfig) -> int:
+    """文档命令先分流；预览/状态不创建 Wiki 设置或数据库连接。"""
+    db: Database | None = None
+    service: SourceImportService | None = None
+    try:
+        content = b""
+        if args.command != "status":
+            with Path(args.file).open("rb") as source_file:
+                content = source_file.read(MAX_FILE_BYTES + 1)
+        store = MemoryKnowledgeStore()
+        if args.command == "import":
+            if not config.postgres_dsn:
+                raise ValueError("没有数据库地址，不能执行导入")
+            db = Database(config.postgres_dsn, pool_max=2)
+            await db.connect()
+            await db.migrate()
+            store = PostgresKnowledgeStore(db)
+        service = SourceImportService(config, store)
+        if args.command == "preview":
+            result = service.preview(args.source, content)
+        elif args.command == "status":
+            result = service.status(args.source)
+        else:
+            result = await service.import_data(args.source, content)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except (ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    finally:
+        if service is not None:
+            await service.aclose()
+        if db is not None:
+            await db.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     # 一直跑的那个是服务器上的容器，日志由 Loki 收，和机器人一样打成 JSON；其余是人在终端里跑的
     setup_logging(json_logs=args.command == "sync" and args.loop)
     logging.getLogger("httpx").setLevel(logging.WARNING)  # 不逐条打印请求
     config = load_config(args.config_dir)
+    if args.command in {"preview", "import", "status"}:
+        if not args.source:
+            print("标准资料命令必须指定 --source <id>", file=sys.stderr)
+            return 2
+        return asyncio.run(_source_command(args, config))
+    if args.source:
+        print("--source 只适用于 preview/import/status；Wiki 命令请用 --wiki", file=sys.stderr)
+        return 2
     if args.command == "sync" and (args.loop or args.health):
         return sync_cli.run_service(args, config)  # 一个进程管全部 wiki
     try:
@@ -382,5 +445,11 @@ def main(argv: list[str] | None = None) -> int:
         codes.append(_one_wiki(args, config.for_wiki(wiki), settings[wiki]))
     loading = args.command == "load" or (args.command == "images" and args.images_command == "load")
     if loading and not args.wiki and not getattr(args, "status", False) and config.postgres_dsn:
-        asyncio.run(_forget_other_wikis(config.postgres_dsn, wikis))
-    return max(codes)
+        asyncio.run(
+            _forget_other_wikis(
+                config.postgres_dsn,
+                [entry.id for entry in config.wikis],
+                sources=sorted(retained_source_ids(config)),
+            )
+        )
+    return max(codes, default=0)

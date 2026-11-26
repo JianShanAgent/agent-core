@@ -22,6 +22,7 @@ const Models = lazy(() => import("@/pages/Models"));
 const Plugins = lazy(() => import("@/pages/Plugins"));
 const Integrations = lazy(() => import("@/pages/Integrations"));
 const Wikis = lazy(() => import("@/pages/Wikis"));
+const Sources = lazy(() => import("@/pages/Sources"));
 const Knowledge = lazy(() => import("@/pages/Knowledge"));
 const Sessions = lazy(() => import("@/pages/Sessions"));
 const ChatLog = lazy(() => import("@/pages/ChatLog"));
@@ -91,6 +92,7 @@ export function App() {
           <Route path="plugins" element={<Plugins />} />
           <Route path="integrations" element={<Integrations />} />
           <Route path="wikis" element={<Wikis />} />
+          <Route path="sources" element={<Sources />} />
           <Route path="knowledge" element={<Knowledge />} />
           <Route path="sessions" element={<Sessions />} />
           <Route path="sessions/:key" element={<Sessions />} />

@@ -231,4 +231,5 @@ def test_items_that_cannot_be_changed_from_the_web_are_marked_locked() -> None:
             "providers.mimo.secret",
         },
         "core.wiki": {"wikis"},  # 挂哪几个 wiki：里面有地址和用哪个站点插件
+        "core.sources": {"sources"},  # 来源归属与驱动只能由专用来源管理入口校验后修改
     }

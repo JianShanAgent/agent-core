@@ -35,6 +35,7 @@ from jianshanagent.plugins.knowledge.news import (
     NewsResult,
     select_recent_documents,
 )
+from jianshanagent.plugins.knowledge.source_filter import SourceFilter, canonical_sql
 from jianshanagent.plugins.knowledge.terms import bm25_score, extract_terms, term_weights
 
 #: （切片，向量或 None）。没有向量的切片只能被关键词查到
@@ -52,6 +53,13 @@ KEYWORD_POOL = 100
 def scoped(wiki: str, local_id: str) -> str:
     """库里的 id：``<wiki>:<切片文件里的 id>``。没说是哪个 wiki（测试里）就是文件里的 id。"""
     return f"{wiki}:{local_id}" if wiki else local_id
+
+
+def _check_namespace(chunk: KbChunk, wiki: str) -> None:
+    if chunk.wiki != wiki or (
+        wiki and not all(value.startswith(f"{wiki}:") for value in (chunk.chunk_id, chunk.doc_key))
+    ):
+        raise ValueError("切片来源及主键前缀必须属于目标来源")
 
 
 def meta_key(kind: str, wiki: str) -> str:
@@ -77,6 +85,11 @@ class KbChunk:
     meta: dict[str, Any] = field(default_factory=dict)
     #: 出自哪个 wiki（``core.wiki.yaml`` 里的 id）
     wiki: str = ""
+
+    @property
+    def source_id(self) -> str:
+        """通用来源只读别名；wiki 列及历史前缀保持不变。"""
+        return self.wiki
 
     @property
     def local_id(self) -> str:
@@ -231,6 +244,7 @@ class KnowledgeStore(Protocol):
         wiki: str | None = None,
         fingerprint: str | None = None,
         exclude_wikis: Collection[str] | None = None,
+        source_filter: SourceFilter | None = None,
     ) -> list[Hit]:
         """按向量相似度从高到低。``titles``：只在这些页面的切片里找；``wiki``：只在这个 wiki 里找。
 
@@ -247,6 +261,7 @@ class KnowledgeStore(Protocol):
         titles: Sequence[str] | None = None,
         wiki: str | None = None,
         exclude_wikis: Collection[str] | None = None,
+        source_filter: SourceFilter | None = None,
     ) -> list[Hit]:
         """按关键词得分从高到低；一个查询词都不含的切片不返回。
 
@@ -258,13 +273,19 @@ class KnowledgeStore(Protocol):
     ) -> NewsResult:
         """按可靠发布日期返回不同公告文档的首片，并报告同来源的日期覆盖情况。"""
 
-    async def outline(self, chunk_ids: Collection[str]) -> list[ChunkPlace]:
+    async def outline(
+        self, chunk_ids: Collection[str], *, source_filter: SourceFilter | None = None
+    ) -> list[ChunkPlace]:
         """这些切片所在的页面的全部切片（不带正文），按页面、页内先后排。库里没有的 id 不管。"""
 
-    async def get(self, chunk_ids: Collection[str]) -> list[KbChunk]:
+    async def get(
+        self, chunk_ids: Collection[str], *, source_filter: SourceFilter | None = None
+    ) -> list[KbChunk]:
         """按 id 取切片；库里没有的不返回。"""
 
-    async def page(self, title: str, *, url_prefix: str = "") -> list[KbChunk]:
+    async def page(
+        self, title: str, *, url_prefix: str = "", source_filter: SourceFilter | None = None
+    ) -> list[KbChunk]:
         """标题是 ``title`` 的页面的全部切片，按页面、页内先后排；库里没有这一页就是空的。
 
         ``url_prefix``：只要链接以它开头的（传 wiki 的页面地址前缀，同名的公告就不算）。
@@ -299,6 +320,7 @@ class MemoryKnowledgeStore:
         hashes: dict[str, str] = {}
         vectors: dict[str, Sequence[float]] = {}
         for chunk, vector in records:
+            _check_namespace(chunk, wiki)
             report.total += 1
             chunks[chunk.chunk_id] = chunk
             if vector is not None:
@@ -359,12 +381,14 @@ class MemoryKnowledgeStore:
         titles: Sequence[str] | None,
         wiki: str | None,
         exclude_wikis: Collection[str] | None,
+        source_filter: SourceFilter | None = None,
     ) -> bool:
         chunk = self._chunks[chunk_id]
         return (
             (titles is None or chunk.title in titles)
             and (wiki is None or chunk.wiki == wiki)
             and (not exclude_wikis or chunk.wiki not in exclude_wikis)
+            and (source_filter is None or source_filter.allows(chunk))
         )
 
     async def vector_search(
@@ -376,11 +400,12 @@ class MemoryKnowledgeStore:
         wiki: str | None = None,
         fingerprint: str | None = None,
         exclude_wikis: Collection[str] | None = None,
+        source_filter: SourceFilter | None = None,
     ) -> list[Hit]:
         scored = [
             (dot(vector, v), chunk_id)
             for chunk_id, v in self._vectors.items()
-            if self._within(chunk_id, titles, wiki, exclude_wikis)
+            if self._within(chunk_id, titles, wiki, exclude_wikis, source_filter)
             and (fingerprint is None or self._fingerprints[chunk_id] == fingerprint)
         ]
         scored.sort(key=lambda item: (-item[0], item[1]))
@@ -395,11 +420,12 @@ class MemoryKnowledgeStore:
         titles: Sequence[str] | None = None,
         wiki: str | None = None,
         exclude_wikis: Collection[str] | None = None,
+        source_filter: SourceFilter | None = None,
     ) -> list[Hit]:
         weights = term_weights(terms, self._df, len(self._chunks), max_df_ratio=max_df_ratio)
         scored = []
         for chunk_id, have in self._terms.items():
-            if not self._within(chunk_id, titles, wiki, exclude_wikis):
+            if not self._within(chunk_id, titles, wiki, exclude_wikis, source_filter):
                 continue
             score = sum(weight for term, weight in weights.items() if term in have)
             if score > 0:
@@ -414,21 +440,41 @@ class MemoryKnowledgeStore:
     ) -> NewsResult:
         return select_recent_documents(self._chunks.values(), query, exclude_wikis=exclude_wikis)
 
-    async def outline(self, chunk_ids: Collection[str]) -> list[ChunkPlace]:
-        docs = {self._chunks[cid].doc_key for cid in chunk_ids if cid in self._chunks}
+    async def outline(
+        self, chunk_ids: Collection[str], *, source_filter: SourceFilter | None = None
+    ) -> list[ChunkPlace]:
+        docs = {
+            self._chunks[cid].doc_key
+            for cid in chunk_ids
+            if cid in self._chunks
+            and (source_filter is None or source_filter.allows(self._chunks[cid]))
+        }
         places = [
             ChunkPlace(c.chunk_id, c.doc_key, c.section_path, c.seq, len(c.text))
             for c in self._chunks.values()
-            if c.doc_key in docs
+            if c.doc_key in docs and (source_filter is None or source_filter.allows(c))
         ]
         return sorted(places, key=lambda p: (p.doc_key, p.seq, p.chunk_id))
 
-    async def get(self, chunk_ids: Collection[str]) -> list[KbChunk]:
-        return [self._chunks[cid] for cid in chunk_ids if cid in self._chunks]
+    async def get(
+        self, chunk_ids: Collection[str], *, source_filter: SourceFilter | None = None
+    ) -> list[KbChunk]:
+        return [
+            self._chunks[cid]
+            for cid in chunk_ids
+            if cid in self._chunks
+            and (source_filter is None or source_filter.allows(self._chunks[cid]))
+        ]
 
-    async def page(self, title: str, *, url_prefix: str = "") -> list[KbChunk]:
+    async def page(
+        self, title: str, *, url_prefix: str = "", source_filter: SourceFilter | None = None
+    ) -> list[KbChunk]:
         chunks = [
-            c for c in self._chunks.values() if c.title == title and c.url.startswith(url_prefix)
+            c
+            for c in self._chunks.values()
+            if c.title == title
+            and c.url.startswith(url_prefix)
+            and (source_filter is None or source_filter.allows(c))
         ]
         return sorted(chunks, key=lambda c: (c.doc_key, c.seq, c.chunk_id))
 
@@ -464,6 +510,7 @@ FROM kb_chunks c, q
 WHERE c.embedding IS NOT NULL AND ($3::text[] IS NULL OR c.title = ANY($3::text[]))
   AND ($4::text IS NULL OR c.wiki = $4) AND ($5::text IS NULL OR c.fingerprint = $5)
   AND ($6::text[] IS NULL OR c.wiki <> ALL($6::text[]))
+  AND /*SOURCE_FILTER*/ TRUE
 ORDER BY c.embedding <#> q.v, c.chunk_id
 LIMIT $2
 """
@@ -477,6 +524,7 @@ scored AS (
     FROM q JOIN kb_chunks k ON k.terms @> ARRAY[q.term]
     WHERE ($4::text[] IS NULL OR k.title = ANY($4::text[])) AND ($5::text IS NULL OR k.wiki = $5)
       AND ($6::text[] IS NULL OR k.wiki <> ALL($6::text[]))
+      AND /*SOURCE_FILTER*/ TRUE
     GROUP BY k.chunk_id
     ORDER BY score DESC, k.chunk_id
     LIMIT $3
@@ -489,9 +537,12 @@ ORDER BY s.score DESC, c.chunk_id
 # PostgreSQL 17：先在库内按完整文档筛选、统计、限篇数，最后只传每篇的首片。
 # 历史 date 是文本；形状与有效性都过关才参与 ISO 日期比较，绝不拿 updated_at 补。
 # 主题用切片×去重词集合聚合覆盖篇目；禁止按每篇相关子查询重扫全部 candidates。
+# 文档聚合同时记首片主键；仅为selected原帖收集captures，最后按主键补正文。
+# 即使新库未ANALYZE、CTE被估成1行，也不关联两份完整文档集造成N²扫描。
 _RECENT_DOCUMENTS = f"""
 WITH candidates AS MATERIALIZED (
     SELECT {_COLUMNS},
+           coalesce('canonical:' || ({canonical_sql("c")}), 'doc:' || c.doc_key) AS identity,
            CASE WHEN c.date ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
                      AND pg_input_is_valid(c.date, 'date')
                 THEN c.date ELSE NULL END AS published_date,
@@ -499,17 +550,24 @@ WITH candidates AS MATERIALIZED (
                      AND pg_input_is_valid(c.meta->>'published_at', 'timestamptz')
                 THEN (c.meta->>'published_at')::timestamptz ELSE NULL END AS published_at
     FROM kb_chunks c
-    WHERE c.type = 'announcement' AND c.meta->>'source_platform' = ANY($1::text[])
+    WHERE c.type IN ('announcement', 'post')
+      AND ($1::text[] IS NULL OR c.meta->>'source_platform' = ANY($1::text[]))
       AND ($2::text[] IS NULL OR c.wiki <> ALL($2::text[]))
+      AND /*SOURCE_FILTER*/ TRUE
 ),
 documents AS MATERIALIZED (
-    SELECT doc_key, max(published_date) AS published_date, max(published_at) AS published_at
+    SELECT doc_key, min(identity) AS identity, max(published_date) AS published_date,
+           max(published_at) AS published_at,
+           (array_agg(chunk_id ORDER BY seq, chunk_id))[1] AS head_chunk_id
     FROM candidates GROUP BY doc_key
+),
+canonical_coverage AS (
+    SELECT identity, max(published_date) AS published_date FROM documents GROUP BY identity
 ),
 coverage AS (
     SELECT max(published_date) FILTER (WHERE published_date <= $3::text) AS source_latest_date,
            count(*) FILTER (WHERE published_date IS NULL) AS undated_documents
-    FROM documents
+    FROM canonical_coverage
 ),
 query_words AS MATERIALIZED (
     SELECT DISTINCT lower(word) AS word FROM unnest($6::text[]) AS q(word)
@@ -520,27 +578,42 @@ topic_documents AS MATERIALIZED (
     GROUP BY p.doc_key
     HAVING count(DISTINCT q.word) = (SELECT count(*) FROM query_words)
 ),
-matching AS MATERIALIZED (
-    SELECT d.doc_key, d.published_date, d.published_at FROM documents d
+matching_copies AS MATERIALIZED (
+    SELECT d.doc_key, d.identity, d.published_date, d.published_at, d.head_chunk_id
+    FROM documents d
     WHERE d.published_date <= $3::text
       AND ($4::text IS NULL OR d.published_date >= $4::text)
       AND ($5::text IS NULL OR d.published_date <= $5::text)
       AND (NOT EXISTS (SELECT 1 FROM query_words)
            OR d.doc_key IN (SELECT doc_key FROM topic_documents))
 ),
-selected AS (
-    SELECT doc_key, published_date, published_at FROM matching
+matching AS MATERIALIZED (
+    SELECT DISTINCT ON (identity) doc_key, identity, published_date, published_at, head_chunk_id
+    FROM matching_copies
+    ORDER BY identity, published_date DESC, published_at DESC NULLS LAST, doc_key
+),
+selected AS MATERIALIZED (
+    SELECT doc_key, identity, published_date, published_at, head_chunk_id FROM matching
     ORDER BY published_date DESC, published_at DESC NULLS LAST, doc_key LIMIT $7
+),
+selected_copies AS MATERIALIZED (
+    SELECT m.* FROM matching_copies m WHERE m.identity IN (SELECT identity FROM selected)
+),
+captures AS MATERIALIZED (
+    SELECT m.identity, count(*) AS copies,
+           jsonb_agg(jsonb_build_object('source_id', h.wiki, 'doc_key', h.doc_key, 'url', h.url)
+                     ORDER BY h.doc_key) AS captures
+    FROM selected_copies m JOIN kb_chunks h ON h.chunk_id = m.head_chunk_id GROUP BY m.identity
 )
 SELECT c.chunk_id, c.doc_key, c.type, c.title, c.text, c.url, c.source, c.section_path, c.seq,
-       s.published_date AS date, c.date_inferred, c.entities, c.meta, c.wiki,
+       s.published_date AS date, c.date_inferred, c.entities,
+       CASE WHEN cp.copies > 1 THEN jsonb_set(c.meta, '{{captures}}', cp.captures)
+            ELSE c.meta END AS meta, c.wiki,
        coverage.source_latest_date, coverage.undated_documents,
        (SELECT count(*) FROM matching) AS matching_documents
 FROM coverage LEFT JOIN selected s ON TRUE
-LEFT JOIN LATERAL (
-    SELECT p.* FROM candidates p WHERE p.doc_key = s.doc_key
-    ORDER BY p.seq, p.chunk_id LIMIT 1
-) c ON TRUE
+LEFT JOIN kb_chunks c ON c.chunk_id = s.head_chunk_id
+LEFT JOIN captures cp ON cp.identity = s.identity
 ORDER BY s.published_date DESC, s.published_at DESC NULLS LAST, s.doc_key, c.chunk_id
 """
 
@@ -628,6 +701,7 @@ class PostgresKnowledgeStore:
             seen: set[str] = set()
             batch: list[tuple[Any, ...]] = []
             for chunk, vector in records:
+                _check_namespace(chunk, wiki)
                 report.total += 1
                 seen.add(chunk.chunk_id)
                 if vector is not None:
@@ -729,15 +803,18 @@ class PostgresKnowledgeStore:
         wiki: str | None = None,
         fingerprint: str | None = None,
         exclude_wikis: Collection[str] | None = None,
+        source_filter: SourceFilter | None = None,
     ) -> list[Hit]:
+        condition, args = (source_filter or SourceFilter()).sql("c", 7)
         rows = await self._db.pool.fetch(
-            _VECTOR_SEARCH,
+            _VECTOR_SEARCH.replace("/*SOURCE_FILTER*/ TRUE", f"({condition})"),
             vector_literal(vector),
             limit,
             list(titles) if titles else None,
             wiki,
             fingerprint,
             list(exclude_wikis) if exclude_wikis else None,
+            *args,
         )
         return [Hit(_chunk(row), float(row["score"])) for row in rows]
 
@@ -750,6 +827,7 @@ class PostgresKnowledgeStore:
         titles: Sequence[str] | None = None,
         wiki: str | None = None,
         exclude_wikis: Collection[str] | None = None,
+        source_filter: SourceFilter | None = None,
     ) -> list[Hit]:
         wanted = sorted(set(terms))
         if not wanted:
@@ -764,31 +842,42 @@ class PostgresKnowledgeStore:
         )
         if not weights:
             return []
+        condition, args = (source_filter or SourceFilter()).sql("k", 7)
         rows = await pool.fetch(
-            _KEYWORD_SEARCH,
+            _KEYWORD_SEARCH.replace("/*SOURCE_FILTER*/ TRUE", f"({condition})"),
             list(weights),
             [float(w) for w in weights.values()],
             max(limit, KEYWORD_POOL),
             list(titles) if titles else None,
             wiki,
             list(exclude_wikis) if exclude_wikis else None,
+            *args,
         )
         return _best_by_bm25((_chunk(row) for row in rows), weights, info.average_chars, limit)
 
     async def recent_documents(
         self, query: NewsQuery, *, exclude_wikis: Collection[str] | None = None
     ) -> NewsResult:
-        if not query.source_platforms:
+        if query.source_platforms == ():
             return NewsResult(chunks=[])
+        condition, args = (
+            SourceFilter(
+                source_ids=query.source_ids,
+                author_ids=query.author_ids,
+            )
+            .intersect(query.source_filter)
+            .sql("c", 8)
+        )
         rows = await self._db.pool.fetch(
-            _RECENT_DOCUMENTS,
-            list(query.source_platforms),
+            _RECENT_DOCUMENTS.replace("/*SOURCE_FILTER*/ TRUE", f"({condition})"),
+            list(query.source_platforms) if query.source_platforms is not None else None,
             list(exclude_wikis) if exclude_wikis else None,
             query.as_of or date.today().isoformat(),
             query.date_from,
             query.date_to,
             list(query.keywords),
             query.limit,
+            *args,
         )
         return NewsResult(
             chunks=[_chunk(row) for row in rows if row["chunk_id"] is not None],
@@ -797,10 +886,17 @@ class PostgresKnowledgeStore:
             undated_documents=int(rows[0]["undated_documents"]),
         )
 
-    async def outline(self, chunk_ids: Collection[str]) -> list[ChunkPlace]:
+    async def outline(
+        self, chunk_ids: Collection[str], *, source_filter: SourceFilter | None = None
+    ) -> list[ChunkPlace]:
         if not chunk_ids:
             return []
-        rows = await self._db.pool.fetch(_OUTLINE, list(chunk_ids))
+        condition, args = (source_filter or SourceFilter()).sql("c", 2)
+        sql = _OUTLINE.replace(
+            "FROM kb_chunks WHERE chunk_id = ANY($1::text[])",
+            f"FROM kb_chunks c WHERE chunk_id = ANY($1::text[]) AND ({condition})",
+        ).replace("ORDER BY c.doc_key", f"AND ({condition}) ORDER BY c.doc_key")
+        rows = await self._db.pool.fetch(sql, list(chunk_ids), *args)
         return [
             ChunkPlace(
                 chunk_id=row["chunk_id"],
@@ -812,15 +908,24 @@ class PostgresKnowledgeStore:
             for row in rows
         ]
 
-    async def get(self, chunk_ids: Collection[str]) -> list[KbChunk]:
+    async def get(
+        self, chunk_ids: Collection[str], *, source_filter: SourceFilter | None = None
+    ) -> list[KbChunk]:
         if not chunk_ids:
             return []
+        condition, args = (source_filter or SourceFilter()).sql("c", 2)
         rows = await self._db.pool.fetch(
-            f"SELECT {_COLUMNS} FROM kb_chunks c WHERE c.chunk_id = ANY($1::text[])",
+            f"SELECT {_COLUMNS} FROM kb_chunks c "
+            f"WHERE c.chunk_id = ANY($1::text[]) AND ({condition})",
             list(chunk_ids),
+            *args,
         )
         return [_chunk(row) for row in rows]
 
-    async def page(self, title: str, *, url_prefix: str = "") -> list[KbChunk]:
-        rows = await self._db.pool.fetch(_PAGE, title, url_prefix)
+    async def page(
+        self, title: str, *, url_prefix: str = "", source_filter: SourceFilter | None = None
+    ) -> list[KbChunk]:
+        condition, args = (source_filter or SourceFilter()).sql("c", 3)
+        sql = _PAGE.replace("ORDER BY", f"AND ({condition}) ORDER BY")
+        rows = await self._db.pool.fetch(sql, title, url_prefix, *args)
         return [_chunk(row) for row in rows]
