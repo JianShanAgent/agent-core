@@ -1,9 +1,11 @@
 """嵌入调用层和「给切片算向量」的任务：解析、顺序、重试、断点续跑。不联网。"""
 
 import base64
+import hashlib
 import json
 import math
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -62,6 +64,95 @@ def fake_api(calls: list[list[str]], *, fail: set[str] | None = None, mutate=Non
 
 def client(transport: httpx.MockTransport) -> EmbeddingClient:
     return EmbeddingClient(PROVIDER, transport=transport, retry_base_seconds=0)
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "",
+        "Represent the user's input.",
+        "表示用户输入。",
+        "表示用户输入!",
+        " 表示用户输入。",
+        "表示用户输入。 ",
+        " ",
+    ],
+)
+def test_provider_fingerprint_includes_exact_utf8_instruction(instruction: str):
+    provider = replace(PROVIDER, text_instruction=instruction)
+    expected = "fake:m:4"
+    if instruction:
+        expected += ":" + hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+        assert len(expected.rsplit(":", 1)[1]) == 64
+    assert provider.fingerprint == expected
+
+
+def test_different_text_instructions_have_different_fingerprints():
+    instructions = ["", "表示用户输入。", "表示用户输入!", " 表示用户输入。", "表示用户输入。 "]
+    fingerprints = {
+        replace(PROVIDER, text_instruction=instruction).fingerprint for instruction in instructions
+    }
+    assert len(fingerprints) == len(instructions)
+
+
+def test_for_images_only_clears_text_instruction_and_preserves_legacy_fingerprint():
+    provider = EmbeddingProvider(
+        name="custom",
+        base_url="https://e/v1",
+        model="image-model",
+        api_key="test-key",
+        dimensions=8,
+        batch_size=7,
+        concurrency=3,
+        timeout_seconds=42.5,
+        max_retries=4,
+        text_instruction="Represent the user's input.",
+    )
+    image_provider = provider.for_images()
+    assert image_provider == replace(provider, text_instruction="")
+    assert image_provider is not provider
+    assert provider.text_instruction == "Represent the user's input."
+    assert image_provider.fingerprint == "custom:image-model:8"
+    assert image_provider.fingerprint != provider.fingerprint
+    assert image_provider.for_images() is image_provider
+    assert PROVIDER.for_images() is PROVIDER
+
+
+@pytest.mark.parametrize("instruction", ["", "Represent the user's input.", " 表示用户输入。 "])
+async def test_text_instruction_is_top_level_and_consistent_for_batch_and_single(instruction: str):
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        data = [
+            {"index": i, "embedding": b64(vector_for(text))} for i, text in enumerate(body["input"])
+        ]
+        return httpx.Response(200, json={"data": list(reversed(data))})
+
+    embedding_client = EmbeddingClient(
+        replace(PROVIDER, text_instruction=instruction), transport=httpx.MockTransport(handler)
+    )
+    try:
+        result = await embedding_client.embed(["甲", "乙"])
+        single = await embedding_client.embed_one("甲")
+        await embedding_client.embed(["甲"])
+        assert (await embedding_client.embed([])).vectors == []
+    finally:
+        await embedding_client.aclose()
+
+    expected = {
+        "model": "m",
+        "input": ["甲", "乙"],
+        "dimensions": DIM,
+        "encoding_format": "base64",
+    }
+    if instruction:
+        expected["instruction"] = instruction
+    assert bodies == [expected, {**expected, "input": ["甲"]}, {**expected, "input": ["甲"]}]
+    assert dot(single, result.vectors[0]) == pytest.approx(1.0, abs=1e-5)
+    for text, vector in zip(["甲", "乙"], result.vectors, strict=True):
+        assert dot(vector, vector_for(text)) == pytest.approx(1.0, abs=1e-5)
 
 
 async def test_embed_returns_vectors_in_input_order_even_if_index_restarts():
@@ -142,7 +233,13 @@ async def test_embed_retries_transient_errors_but_not_permanent_ones():
     assert info.value.status == 401 and seen["n"] == 1
 
 
-async def test_embed_images_sends_the_pictures_inline_and_keeps_their_order():
+@pytest.mark.parametrize(
+    ("instruction", "use_image_provider"),
+    [("", False), ("Represent the user's input.", False), ("Represent the user's input.", True)],
+)
+async def test_embed_images_sends_the_pictures_inline_and_keeps_their_order(
+    instruction: str, use_image_provider: bool
+):
     bodies: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -154,8 +251,13 @@ async def test_embed_images_sends_the_pictures_inline_and_keeps_their_order():
         ]
         return httpx.Response(200, json={"data": data, "usage": {"prompt_tokens": 7}})
 
+    provider = replace(PROVIDER, text_instruction=instruction)
+    if use_image_provider:
+        provider = provider.for_images()
+        assert provider.fingerprint == PROVIDER.fingerprint
+    embedding_client = EmbeddingClient(provider, transport=httpx.MockTransport(handler))
     images = [b"\xff\xd8first", b"\xff\xd8second"]
-    result = await client(httpx.MockTransport(handler)).embed_images(images)
+    result = await embedding_client.embed_images(images)
     # 图片内容编成 base64 放在请求里（对方不会自己去下载图片地址），和文字一样每次都带 dimensions
     uris = ["data:image/jpeg;base64," + base64.b64encode(image).decode() for image in images]
     assert bodies[0]["input"] == [{"image": uri} for uri in uris]
@@ -164,10 +266,18 @@ async def test_embed_images_sends_the_pictures_inline_and_keeps_their_order():
         assert dot(vector, vector_for(uri)) == pytest.approx(1.0, abs=1e-5)
     assert result.prompt_tokens == 7
 
-    one = await client(httpx.MockTransport(handler)).embed_image(images[1])
+    one = await embedding_client.embed_image(images[1])
     assert dot(one, vector_for(uris[1])) == pytest.approx(1.0, abs=1e-5)
-    assert (await client(httpx.MockTransport(handler)).embed_images([])).vectors == []
+    assert (await embedding_client.embed_images([])).vectors == []
+    await embedding_client.aclose()
     assert len(bodies) == 2  # 没有图片就不发请求
+    assert bodies[0] == {
+        "model": "m",
+        "input": [{"image": uri} for uri in uris],
+        "dimensions": DIM,
+        "encoding_format": "base64",
+    }
+    assert bodies[1] == {**bodies[0], "input": [{"image": uris[1]}]}
 
 
 def test_settings_read_providers_and_keys(tmp_path: Path):
@@ -188,12 +298,56 @@ def test_settings_read_providers_and_keys(tmp_path: Path):
     gitee = settings.provider()
     assert (gitee.base_url, gitee.api_key, gitee.dimensions) == ("https://g/v1", "k", 4096)
     assert gitee.fingerprint == "gitee:M:4096"
+    assert gitee.text_instruction == ""
     assert settings.provider("local").batch_size == 32
     assert settings.provider("local").fingerprint != gitee.fingerprint
     with pytest.raises(EmbeddingError, match="没有提供方"):
         settings.provider("nope")
     files["core.embedding"]["enabled"] = False
     assert EmbeddingSettings.from_config(AppConfig(tmp_path, files, {})) is None
+
+
+@pytest.mark.parametrize("instruction", ["", "Represent the user's input.", " 表示用户输入。 "])
+def test_settings_read_text_instruction_without_changing_it(tmp_path: Path, instruction: str):
+    files = {
+        "core.embedding": {
+            "enabled": True,
+            "default_provider": "fake",
+            "providers": {
+                "fake": {
+                    "base_url": "https://e/v1",
+                    "model": "m",
+                    "dimensions": DIM,
+                    "text_instruction": instruction,
+                }
+            },
+        }
+    }
+    settings = EmbeddingSettings.from_config(AppConfig(tmp_path, files, {}))
+    assert settings is not None
+    provider = settings.provider()
+    assert provider.text_instruction == instruction
+    assert provider.fingerprint == replace(PROVIDER, text_instruction=instruction).fingerprint
+    assert provider.for_images().fingerprint == PROVIDER.fingerprint
+
+
+@pytest.mark.parametrize("instruction", [None, False, 0, 1.5, [], {}])
+def test_settings_reject_non_string_text_instruction(tmp_path: Path, instruction):
+    files = {
+        "core.embedding": {
+            "enabled": True,
+            "default_provider": "fake",
+            "providers": {
+                "fake": {
+                    "base_url": "https://e/v1",
+                    "model": "m",
+                    "text_instruction": instruction,
+                }
+            },
+        }
+    }
+    with pytest.raises(EmbeddingError, match=r"providers\.fake\.text_instruction 必须是字符串"):
+        EmbeddingSettings.from_config(AppConfig(tmp_path, files, {}))
 
 
 def write_chunks(path: Path, texts: dict[str, str], *, skip: set[str] | None = None) -> Path:

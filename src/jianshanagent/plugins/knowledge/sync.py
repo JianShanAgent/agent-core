@@ -406,6 +406,12 @@ class SyncEnv:
     cdn_transport: httpx.AsyncBaseTransport | None = None
     clock: Callable[[], float] = time.time
 
+    @property
+    def image_provider(self) -> EmbeddingProvider:
+        """图库沿用不带文本指令的向量空间，不改变文本同步用的 provider。"""
+        assert self.provider is not None
+        return self.provider.for_images()
+
 
 def build_env(config: AppConfig, settings: Settings | None = None, *, wiki: str = "") -> SyncEnv:
     """按配置装出 ``wiki``（不写就是主 wiki）的运行环境。
@@ -671,7 +677,7 @@ def _image_paths(env: SyncEnv) -> tuple[Path, Path]:
     """（图片记录文件，这一家的图片向量目录）。"""
     assert env.provider is not None
     out = env.settings.output_dir
-    return out / IMAGES_FILE, out / "vectors" / vectors_dirname(env.provider)
+    return out / IMAGES_FILE, out / "vectors" / vectors_dirname(env.image_provider)
 
 
 async def _images_catalog(
@@ -712,7 +718,8 @@ async def _images_vectors(
     images_path, store_dir = _image_paths(env)
     if not (state.images_embed_pending or _behind(env, loaded, "images", images_path, store_dir)):
         return {}
-    need = images_without_vectors(env.provider, read_images(images_path), store_dir, images)
+    provider = env.image_provider
+    need = images_without_vectors(provider, read_images(images_path), store_dir, images)
     if len(need) > cfg.max_new_images and not force:
         raise Held(
             f"有 {len(need)} 张图要新算向量，超过了 {cfg.max_new_images} 张"
@@ -726,7 +733,7 @@ async def _images_vectors(
         need, settings.cache_dir, settings.wiki, settings.fetch, transport=env.cdn_transport
     )
     result = await embed_image_files(
-        env.provider,
+        provider,
         images_path,
         store_dir,
         settings.cache_dir,
@@ -756,16 +763,17 @@ async def _images_load(env: SyncEnv, loaded: dict[str, str], *, force: bool) -> 
         return {}
     signature = file_signature(images_path, store_dir / INDEX_FILE)
     stored = _stored_fingerprint(env, wikis)
-    if stored and stored != env.provider.fingerprint and not force:
+    provider = env.image_provider
+    if stored and stored != provider.fingerprint and not force:
         raise Held(
             f"库里图片向量的指纹是「{stored}」，现在配置的嵌入接口是"
-            f"「{env.provider.fingerprint}」，不是同一种。导进去会把库里的向量清掉，所以没有导入"
+            f"「{provider.fingerprint}」，不是同一种。导进去会把库里的向量清掉，所以没有导入"
         )
     report = await load_images_into(
         env.targets.images,
         images_path,
         store_dir,
-        env.provider,
+        provider,
         env.images.preprocess,
         wiki=env.settings.wiki.id,
         replace_unlabelled=env.primary,

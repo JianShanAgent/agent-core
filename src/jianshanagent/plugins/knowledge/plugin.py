@@ -69,7 +69,7 @@ class KnowledgePlugin:
                 provider = query_provider(embedding.provider(), settings)
                 embedder = EmbeddingClient(provider)
                 # 两个服务各用各的连接：关机时各关各的
-                image_embedder = EmbeddingClient(provider)
+                image_embedder = EmbeddingClient(provider.for_images())
         except EmbeddingError as exc:
             # 嵌入配置有问题不该让机器人起不来：退回只用关键词
             logger.warning("knowledge_embedding_unavailable", error=str(exc))

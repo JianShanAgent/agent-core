@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import math
 import sys
 from array import array
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -55,11 +56,20 @@ class EmbeddingProvider:
     concurrency: int = 1
     timeout_seconds: float = 120.0
     max_retries: int = 5
+    text_instruction: str = ""
 
     @property
     def fingerprint(self) -> str:
-        """向量指纹：提供方 + 型号 + 维度。指纹不同的向量不能直接比。"""
-        return f"{self.name}:{self.model}:{self.dimensions}"
+        """向量指纹：提供方 + 型号 + 维度 + 可选文本指令摘要。"""
+        fingerprint = f"{self.name}:{self.model}:{self.dimensions}"
+        if self.text_instruction:
+            digest = hashlib.sha256(self.text_instruction.encode("utf-8")).hexdigest()
+            return f"{fingerprint}:{digest}"
+        return fingerprint
+
+    def for_images(self) -> EmbeddingProvider:
+        """图片不使用文本指令，保留其他配置以及原有图片向量指纹。"""
+        return replace(self, text_instruction="") if self.text_instruction else self
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +109,11 @@ class EmbeddingSettings:
             api_key = str((config.secrets.get(secret) or {}).get("api_key") or "").strip()
             if secret and not api_key:
                 logger.warning("embedding_key_missing", provider=name, secret=secret)
+            text_instruction = item.get("text_instruction", "")
+            if not isinstance(text_instruction, str):
+                raise EmbeddingError(
+                    f"core.embedding.yaml 的 providers.{name}.text_instruction 必须是字符串"
+                )
             retries = item.get("max_retries")
             providers[str(name)] = EmbeddingProvider(
                 name=str(name),
@@ -110,6 +125,7 @@ class EmbeddingSettings:
                 concurrency=max(1, int(item.get("concurrency") or 1)),
                 timeout_seconds=float(item.get("timeout_seconds") or 120),
                 max_retries=int(retries) if retries is not None else 5,
+                text_instruction=text_instruction,
             )
         default = str(raw.get("default_provider") or "")
         if default not in providers:
@@ -227,18 +243,21 @@ class EmbeddingClient:
         assert last_error is not None
         raise last_error
 
-    async def _embed(self, inputs: list[Any], what: str) -> EmbeddingResult:
+    async def _embed(
+        self, inputs: list[Any], what: str, *, include_text_instruction: bool = False
+    ) -> EmbeddingResult:
         if not inputs:
             return EmbeddingResult(vectors=[])
         provider = self.provider
-        data = await self._post(
-            {
-                "model": provider.model,
-                "input": inputs,
-                "dimensions": provider.dimensions,
-                "encoding_format": "base64",
-            }
-        )
+        body = {
+            "model": provider.model,
+            "input": inputs,
+            "dimensions": provider.dimensions,
+            "encoding_format": "base64",
+        }
+        if include_text_instruction and provider.text_instruction:
+            body["instruction"] = provider.text_instruction
+        data = await self._post(body)
         items = data.get("data") or []
         if len(items) != len(inputs):
             raise EmbeddingError(f"发了 {len(inputs)} {what}，接口返回了 {len(items)} 个向量")
@@ -251,13 +270,13 @@ class EmbeddingClient:
 
     async def embed(self, texts: Sequence[str]) -> EmbeddingResult:
         """一次请求算一批文字的向量（分批由调用方决定），按输入顺序返回。"""
-        return await self._embed(list(texts), "段文字")
+        return await self._embed(list(texts), "段文字", include_text_instruction=True)
 
     async def embed_one(self, text: str) -> array[float]:
         return (await self.embed([text])).vectors[0]
 
     async def embed_images(self, images: Sequence[bytes]) -> EmbeddingResult:
-        """一次请求算一批图片的向量，按输入顺序返回。和文字的向量在同一个空间，指纹也一样。
+        """一次请求算一批图片的向量，按输入顺序返回；不发送文本指令。
 
         ``images`` 是已经过 ``core.images.normalize_image`` 的 JPEG 字节：入库和查询都先过那一道，
         这里不再处理。图片是把内容编成 base64 放在请求里发的——模力方舟不会自己去下载

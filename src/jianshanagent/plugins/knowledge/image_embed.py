@@ -90,7 +90,7 @@ def images_without_vectors(
     自动更新用它决定下载哪些原图：已经有向量的图片不需要原图，所以一台只有记录和向量、
     没有原图缓存的机器（服务器）也能接着更新，不用把一个 G 的原图再下一遍。
     """
-    store = VectorStore(store_dir, provider, embedded=_EMBEDDED)
+    store = VectorStore(store_dir, provider.for_images(), embedded=_EMBEDDED)
     store.open()
     store.close()
     return [
@@ -138,7 +138,7 @@ def _with_everything(
     store_dir: Path,
 ) -> ImageEmbedReport:
     """``report`` 只数了原图在缓存里的；把总数、已有数换成按全部记录算的。"""
-    store = VectorStore(store_dir, provider, embedded=_EMBEDDED)
+    store = VectorStore(store_dir, provider.for_images(), embedded=_EMBEDDED)
     store.open()
     store.close()
     current = {(item.chunk_id, item.digest) for item in everything}
@@ -167,6 +167,7 @@ async def embed_image_files(
     retry_base_seconds: float = 1.0,
 ) -> ImageEmbedReport:
     """给还没有向量的图片算向量。``limit``：这次最多算多少张（试跑用）。"""
+    provider = provider.for_images()
     everything = pending_images(read_images(images_path), cache_dir, settings)
     report = await embed_items(
         provider,
@@ -193,6 +194,7 @@ async def verify_image_vectors(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> VerifyResult:
     """随机抽几张，每张单独再算一次，和存下来的向量比（相似度应接近 1）。"""
+    provider = provider.for_images()
     everything = pending_images(read_images(images_path), cache_dir, settings)
     return await verify_items(
         provider,
@@ -227,7 +229,7 @@ def image_status(
     return ImageStatus(
         by_kind=dict(Counter(image.kind for image in images).most_common()),
         no_original=sum(1 for item in everything if not item.path.exists()),
-        vectors=status_of(provider, everything, store_dir, embedded=_EMBEDDED),
+        vectors=status_of(provider.for_images(), everything, store_dir, embedded=_EMBEDDED),
     )
 
 
@@ -242,7 +244,7 @@ def read_image_records(
 
     ``wiki``：这份记录是哪个 wiki 的，读出来的图片上标着它（入库的样子）。
     """
-    vectors = VectorStore(vectors_dir, provider, embedded=_EMBEDDED)
+    vectors = VectorStore(vectors_dir, provider.for_images(), embedded=_EMBEDDED)
     has_vectors = (vectors_dir / INDEX_FILE).exists()
     if has_vectors:
         vectors.open()  # 顺带核对指纹；目录里是别的指纹的向量会在这里报错
@@ -265,6 +267,7 @@ async def load_images_into(
     replace_unlabelled: bool = False,
 ) -> ImageSyncReport:
     """``replace_unlabelled``：库里没标出处的图片一起换掉（导入主 wiki 时用）。"""
+    provider = provider.for_images()
     return await store.sync(
         read_image_records(images_path, vectors_dir, provider, preprocess, wiki),
         fingerprint=provider.fingerprint,

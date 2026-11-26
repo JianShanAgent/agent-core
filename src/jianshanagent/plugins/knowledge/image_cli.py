@@ -104,7 +104,7 @@ def _provider_and_paths(
         _say("core.embedding.yaml 没有启用（enabled: false）")
         return None
     try:
-        provider = embedding.provider(args.provider)
+        provider = embedding.provider(args.provider).for_images()
     except EmbeddingError as exc:
         _say(str(exc))
         return None
