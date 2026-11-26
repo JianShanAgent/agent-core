@@ -35,9 +35,9 @@ import {
 import { Input, Label, Switch } from "@/components/ui/form";
 import { SimpleSelect } from "@/components/ui/select";
 import { Hint, Pre, Skeleton, Spinner } from "@/components/ui/misc";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { formatAgo } from "@/lib/format";
-import type { ImportJob, ImportPreview, ImportState, ImportStatus, SourceInfo } from "@/lib/types";
+import type { ImportJob, ImportPreview, ImportState, ImportStatus, SourceInfo, WeiboSessionStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** 来源 ID 格式：小写字母开头，只含小写字母/数字/下划线，1-32 位 */
@@ -820,18 +820,7 @@ function EditSourceDialog({
 
 // ---- 微博平台共享采集会话登录卡片 ----
 // 注意：此处登录账户是采集账号，与帖子作者（source.role）无关。
-// available:false 时只禁用扫码；已有本地会话仍可清除，并明确提示依赖缺失。
-
-type WeiboSessionStatus = {
-  configured: boolean;
-  locally_usable: boolean;
-  valid: boolean | null;
-  updated_at: number | null;
-  available: boolean;
-  message: string;
-  login: string;
-  error?: string;
-};
+// 默认走官方 HTTP 微信扫码，不依赖服务器浏览器；本地保存不等于远端已验证。
 
 function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
   const [qrOpen, setQrOpen] = useState(false);
@@ -839,7 +828,8 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
   const [qrState, setQrState] = useState("");
   const [qrBusy, setQrBusy] = useState(false);
   const [clearBusy, setClearBusy] = useState(false);
-  const pollRef = useRef<number | null>(null);
+  const [qrLoginId, setQrLoginId] = useState<string | null>(null);
+  const loginIdRef = useRef<string | null>(null);
 
   const statusQuery = useQuery({
     queryKey: ["weibo-session"],
@@ -850,40 +840,69 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
 
   const status: WeiboSessionStatus | undefined = statusQuery.data;
 
-  // 轮询二维码扫码结果
-  // 实际终态：confirmed（会话已保存）；done 兼容处理等同 confirmed
-  // scanned = 已扫待确认；new/waiting = 等待扫码；expired/error/cancelled = 失败
+  const refreshStatus = statusQuery.refetch;
+
+  // 串行轮询且绑定本地 ID；旧弹窗的迟到响应不能更新或取消另一个登录。
   useEffect(() => {
-    if (!qrOpen || !qrImage) return;
-    const ACTIVE = ["new", "waiting", "scanned"];
-    if (!ACTIVE.includes(qrState)) return;
-    pollRef.current = window.setInterval(() => {
-      void api.weiboSessionPoll().then((res) => {
+    if (!qrOpen || !qrImage || !qrLoginId) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const current = () => !stopped && loginIdRef.current === qrLoginId;
+    const poll = async () => {
+      if (!current()) return;
+      try {
+        const res = await api.weiboSessionPoll(qrLoginId);
+        if (!current()) return;
+        if (res.login_id !== qrLoginId) {
+          setQrState("cancelled");
+          toast.error("登录会话已变化，请关闭弹窗后刷新页面");
+          return;
+        }
         setQrState(res.state);
-        if (res.state === "confirmed" || res.state === "done") {
-          // confirmed = 微博会话已保存的真正成功终态
-          window.clearInterval(pollRef.current ?? undefined);
+        if (res.state === "confirmed") {
           setQrOpen(false);
           setQrImage(null);
-          void statusQuery.refetch();
-          toast.success("会话已保存，采集可用性待验证");
-        } else if (res.state === "error" || res.state === "expired" || res.state === "cancelled") {
-          window.clearInterval(pollRef.current ?? undefined);
-          toast.error(res.error || "二维码已失效，请重新生成");
+          setQrLoginId(null);
+          loginIdRef.current = null;
+          void refreshStatus();
+          if (res.verified && res.valid === true) {
+            toast.success("微博登录已验证；资料采集仍未配置");
+          } else if (res.method === "browser") {
+            toast.success("会话已保存，采集可用性待验证");
+          } else {
+            toast.warning("微博登录尚未验证，请刷新状态后重试");
+          }
+          return;
         }
-      }).catch(() => { /* 轮询失败静默等待 */ });
-    }, 2500);
-    return () => { if (pollRef.current) window.clearInterval(pollRef.current); };
-  }, [qrOpen, qrImage, qrState, statusQuery]);
+        if (["error", "expired", "cancelled"].includes(res.state)) {
+          toast.error(res.error || "二维码已失效，请重新生成");
+          return;
+        }
+      } catch (e) {
+        if (!current()) return;
+        if (e instanceof ApiError && [400, 401, 403, 409].includes(e.status)) {
+          setQrState("cancelled");
+          toast.error(e.message);
+          return; // 仅停止自己的轮询，绝不无 ID 取消全局会话。
+        }
+        // 暂时网络故障不等于过期或登录成功。
+      }
+      if (current()) timer = window.setTimeout(() => void poll(), 2500);
+    };
+    timer = window.setTimeout(() => void poll(), 2500);
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [qrOpen, qrImage, qrLoginId, refreshStatus]);
 
   const startQr = async () => {
     setQrBusy(true);
     try {
       const res = await api.weiboSessionQr();
-      if (!res.available) {
-        toast.error("本机浏览器不可用，无法生成二维码");
+      if (!res.available || !res.login_id) {
+        toast.error("微信扫码登录组件暂不可用，请刷新页面后重试");
         return;
       }
+      loginIdRef.current = res.login_id;
+      setQrLoginId(res.login_id);
       setQrImage(res.image);
       setQrState(res.state);
       setQrOpen(true);
@@ -895,13 +914,21 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
   };
 
   const cancelQr = async () => {
+    const loginId = loginIdRef.current;
+    loginIdRef.current = null;
+    setQrLoginId(null);
+    setQrOpen(false);
+    setQrImage(null);
+    if (!loginId) return;
     try {
-      await api.weiboSessionCancel();
-      setQrOpen(false);
-      setQrImage(null);
-    } catch {
-      setQrOpen(false);
+      await api.weiboSessionCancel(loginId);
+    } catch (e) {
+      // 失配意味着别的标签页已有新会话，不再尝试取消它。
+      if (!(e instanceof ApiError && e.status === 409)) {
+        toast.error("取消未完成", { description: (e as Error).message });
+      }
     }
+    void refreshStatus();
   };
 
   const clearSession = async () => {
@@ -920,14 +947,16 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
 
   if (!hasWeibo) return null;
 
-  const browserUnavailable = status?.available === false;
+  const loginUnavailable = status?.available === false;
   const configured = status?.configured ?? false;
   const locallyUsable = status?.locally_usable ?? false;
-  const sessionDescription = !configured
-    ? "未配置采集会话"
-    : locallyUsable
-      ? "会话已保存，采集可用性待验证"
-      : "本地会话已失效或无法读取，请重新扫码";
+  const sessionDescription = status?.valid === true
+    ? "微博登录已验证；资料采集仍未配置"
+    : !configured
+      ? "未配置采集会话"
+      : locallyUsable
+        ? "会话已保存，采集可用性待验证"
+        : "本地会话已失效或无法读取，请重新微信扫码";
 
   return (
     <Card className="flex flex-col gap-0 overflow-hidden p-0">
@@ -951,17 +980,17 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
               清除本地会话
             </Button>
           ) : null}
-          <Hint text={browserUnavailable ? "本机浏览器不可用，无法扫码登录" : ""}>
+          <Hint text={loginUnavailable ? status?.message || "微信扫码登录组件暂不可用" : "微信扫码，通过官方 HTTP 接口，无需服务器浏览器"}>
             <span>
               <Button
                 size="xs"
                 variant={configured ? "outline" : "default"}
                 loading={qrBusy}
-                disabled={qrBusy || browserUnavailable || statusQuery.isPending}
+                disabled={qrBusy || loginUnavailable || statusQuery.isPending}
                 onClick={() => void startQr()}
               >
                 <QrCode className="size-3.5" />
-                {configured ? "重新扫码" : "扫码登录"}
+                {configured ? "重新微信扫码" : "微信扫码登录"}
               </Button>
             </span>
           </Hint>
@@ -986,19 +1015,18 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
               )} />
               {sessionDescription}
             </span>
-            {/* status.login 承载采集器内部 state 字符串，仅在非空且非 state 标记时显示 */}
-            {status.login && !["new","waiting","scanned","confirmed","done","error","expired","cancelled"].includes(status.login) ? (
-              <span className="text-muted-foreground">登录状态：{status.login}</span>
+            {["new", "generating", "waiting", "scanned"].includes(status.login) ? (
+              <span className="text-muted-foreground">已有微信扫码登录进行中，请在原弹窗完成</span>
             ) : null}
             {status.updated_at ? (
               <span className="text-muted-foreground">
                 更新于 {formatAgo(new Date(status.updated_at * 1000).toISOString())}
               </span>
             ) : null}
-            {browserUnavailable ? (
+            {loginUnavailable ? (
               <span className="text-warning flex items-center gap-1">
                 <AlertTriangle className="size-3" />
-                {status.message || "本机浏览器不可用，扫码功能不可用"}
+                {status.message || "微信扫码登录组件暂不可用"}
               </span>
             ) : null}
             {status.error ? (
@@ -1012,19 +1040,21 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
       <Dialog open={qrOpen} onOpenChange={(o) => { if (!o) void cancelQr(); }}>
         <DialogContent className="max-w-sm items-center">
           <DialogHeader>
-            <DialogTitle>扫描二维码登录微博采集账号</DialogTitle>
+            <DialogTitle>使用微信扫码登录微博</DialogTitle>
             <DialogDescription>
-              此账号仅用于后续采集，与各来源帖子作者无关。二维码有效期约 2 分钟。
+              请本人用微信扫描官方二维码并确认，无需服务器浏览器。此登录身份与帖子作者无关；资料采集仍未配置。
             </DialogDescription>
           </DialogHeader>
           {qrImage ? (
-            <img src={qrImage} alt="微博采集账号登录二维码" className="mx-auto size-56" />
+            <img src={qrImage} alt="微信扫码登录微博的官方二维码" className="mx-auto size-56" />
           ) : (
             <div className="flex justify-center py-8"><Spinner className="size-8" /></div>
           )}
           <div className="text-muted-foreground text-center text-xs">
-            {qrState === "scanned" ? "已扫描，请在手机上确认" :
-             qrState === "confirmed" || qrState === "done" ? "正在保存…" : "等待扫码"}
+            {qrState === "scanned" ? "微信已扫描，请在手机上确认；微博身份仍待验证" :
+             qrState === "confirmed" ? "正在检查微博身份…" :
+             ["expired", "error", "cancelled"].includes(qrState) ? "本次登录已停止，请关闭后重试" :
+             "等待本人用微信扫码，尚未登录"}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => void cancelQr()}>取消</Button>

@@ -1,4 +1,4 @@
-"""微博平台共享的本机会话；不接受 URL、CDP 地址或 Cookie 上传。"""
+"""微博平台共享的 HTTP 微信扫码会话；不接受 URL、代码或 Cookie 上传。"""
 
 from __future__ import annotations
 
@@ -9,10 +9,11 @@ from aiohttp import web
 
 from jianshanagent.admin.core import Admin, fail, read_body, reply
 from jianshanagent.core.sources import source_instances
-from jianshanagent.weibo_auth import WeiboCredentialStore, WeiboQrLogin, weibo_browser_status
+from jianshanagent.weibo_auth import WeiboCredentialStore, WeiboQrLogin, weibo_login_status
 
-_BUSY = {"generating", "waiting", "scanned"}
+_BUSY = {"new", "generating", "waiting", "scanned"}
 _PREFIX = "/api/sources/platforms/weibo"
+_STATES = _BUSY | {"confirmed", "expired", "error", "cancelled"}
 
 
 def routes(admin: Admin) -> list[web.RouteDef]:
@@ -25,28 +26,51 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             admin.weibo = WeiboCredentialStore(admin.config.root)
         return admin.weibo
 
+    def login_state(login: Any) -> str:
+        return login.state if login.state in _STATES else "error"
+
+    def login_method(login: Any) -> str:
+        # Only local implementation labels, never an upstream OAuth state or URL.
+        method = getattr(login, "method", "http_wechat")
+        return "http_wechat" if method == "http_wechat" else "browser"
+
     def session() -> dict[str, Any]:
         state = store().status()
-        local = weibo_browser_status()
+        local = weibo_login_status()
+        login = admin.weibo_qr
         return {
             "configured": bool(state.get("configured")),
             "locally_usable": bool(state.get("locally_usable")),
-            # Local Cookie presence never establishes whether the remote session is valid.
-            "valid": None,
+            # Only a recent, explicit remote identity check can establish validity.
+            "valid": True if state.get("valid") is True else None,
             "updated_at": state.get("updated_at"),
             "available": bool(local.get("available")),
             "message": str(local.get("message") or ""),
-            "login": str(admin.weibo_qr.state) if admin.weibo_qr is not None else "",
-            "error": "登录未完成，请重试"
-            if admin.weibo_qr is not None and admin.weibo_qr.error
-            else "",
+            "method": login_method(login) if login is not None else "http_wechat",
+            "requires_browser": bool(local.get("requires_browser", False)),
+            "login": login_state(login) if login is not None else "",
+            "login_id": login.login_id if login is not None else None,
+            "verified": bool(login is not None and getattr(login, "verified", False))
+            and state.get("valid") is True,
+            "error": "登录未完成，请重试" if login is not None and login.error else "",
         }
 
     async def empty_body(request: web.Request) -> None:
         if request.can_read_body:
             body = await read_body(request, limit=4096)
             if body:
-                fail(400, "登录只使用受信任的本机浏览器，不接受地址、路径、代码或凭据参数")
+                fail(400, "微信扫码不接受地址、路径、代码或凭据参数")
+
+    def matching_login(login_id: Any) -> Any:
+        login = admin.weibo_qr
+        if (
+            not isinstance(login_id, str)
+            or not 1 <= len(login_id) <= 128
+            or login is None
+            or login_id != login.login_id
+        ):
+            fail(409, "微博登录会话已变化，请刷新页面后重试")
+        return login
 
     async def status(_request: web.Request) -> web.Response:
         return reply(session())
@@ -57,9 +81,9 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             credential = store()
             if admin.weibo_qr is not None and admin.weibo_qr.state in _BUSY:
                 fail(409, "已经有一个微博登录正在进行")
-            local = weibo_browser_status()
+            local = weibo_login_status()
             if not local.get("available"):
-                fail(409, str(local.get("message") or "没有可用的本机浏览器"))
+                fail(409, str(local.get("message") or "微信扫码登录组件不可用"))
             if admin.weibo_qr is not None:
                 await admin.weibo_qr.aclose()
             login = WeiboQrLogin(credential)
@@ -68,33 +92,53 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 image = await login.generate()
             except Exception:
                 await login.aclose()
-                fail(502, "微博登录二维码生成失败，请检查本机浏览器后重试")
+                fail(502, "微博微信扫码二维码生成失败，请稍后重试")
             if not isinstance(image, str) or not image.startswith("data:image/"):
                 await login.aclose()
                 fail(502, "登录组件没有返回可展示的二维码")
-            return reply({"image": image, "state": login.state, "available": login.available})
+            return reply(
+                {
+                    "image": image,
+                    "state": login_state(login),
+                    "available": login.available,
+                    "login_id": login.login_id,
+                    "method": login_method(login),
+                }
+            )
 
-    async def poll(_request: web.Request) -> web.Response:
+    async def poll(request: web.Request) -> web.Response:
         store()
+        if set(request.query) - {"login_id"} or len(request.query.getall("login_id", [])) > 1:
+            fail(400, "轮询只接受本地登录会话标识")
         async with changing:
-            login = admin.weibo_qr
-            if login is None:
-                fail(409, "还没有待确认的微博登录")
+            login = matching_login(request.query.get("login_id"))
             try:
-                state = await login.poll()
+                await login.poll()
             except Exception:
                 await login.aclose()
                 fail(502, "微博登录状态读取失败，请重试")
-            return reply({"state": state, "error": "登录未完成，请重试" if login.error else ""})
+            state = session()
+            return reply(
+                {
+                    "state": login_state(login),
+                    "login_id": login.login_id,
+                    "method": login_method(login),
+                    "verified": state["verified"],
+                    "valid": state["valid"],
+                    "error": "登录未完成，请重试" if login.error else "",
+                }
+            )
 
     async def cancel(request: web.Request) -> web.Response:
-        await empty_body(request)
+        body = await read_body(request, limit=4096) if request.can_read_body else {}
+        if set(body) - {"login_id"}:
+            fail(400, "取消只接受本地登录会话标识")
         store()
         async with changing:
-            if admin.weibo_qr is not None:
-                await admin.weibo_qr.aclose()
-                admin.weibo_qr = None
-        return reply({"state": "cancelled"})
+            login = matching_login(body.get("login_id"))
+            await login.aclose()
+            admin.weibo_qr = None
+        return reply({"state": "cancelled", "login_id": login.login_id})
 
     async def clear(request: web.Request) -> web.Response:
         await empty_body(request)

@@ -193,22 +193,31 @@ def test_store_rejects_symlinks_and_preserves_old_file_on_write_failure(
     assert outside.read_text() == "not a credential"
 
 
-def test_dependency_status_and_missing_browser_never_start_process(tmp_path: Path) -> None:
+def test_browser_diagnostic_does_not_disable_http_login(tmp_path: Path) -> None:
     assert weibo_browser_status()["available"] is False
     assert "Chromium" in weibo_browser_status()["message"]
     store = WeiboCredentialStore(tmp_path / "config")
     assert store.status()["valid"] is None
     login = WeiboQrLogin(store)
-    assert login.available is False
+    assert login.available is True
+    assert login.method == "http_wechat"
     assert login.state == "new"
 
 
-async def test_missing_browser_is_explicit_error(tmp_path: Path) -> None:
+async def test_http_default_generates_without_a_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jianshanagent import weibo_http
+
+    class FakeHttp(FakeBrowser):
+        def __init__(self, *, lifetime: float):
+            super().__init__()
+            self.lifetime = lifetime
+
+    monkeypatch.setattr(weibo_http, "WechatHttpSession", FakeHttp)
     login = WeiboQrLogin(WeiboCredentialStore(tmp_path / "config"))
-    with pytest.raises(ValueError, match="缺少本机"):
-        await login.generate()
-    assert login.state == "error"
-    assert not login.store.status()["configured"]
+    assert await login.generate() == _PNG
+    assert login.state == "waiting" and not login.store.status()["configured"]
     await login.aclose()
 
 
@@ -614,16 +623,116 @@ async def test_save_failure_does_not_overwrite_old_session_or_leak(
     assert fake.closed
     await login.aclose()
 
-    def test_operator_credential_file_keeps_session_outside_the_release_directory(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        persistent = tmp_path / "persistent" / "weibo" / "credential.json"
-        monkeypatch.setenv("JIANSHANAGENT_WEIBO_CREDENTIAL_FILE", str(persistent))
-        store = WeiboCredentialStore(tmp_path / "release" / "config")
-        assert store.path == persistent
-        store.save([_cookie()])
-        assert persistent.is_file()
-        assert persistent.stat().st_mode & 0o777 == 0o600
-        assert store.status()["locally_usable"]
-        assert store.status()["valid"] is None
-        assert not (tmp_path / "release" / "data").exists()
+
+def test_operator_credential_file_keeps_session_outside_the_release_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    persistent = tmp_path / "persistent" / "weibo" / "credential.json"
+    monkeypatch.setenv("JIANSHANAGENT_WEIBO_CREDENTIAL_FILE", str(persistent))
+    store = WeiboCredentialStore(tmp_path / "release" / "config")
+    assert store.path == persistent
+    store.save([_cookie()])
+    assert persistent.is_file()
+    assert persistent.stat().st_mode & 0o777 == 0o600
+    assert store.status()["locally_usable"]
+    assert store.status()["valid"] is None
+    assert not (tmp_path / "release" / "data").exists()
+
+
+async def test_http_confirmation_requires_remote_proof_and_preserves_old_cookie(
+    tmp_path: Path,
+) -> None:
+    store = WeiboCredentialStore(tmp_path / "config")
+    store.save([_cookie(value="old-session")])
+    previous = store.path.read_bytes()
+    fake = FakeBrowser()
+    fake.rows = [_cookie(value="unverified-new-session")]
+    login = WeiboQrLogin(store, transport_factory=lambda: fake)
+    await login.generate()
+    assert login._watcher is not None
+    await asyncio.wait_for(login._watcher, timeout=1)
+    assert await login.poll() == "error"
+    assert not login.verified
+    assert store.path.read_bytes() == previous
+    await login.aclose()
+
+
+async def test_verified_http_confirmation_caches_only_current_file_proof(tmp_path: Path) -> None:
+    class VerifiedHttp(FakeBrowser):
+        verified = True
+        state = "confirmed"
+
+    store = WeiboCredentialStore(tmp_path / "config")
+    fake = VerifiedHttp()
+    fake.rows = [_cookie()]
+    login = WeiboQrLogin(store, transport_factory=lambda: fake)
+    await login.generate()
+    assert login._watcher is not None
+    await asyncio.wait_for(login._watcher, timeout=1)
+    assert await login.poll() == "confirmed"
+    assert login.verified and store.status()["valid"] is True
+    assert WeiboCredentialStore(tmp_path / "config").status()["valid"] is None
+    store._verified_at -= 301
+    assert store.status()["valid"] is None
+    store.save([_cookie()], verified=True)
+    payload = json.loads(store.path.read_text())
+    payload["cookies"][0]["value"] += "-externally-updated"
+    store.path.write_text(json.dumps(payload))
+    assert store.status()["valid"] is None
+    await login.aclose()
+
+
+def test_verified_cookie_clear_resets_the_proof(tmp_path: Path) -> None:
+    store = WeiboCredentialStore(tmp_path / "config")
+    store.save([_cookie()], verified=True)
+    assert store.status()["valid"] is True
+    store.clear()
+    assert store.status()["valid"] is None
+    assert not store.status()["configured"]
+
+
+async def test_http_terminal_poll_and_cancel_do_not_interrupt_transport_cleanup(
+    tmp_path: Path,
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class SlowClose(FakeBrowser):
+        verified = True
+
+        async def aclose(self) -> None:
+            entered.set()
+            await release.wait()
+            self.closed = True
+
+    fake = SlowClose()
+    fake.rows = [_cookie()]
+    login = WeiboQrLogin(WeiboCredentialStore(tmp_path / "config"), transport_factory=lambda: fake)
+    await login.generate()
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert await asyncio.wait_for(login.poll(), timeout=0.1) == "confirmed"
+    assert not fake.closed
+    closing = asyncio.create_task(login.aclose())
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait_for(closing, timeout=1)
+    assert fake.closed and login._browser is None and login._close_task is None
+    assert login._watcher is None
+
+
+async def test_http_long_poll_does_not_block_status_or_cancellation(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+
+    class LongPoll(FakeBrowser):
+        async def cookies(self) -> list[dict[str, Any]]:
+            entered.set()
+            await asyncio.Event().wait()
+            return []
+
+    fake = LongPoll()
+    login = WeiboQrLogin(WeiboCredentialStore(tmp_path / "config"), transport_factory=lambda: fake)
+    await login.generate()
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert await asyncio.wait_for(login.poll(), timeout=0.1) == "waiting"
+    await asyncio.wait_for(login.aclose(), timeout=0.1)
+    assert login.state == "cancelled" and fake.closed
+    assert not login.store.status()["configured"]

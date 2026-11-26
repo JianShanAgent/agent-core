@@ -39,6 +39,8 @@ import type {
   TraceDetail,
   TraceRow,
   UpdateInfo,
+  WeiboLoginPoll,
+  WeiboSessionStatus,
   WikiInfo,
   WikiKbState,
   WikisInfo,
@@ -282,26 +284,22 @@ export const api = {
 
   // ---- 微博平台共享采集会话（多个微博来源共用，不等于帖子作者） ----
   weiboSessionStatus: () =>
-    get<{
-      configured: boolean;
-      locally_usable: boolean;
-      /** null = 尚未验证 */
-      valid: null | boolean;
-      updated_at: number | null;
-      available: boolean;
-      message: string;
-      login: string;
-      error?: string;
-    }>("/api/sources/platforms/weibo/session"),
+    get<WeiboSessionStatus>("/api/sources/platforms/weibo/session"),
   weiboSessionQr: () =>
-    post<{ image: string; state: string; available: boolean }>(
-      "/api/sources/platforms/weibo/qr",
-    ),
-  /** 轮询 — GET，无需 CSRF header，由 request() 自动跳过 */
-  weiboSessionPoll: () =>
-    get<{ state: string; error: string }>("/api/sources/platforms/weibo/poll"),
-  weiboSessionCancel: () =>
-    post<{ state: "cancelled" }>("/api/sources/platforms/weibo/cancel"),
+    post<{
+      image: string;
+      state: string;
+      available: boolean;
+      login_id: string;
+      method: WeiboSessionStatus["method"];
+    }>("/api/sources/platforms/weibo/qr"),
+  /** 只轮询自己生成的二维码，不能操作后来创建的会话。 */
+  weiboSessionPoll: (loginId: string) =>
+    get<WeiboLoginPoll>("/api/sources/platforms/weibo/poll", { login_id: loginId }),
+  weiboSessionCancel: (loginId: string) =>
+    post<{ state: "cancelled"; login_id: string }>("/api/sources/platforms/weibo/cancel", {
+      login_id: loginId,
+    }),
   weiboSessionClear: () =>
     request<{ configured: boolean }>("DELETE", "/api/sources/platforms/weibo/session"),
 };

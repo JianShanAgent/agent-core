@@ -10,12 +10,14 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from jianshanagent import weibo_auth
 from jianshanagent.admin import routes_data, routes_sources, routes_sources_session, routes_wikis
 from jianshanagent.admin.auth import COOKIE, Auth
 from jianshanagent.admin.core import Admin, AdminSettings, guard
@@ -538,6 +540,7 @@ class FakeLogin:
 
     def __init__(self, store: FakeSessionStore):
         self.store, self.state, self.error, self.available = store, "new", "", True
+        self.login_id, self.method, self.verified = uuid4().hex, "http_wechat", False
         self.closed = False
         self.instances.append(self)
 
@@ -563,8 +566,8 @@ def fake_login(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(routes_sources_session, "WeiboQrLogin", FakeLogin)
     monkeypatch.setattr(
         routes_sources_session,
-        "weibo_browser_status",
-        lambda: {"available": True, "message": "测试浏览器"},
+        "weibo_login_status",
+        lambda: {"available": True, "method": "http_wechat", "message": "测试 HTTP 组件"},
     )
 
 
@@ -584,7 +587,9 @@ async def test_shared_weibo_session_login_clear_and_privacy(
     qr = await local.send("POST", prefix + "/qr", {})
     assert qr["image"].startswith("data:image/png;")
     await local.send("POST", prefix + "/qr", {}, 409)
-    assert (await local.send("GET", prefix + "/poll"))["state"] == "confirmed"
+    assert (await local.send("GET", prefix + "/poll?login_id=" + qr["login_id"]))[
+        "state"
+    ] == "confirmed"
     status = await local.send("GET", prefix + "/session")
     assert status["configured"] is True and status["valid"] is None
     assert "never-expose" not in json.dumps(status)
@@ -593,12 +598,14 @@ async def test_shared_weibo_session_login_clear_and_privacy(
     assert all(source["role"] == "unknown" for source in sources)
     assert (await local.send("DELETE", prefix + "/session", {}))["configured"] is False
     assert FakeLogin.instances[0].closed
-    await local.send("POST", prefix + "/qr", {})
-    assert (await local.send("POST", prefix + "/cancel", {}))["state"] == "cancelled"
+    qr = await local.send("POST", prefix + "/qr", {})
+    assert (await local.send("POST", prefix + "/cancel", {"login_id": qr["login_id"]}))[
+        "state"
+    ] == "cancelled"
     assert FakeLogin.instances[-1].closed
 
 
-async def test_weibo_session_unavailable_and_cleanup(
+async def test_weibo_session_without_browser_and_cleanup(
     local: LocalEnv,
     fake_login: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -606,19 +613,14 @@ async def test_weibo_session_unavailable_and_cleanup(
     await local.create()
     prefix = "/api/sources/platforms/weibo"
     monkeypatch.setattr(
-        routes_sources_session,
+        weibo_auth,
         "weibo_browser_status",
         lambda: {"available": False, "message": "未发现本机浏览器"},
     )
-    assert (await local.send("GET", prefix + "/session"))["available"] is False
-    await local.send("POST", prefix + "/qr", {}, 409)
-    assert FakeLogin.instances == []
-    monkeypatch.setattr(
-        routes_sources_session,
-        "weibo_browser_status",
-        lambda: {"available": True, "message": "测试"},
-    )
-    await local.send("POST", prefix + "/qr", {})
+    assert (await local.send("GET", prefix + "/session"))["available"] is True
+    qr = await local.send("POST", prefix + "/qr", {})
+    assert qr["method"] == "http_wechat"
+    assert len(FakeLogin.instances) == 1
     await local.client.close()
     assert FakeLogin.instances[-1].closed
 

@@ -15,6 +15,7 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, TypeGuard
@@ -88,6 +89,15 @@ class WeiboCredentialStore:
         self.path = (
             Path(configured) if configured else config_root.parent / "data/weibo/credential.json"
         )
+        self._verified_at = 0.0
+        self._verified_signature: tuple[int, int, int] | None = None
+
+    def _signature(self) -> tuple[int, int, int] | None:
+        try:
+            result = self.path.stat()
+            return result.st_ino, result.st_mtime_ns, result.st_size
+        except OSError:
+            return None
 
     def _read(self) -> dict[str, Any] | None:
         try:
@@ -106,14 +116,22 @@ class WeiboCredentialStore:
         data = self._read()
         cookies = _filtered_cookies(data.get("cookies")) if data else []
         updated_at = data.get("updated_at") if data else None
+        locally_usable = _has_sub(cookies)
+        verified = (
+            locally_usable
+            and self._verified_at > 0
+            and time.monotonic() - self._verified_at <= 300
+            and self._verified_signature is not None
+            and self._verified_signature == self._signature()
+        )
         return {
             "configured": self.path.is_file(),
-            "locally_usable": _has_sub(cookies),
-            "valid": None,
+            "locally_usable": locally_usable,
+            "valid": True if verified else None,
             "updated_at": updated_at if isinstance(updated_at, int) else None,
         }
 
-    def save(self, cookies: list[dict[str, Any]]) -> None:
+    def save(self, cookies: list[dict[str, Any]], *, verified: bool = False) -> None:
         filtered = _filtered_cookies(cookies)
         if not _has_sub(filtered):
             raise ValueError("未收到可用的微博 SUB 会话，未保存登录")
@@ -134,12 +152,17 @@ class WeiboCredentialStore:
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
+        # 只缓存本次可信传输的远端检查结果；不把有效性写入 Cookie 文件或跨重启沿用。
+        self._verified_at = time.monotonic() if verified else 0.0
+        self._verified_signature = self._signature() if verified else None
 
     def clear(self) -> None:
         """只移除本机会话；调用方先关闭活动的扫码组件，不撤销远程账号授权。"""
         if self.path.parent.is_symlink():
             raise ValueError("微博会话存储位置不安全")
         self.path.unlink(missing_ok=True)
+        self._verified_at = 0.0
+        self._verified_signature = None
 
 
 class BrowserSession(Protocol):
@@ -163,51 +186,83 @@ def weibo_browser_status() -> dict[str, Any]:
     }
 
 
+def weibo_login_status() -> dict[str, Any]:
+    """HTTP 组件不依赖本机浏览器；实际官方服务错误由取码请求明确报告。"""
+    return {
+        "available": True,
+        "method": "http_wechat",
+        "requires_browser": False,
+        "message": "通过官方 HTTP 接口获取微信二维码，无需服务器浏览器；本人扫码后再确认微博会话。",
+    }
+
+
 class WeiboQrLogin:
     def __init__(
         self,
         store: WeiboCredentialStore,
         browser_factory: Callable[[], BrowserSession] | None = None,
         *,
+        transport_factory: Callable[[], BrowserSession] | None = None,
         timeout: float = 180.0,
-        operation_timeout: float = 30.0,
+        operation_timeout: float = 45.0,
         poll_interval: float = 1.0,
     ):
-        from jianshanagent.weibo_browser import ChromiumWeiboBrowser
+        from jianshanagent.weibo_http import WechatHttpSession
 
+        if browser_factory is not None and transport_factory is not None:
+            raise ValueError("只能选择一种扫码传输")
         if not all(
             math.isfinite(value) and value > 0
             for value in (timeout, operation_timeout, poll_interval)
         ):
             raise ValueError("扫码超时设置必须为有限正数")
         self.store = store
+        self.login_id = uuid.uuid4().hex
         self.state = "new"
         self.error = ""
-        self.available = browser_factory is not None or weibo_browser_status()["available"]
-        self._factory = browser_factory or ChromiumWeiboBrowser
+        self.verified = False
+        self.method = "browser" if browser_factory is not None else "http_wechat"
+        self.available = True
+        self._factory: Callable[[], BrowserSession] = (
+            transport_factory or browser_factory or (lambda: WechatHttpSession(lifetime=timeout))
+        )
         self._timeout = timeout
         self._operation_timeout = operation_timeout
         self._poll_interval = poll_interval
         self._browser: BrowserSession | None = None
         self._watcher: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._started = 0.0
         self._lock = asyncio.Lock()
         self._closing = False
 
     async def _close_browser(self) -> None:
-        browser, self._browser = self._browser, None
-        if browser is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(browser.aclose(), timeout=self._operation_timeout)
+        browser = self._browser
+        if browser is None:
+            return
+        if self._close_task is None:
+
+            async def close() -> None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(browser.aclose(), timeout=self._operation_timeout)
+
+            self._close_task = asyncio.create_task(close())
+        closing = self._close_task
+        try:
+            # 取消 watcher 不取消传输清理；aclose 会继续等待同一个有界任务。
+            await asyncio.shield(closing)
+        finally:
+            if closing.done():
+                self._browser = None
+                self._close_task = None
 
     async def generate(self) -> str:
+        from jianshanagent.weibo_http import WechatHttpError
+
         async with self._lock:
             if self.state != "new":
                 raise ValueError("本次扫码已经开始或结束，请新建扫码任务")
-            if not self.available:
-                self.state = "error"
-                self.error = "缺少本机 Chromium/Chrome/Edge，无法生成微博登录二维码"
-                raise ValueError(self.error)
+            self.state = "generating"
             try:
                 self._browser = self._factory()
                 qr = await asyncio.wait_for(
@@ -229,42 +284,73 @@ class WeiboQrLogin:
                 self.state = "cancelled"
                 await self._close_browser()
                 raise
-            except Exception:
-                # 浏览器异常可能包含页面地址、调试地址、凭据；不向 API 或日志透传。
+            except Exception as exc:
                 self.state = "error"
-                self.error = "微博官方扫码页未就绪，请检查本机浏览器依赖或稍后重试"
+                self.error = (
+                    exc.public_message
+                    if isinstance(exc, WechatHttpError)
+                    else "微博官方微信扫码页未就绪，请稍后重试"
+                )
                 await self._close_browser()
                 raise ValueError(self.error) from None
 
     async def _check(self) -> str:
+        from jianshanagent.weibo_http import WechatHttpError, WechatHttpSession
+
         async with self._lock:
-            if self.state in _TERMINAL or self.state == "new":
+            if self.state in _TERMINAL or self.state in {"new", "generating"}:
                 return self.state
             if time.monotonic() - self._started >= self._timeout:
                 self.state = "expired"
                 await self._close_browser()
                 return self.state
             try:
-                if self._browser is None:
-                    raise ValueError("扫码浏览器已关闭")
+                transport = self._browser
+                if transport is None:
+                    raise ValueError("扫码会话已关闭")
                 rows = await asyncio.wait_for(
-                    self._browser.cookies(),
+                    transport.cookies(),
                     timeout=min(
                         self._operation_timeout, self._timeout - (time.monotonic() - self._started)
                     ),
                 )
+                if self._closing:
+                    raise asyncio.CancelledError
                 filtered = _filtered_cookies(rows)
                 if _has_sub(filtered):
-                    self.store.save(filtered)
-                    # 仅确认本地会话已保存；不宣称服务端有效，也不推测 scanned 状态。
+                    verified = getattr(transport, "verified", False) is True
+                    if self.method == "http_wechat" and not verified:
+                        raise ValueError("微博身份尚未确认，不保存临时会话")
+                    if verified:
+                        self.store.save(filtered, verified=True)
+                    else:
+                        # 仅显式注入的旧浏览器传输保留“本地保存但未核验”的兼容语义。
+                        self.store.save(filtered)
+                    self.verified = verified
                     self.state = "confirmed"
                     await self._close_browser()
+                else:
+                    state = getattr(transport, "state", "waiting")
+                    if state in {"waiting", "scanned", "expired", "error", "cancelled"}:
+                        self.state = state
+                    if self.state == "error":
+                        self.error = (
+                            transport.error
+                            if isinstance(transport, WechatHttpSession)
+                            else "微博微信授权或会话确认未完成，请重试"
+                        )
+                    if self.state in _TERMINAL:
+                        await self._close_browser()
             except TimeoutError:
                 self.state = "expired"
                 await self._close_browser()
-            except Exception:
+            except Exception as exc:
                 self.state = "error"
-                self.error = "微博扫码会话读取或保存失败，请重新扫码"
+                self.error = (
+                    exc.public_message
+                    if isinstance(exc, WechatHttpError)
+                    else "微博扫码会话确认或保存失败，请重新扫码"
+                )
                 await self._close_browser()
             return self.state
 
@@ -279,6 +365,9 @@ class WeiboQrLogin:
             return
 
     async def poll(self) -> str:
+        # 微信是长轮询；仅 watcher 推进网络，管理 API 始终读快照，不打断终态清理。
+        if self.method == "http_wechat":
+            return self.state
         state = await self._check()
         if state in _TERMINAL:
             await self._stop_watcher()

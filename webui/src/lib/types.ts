@@ -894,6 +894,33 @@ export interface ImportStatus {
   finished_at?: string | null;
 }
 
+/** 微博网页登录身份；不代表资料采集权限或来源作者身份。 */
+export interface WeiboSessionStatus {
+  configured: boolean;
+  locally_usable: boolean;
+  /** true 仅表示近期服务端身份检查成功；null 为未验证。 */
+  valid: true | null;
+  updated_at: number | null;
+  available: boolean;
+  message: string;
+  method: "http_wechat" | "browser";
+  requires_browser: boolean;
+  login: string;
+  /** 本地随机关联 ID，不是上游授权 state。 */
+  login_id: string | null;
+  verified: boolean;
+  error?: string;
+}
+
+export interface WeiboLoginPoll {
+  state: string;
+  login_id: string;
+  method: WeiboSessionStatus["method"];
+  verified: boolean;
+  valid: true | null;
+  error: string;
+}
+
 /** 一个来源实例 */
 export interface SourceInfo {
   id: string;
