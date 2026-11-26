@@ -17,15 +17,24 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlencode
 
+from jianshanagent.core.logging import get_logger
 from jianshanagent.plugins.knowledge.changes import Change, ChangeContext, Plan
 from jianshanagent.plugins.knowledge.fetcher import FetchError, WikiFetcher
 from jianshanagent.plugins.knowledge.settings import WikiSettings
 from jianshanagent.plugins.knowledge.site import Classifier, SitePlugin, SiteSetup, Verdict
-from jianshanagent.plugins.knowledge.sources import PageRef, Stale, WikiSource
+from jianshanagent.plugins.knowledge.sources import Fetched, PageRef, Stale, WikiSource
+
+logger = get_logger(__name__)
+
+#: 每批最多查 50 份，串行发出；所有请求仍走 fetcher 的限速和预算
+_DATA_BATCH_CAP = 50
+#: 中文路径经过百分号编码会膨胀，给常见的 8KB 请求行限制留余量
+_DATA_URL_BYTES_CAP = 6000
 
 #: Data 文档在缓存里、请求计数里算哪一类
 DATA_KIND = "data"
@@ -62,7 +71,114 @@ class HuijiKnowledge(SitePlugin):
             self.data_url(fetcher.wiki),
             {"filter": json.dumps(filter_, ensure_ascii=False), **params},
         )
-        return list(data.get("_embedded") or [])
+        if not isinstance(data, dict):
+            raise FetchError("Data 接口返回的不是对象")
+        docs = data.get("_embedded")
+        if docs is None:
+            return []
+        if not isinstance(docs, list):
+            raise FetchError("Data 接口的 _embedded 不是列表")
+        return docs
+
+    async def data_many(
+        self,
+        source: WikiSource,
+        refs: Sequence[PageRef],
+        *,
+        label: str = "Data",
+        batch_size: int = 50,
+    ) -> list[Fetched]:
+        """按输入顺序返回 Data 文档，只把当前修订未缓存的部分分批串行查询。
+
+        按完整 ``_id`` 对齐，不能按返回次序或文件名认文档。失败、缺项或重复 ID
+        都只回退旧缓存，不逐条补请求，也不把缺项当删除。离线只重放当前修订。
+        """
+        batch_size = max(1, min(batch_size, _DATA_BATCH_CAP))
+        results: list[Fetched] = []
+        missing: dict[str, list[int]] = {}
+        done = 0
+
+        def completed() -> None:
+            nonlocal done
+            done += 1
+            if done % 100 == 0 or done == len(refs):
+                logger.info("kb_fetch_progress", what=label, done=done, total=len(refs))
+
+        for ref in refs:
+            cached = source.cached(DATA_KIND, ref)
+            results.append(Fetched(ref, value=dict(cached) if cached is not None else None))
+            if cached is None:
+                missing.setdefault(ref.data_id, []).append(len(results) - 1)
+            else:
+                completed()
+
+        def url_size(data_ids: list[str]) -> int:
+            params = {
+                "filter": json.dumps({"_id": {"$in": data_ids}}, ensure_ascii=False),
+                "limit": str(batch_size),
+            }
+            return len(f"{self.data_url(source.settings.wiki)}?{urlencode(params)}".encode())
+
+        def batches() -> Iterator[list[str]]:
+            batch: list[str] = []
+            for data_id in missing:
+                candidate = [*batch, data_id]
+                if batch and (
+                    len(candidate) > batch_size or url_size(candidate) > _DATA_URL_BYTES_CAP
+                ):
+                    yield batch
+                    batch = []
+                batch.append(data_id)
+            if batch:
+                yield batch
+
+        for batch_ids in batches():
+            by_id: dict[str, dict[str, Any]] = {}
+            duplicate_ids: set[str] = set()
+            batch_error = ""
+            try:
+                if url_size(batch_ids) > _DATA_URL_BYTES_CAP:
+                    raise FetchError(f"Data 查询地址过长: {batch_ids[0]}")
+                docs = await self.data_find(
+                    source.need_fetcher(), {"_id": {"$in": batch_ids}}, limit=str(batch_size)
+                )
+                for doc in docs:
+                    if not isinstance(doc, dict):
+                        continue
+                    data_id = doc.get("_id")
+                    if not isinstance(data_id, str) or data_id not in missing:
+                        continue
+                    # 别的批次意外返回的文档也不能写入这一批的缓存。
+                    if data_id not in batch_ids:
+                        continue
+                    if data_id in by_id:
+                        duplicate_ids.add(data_id)
+                    by_id[data_id] = doc
+            except FetchError as exc:
+                batch_error = str(exc)
+
+            for data_id in batch_ids:
+                doc = by_id.get(data_id)
+                error = batch_error
+                if not error and data_id in duplicate_ids:
+                    error = f"Data 接口返回重复 _id: {data_id}"
+                if not error and doc is None:
+                    error = f"Data 接口查不到 {data_id}"
+                for index in missing[data_id]:
+                    result = results[index]
+                    ref = result.ref
+                    if error:
+                        older = source.older(DATA_KIND, ref)
+                        if older is None:
+                            result.error = error
+                        else:
+                            source.stale.append(Stale(ref.title, DATA_KIND, error))
+                            result.value = dict(older)
+                    else:
+                        source.cache.put(DATA_KIND, ref.page_id, ref.rev_id, doc)
+                        result.value = dict(doc) if doc is not None else None
+                    completed()
+        return results
 
     async def data_doc(self, source: WikiSource, ref: PageRef) -> dict[str, Any]:
         """一份 Data 文档。先查缓存；新的一版取不下来、缓存里有旧的就先用旧的（记进 ``stale``）。"""

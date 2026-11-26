@@ -556,6 +556,52 @@ async def test_chunks_of_several_wikis_share_one_table(store: KnowledgeStore) ->
     assert await store.keep_only(["huiji"]) == 0
 
 
+async def test_source_migration_deletes_obsolete_posts_only_in_its_wiki(
+    store: KnowledgeStore,
+) -> None:
+    """源站撤掉的旧公告随完整快照删除，不把卸载 Wiki 的存量一起删掉。"""
+    old_post = row(
+        "old-post", "旧大神公告", "过期大神活动奖励", doc_key="dashen:old", type="announcement"
+    )
+    entry = row("entry", "山风", "灰机角色技能")
+    story = row("story", "主线剧情", "灰机剧情正文", doc_key="story:1:1", type="story")
+    other_wiki = of("bwiki", (old_post, unit(2)))
+    await store.sync(other_wiki, fingerprint=FP, wiki="bwiki")
+    await store.sync(
+        of("huiji", (old_post, unit(1)), (entry, unit(2)), (story, unit(3))),
+        fingerprint=FP,
+        wiki="huiji",
+    )
+    post = row(
+        "new-post",
+        "微博维护公告",
+        "源站当前活动奖励",
+        doc_key="weibo:123",
+        type="announcement",
+        source="微博·扫地工",
+        url="https://weibo.com/123/abc",
+    )
+    current = of("huiji", (entry, unit(2)), (story, unit(3)), (post, unit(1)))
+    changed = await store.sync(current, fingerprint=FP, wiki="huiji")
+    assert (changed.upserted, changed.unchanged, changed.deleted) == (1, 2, 1)
+    assert {wiki: info.chunks for wiki, info in (await store.info()).wikis.items()} == {
+        "huiji": 3,
+        "bwiki": 1,
+    }
+    assert not await store.keyword_search(["过期大神"], wiki="huiji", limit=5, max_df_ratio=1.0)
+    assert (await store.sync(other_wiki, fingerprint=FP, wiki="bwiki")).unchanged == 1
+    again = await store.sync(current, fingerprint=FP, wiki="huiji")
+    assert (again.upserted, again.unchanged, again.deleted) == (0, 3, 0)
+
+    # 新来源的单帖以后被删除，也应消失，而不是从历史缓存复活。
+    removed = await store.sync(current[:2], fingerprint=FP, wiki="huiji")
+    assert (removed.unchanged, removed.deleted) == (2, 1)
+    assert {wiki: info.chunks for wiki, info in (await store.info()).wikis.items()} == {
+        "huiji": 2,
+        "bwiki": 1,
+    }
+
+
 async def test_content_loaded_before_wikis_were_told_apart_goes_to_the_first_wiki(
     store: KnowledgeStore,
 ) -> None:
