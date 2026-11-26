@@ -90,6 +90,27 @@ async def test_status_never_infers_remote_validity(
     assert "private-cookie" not in json.dumps([status, polled])
 
 
+@pytest.mark.parametrize("code", ["callback", "identity", "untrusted"])
+async def test_only_fixed_manual_verification_errors_are_displayed(
+    local: LocalEnv, fake_login: None, code: str
+) -> None:
+    from jianshanagent.weibo_http import WechatHttpError
+
+    await local.create()
+    qr = await local.send("POST", PREFIX + "/qr", {})
+    login = FakeLogin.instances[-1]
+    if code == "untrusted":
+        login.error = "upstream-secret-cookie https://evil.example/?code=private"
+        expected = "登录未完成，请重试"
+    else:
+        expected = login.error = WechatHttpError(code).public_message
+    status = await local.send("GET", PREFIX + "/session")
+    polled = await local.send("GET", PREFIX + "/poll?login_id=" + qr["login_id"])
+    assert status["error"] == polled["error"] == expected
+    assert "upstream-secret-cookie" not in json.dumps([status, polled])
+    assert "evil.example" not in json.dumps([status, polled])
+
+
 async def test_auth_csrf_whitelist_and_limits(local: LocalEnv, fake_login: None) -> None:
     await local.create()
     qr = await local.send("POST", PREFIX + "/qr", {})

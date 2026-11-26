@@ -34,6 +34,18 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         method = getattr(login, "method", "http_wechat")
         return "http_wechat" if method == "http_wechat" else "browser"
 
+    def login_error(login: Any) -> str:
+        if login is None or not login.error:
+            return ""
+        # 只展示本地固定提示，既说明人工验证阶段，也绝不透传上游错误或凭据。
+        from jianshanagent.weibo_http import WechatHttpError
+
+        for code in ("callback", "identity"):
+            message = WechatHttpError(code).public_message
+            if login.error == message:
+                return message
+        return "登录未完成，请重试"
+
     def session() -> dict[str, Any]:
         state = store().status()
         local = weibo_login_status()
@@ -52,7 +64,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             "login_id": login.login_id if login is not None else None,
             "verified": bool(login is not None and getattr(login, "verified", False))
             and state.get("valid") is True,
-            "error": "登录未完成，请重试" if login is not None and login.error else "",
+            "error": login_error(login),
         }
 
     async def empty_body(request: web.Request) -> None:
@@ -125,7 +137,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                     "method": login_method(login),
                     "verified": state["verified"],
                     "valid": state["valid"],
-                    "error": "登录未完成，请重试" if login.error else "",
+                    "error": login_error(login),
                 }
             )
 
