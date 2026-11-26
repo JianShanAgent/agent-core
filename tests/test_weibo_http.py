@@ -215,6 +215,74 @@ async def test_sub_alone_or_ambiguous_identity_is_never_success(identity: Any) -
     await login.aclose()
 
 
+async def test_official_mobile_callback_hop_requires_final_weibo_identity() -> None:
+    fixture = OfficialFixture()
+    fixture.callback = httpx.Response(
+        302, headers={"Location": "https://passport.weibo.cn/signin/login?code=" + _CODE}
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "passport.weibo.cn":
+            fixture.requests.append(request)
+            assert request.url.path == "/signin/login"
+            assert "x-csrf-token" not in request.headers
+            assert "anonymous" not in request.headers.get("cookie", "")
+            return httpx.Response(
+                302,
+                headers={
+                    "Location": "https://passport.weibo.com/wbsso/login?ticket=" + _CODE,
+                },
+            )
+        if request.url.host == "passport.weibo.com" and request.url.path == "/wbsso/login":
+            fixture.requests.append(request)
+            return httpx.Response(
+                302,
+                headers={
+                    "Location": "https://weibo.com/",
+                    "Set-Cookie": "SUB=" + _SUB + "; Domain=.weibo.com; Path=/; Secure; HttpOnly",
+                },
+            )
+        return fixture(request)
+
+    login = WechatHttpSession(httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+    await login.generate_qr()
+    assert (await login.cookies())[0]["name"] == "SUB"
+    assert login.state == "confirmed" and login.verified
+    await login.aclose()
+
+
+async def test_mobile_html_binding_page_is_still_not_login_success() -> None:
+    fixture = OfficialFixture()
+    fixture.callback = httpx.Response(
+        302, headers={"Location": "https://passport.weibo.cn/signin/login"}
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "passport.weibo.cn":
+            return httpx.Response(200, text="<form>手机号 绑定 额外验证</form>")
+        return fixture(request)
+
+    login = WechatHttpSession(httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+    await login.generate_qr()
+    assert await login.cookies() == []
+    assert login.state == "error" and not login.verified
+    assert login.error_code == "callback" and login.callback_route == "weibo_mobile_login"
+    await login.aclose()
+
+
+async def test_default_client_never_uses_environment_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(key, "http://127.0.0.1:9")
+    login = WechatHttpSession()
+    try:
+        assert login._client._trust_env is False
+        assert not login._client._mounts
+    finally:
+        await login.aclose()
+
+
 async def test_rejected_callback_keeps_only_safe_route_and_stage_after_close() -> None:
     fixture = OfficialFixture()
     fixture.callback = httpx.Response(
@@ -268,6 +336,9 @@ async def test_callback_rejects_binding_challenge_unknown_js_or_redirect(
     [
         "http://passport.weibo.com/sso/signin",
         "https://passport.weibo.com.evil/sso/signin",
+        "https://passport.weibo.cn.evil/signin/login",
+        "https://passport.weibo.cn/signin/bind",
+        "http://passport.weibo.cn/signin/login",
         "https://user@passport.weibo.com/sso/signin",
         "https://passport.weibo.com:444/sso/signin",
         "https://passport.weibo.com/sso/signin#fragment",

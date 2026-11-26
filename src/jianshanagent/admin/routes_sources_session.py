@@ -81,6 +81,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
                 "save",
             },
             "callback_route": {
+                "weibo_mobile_login",
                 "weibo_logincallback",
                 "weibo_root",
                 "weibo_wbsso",

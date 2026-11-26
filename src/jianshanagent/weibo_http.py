@@ -110,6 +110,7 @@ def _safe_url(value: str, *, base: str = "") -> str:
             "/othersitebind/auth",
             "/wbsso/login",
         },
+        "passport.weibo.cn": {"/signin/login"},
         "weibo.com": {"/", "/ajax/config/get"},
         "www.weibo.com": {"/"},
         "login.sina.com.cn": {"/sso/login.php", "/sso/crossdomain.php"},
@@ -296,6 +297,7 @@ class WechatHttpSession:
                             target.scheme if target.scheme in {"https", "http"} else "other"
                         )
                         self.callback_route = {
+                            ("passport.weibo.cn", "/signin/login"): "weibo_mobile_login",
                             ("weibo.com", "/sso/logincallback"): "weibo_logincallback",
                             ("weibo.com", "/"): "weibo_root",
                             ("www.weibo.com", "/"): "weibo_root",
@@ -312,6 +314,7 @@ class WechatHttpSession:
                     raise WechatHttpError("unsafe")
                 if phase == "callback" and host not in {
                     "passport.weibo.com",
+                    "passport.weibo.cn",
                     "weibo.com",
                     "www.weibo.com",
                     "login.sina.com.cn",
