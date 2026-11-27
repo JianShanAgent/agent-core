@@ -126,6 +126,18 @@ def _ad_slot_id(post: dict[str, Any]) -> str | None:
     return str(value) if type(value) in (str, int) and _ID.fullmatch(str(value)) else None
 
 
+def _platform_card(post: dict[str, Any], uid: str) -> bool:
+    """Observed follow-recommendation card: a platform-inserted promo row carrying
+    a foreign user plus its own follow button. Only the observed marker pair with
+    a non-target author exempts it; a genuine foreign row without the markers
+    still hard-stops, and a target-authored row is never dropped."""
+    if "followBtnCode" not in post or "buttons" not in post:
+        return False
+    user = post.get("user")
+    author = str(user.get("idstr") or user.get("id") or "") if isinstance(user, dict) else ""
+    return author != uid
+
+
 def _public(post: dict[str, Any]) -> bool:
     if _native_ad(post):
         return False
@@ -404,7 +416,7 @@ async def fetch_weibo(
                     for post in posts:
                         if not isinstance(post, dict):
                             raise WeiboCollectError("schema_changed")
-                        if _native_ad(post):
+                        if _native_ad(post) or _platform_card(post, config["uid"]):
                             ad_id = _ad_slot_id(post)
                             if ad_id is None or ad_id not in done:
                                 skipped += 1

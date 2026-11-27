@@ -23,6 +23,7 @@ from jianshanagent.weibo_collect import (
     _id,
     _identity,
     _native_ad,
+    _platform_card,
     _public,
     _public_url,
     _row,
@@ -243,12 +244,13 @@ async def _posts_page(
     for item in posts:
         if not isinstance(item, dict):
             raise WeiboCollectError("schema_changed")
+        inserted = _native_ad(item) or _platform_card(item, settings["uid"])
         identifier = (
-            _ad_slot_id(item) if _native_ad(item) else _id(item.get("idstr", item.get("id")))
+            _ad_slot_id(item) if inserted else _id(item.get("idstr", item.get("id")))
         )
         if identifier is not None:
             current_ids.add(identifier)
-            if not _native_ad(item):
+            if not inserted:
                 ordinary_ids.add(identifier)
     processed = previous & current_ids
     skipped = 0
@@ -260,7 +262,7 @@ async def _posts_page(
     for post in posts:
         if not isinstance(post, dict):
             raise WeiboCollectError("schema_changed")
-        if _native_ad(post):
+        if _native_ad(post) or _platform_card(post, settings["uid"]):
             ad_id = _ad_slot_id(post)
             if ad_id is None or ad_id not in processed:
                 skipped += 1

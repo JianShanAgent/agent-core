@@ -27,6 +27,22 @@ def advertisement():
     }
 
 
+def platform_card():
+    # Observed recommendation-card shape: foreign user plus its own follow button.
+    return {
+        "id": 888,
+        "idstr": "888",
+        "isAd": False,
+        "followBtnCode": "synthetic",
+        "buttons": [{"type": "synthetic"}],
+        "user": {"id": "12345", "screen_name": "推荐卡片"},
+        "created_at": "Fri Jan 01 00:00:00 +0800 2010",
+        "mblogid": "Card888",
+        "text_raw": "不应持久化",
+        "visible": {"type": 0},
+    }
+
+
 async def test_recent_native_twenty_owned_plus_foreign_ad_continues(fixture, store):
     fixture.pages = {
         1: [advertisement(), *[recent_post(i, isAd=False) for i in range(100, 120)]],
@@ -161,6 +177,47 @@ async def test_history_other_author_without_native_boolean_still_blocks(tmp_path
         await fetch_history_page(q, SETTINGS, Credentials(), client_factory=lambda _: client)
     assert caught.value.code == "author_mismatch"
     assert q.pending() is None and q.job()["cursor"] == ""
+    q.close()
+
+
+async def test_history_follow_card_skips_without_author_mismatch(tmp_path):
+    q = queue(tmp_path)
+    source = {
+        "list": [platform_card(), *[post(str(i)) for i in range(100, 120)]],
+        "since_id": "one",
+    }
+    client = FakeClient(pages=[source])
+    proposed = await fetch_history_page(
+        q, SETTINGS, Credentials(), client_factory=lambda _: client
+    )
+    assert proposed["skipped"] == 1 and len(proposed["post_rows"]) == 20
+    q.acknowledge()
+    assert q.status()["skipped"] == 1 and q.status()["posts_total"] == 20
+    assert not q.db.execute("SELECT 1 FROM posts WHERE id='888'").fetchone()
+    q.close()
+
+
+async def test_recent_follow_card_skips_and_continues(fixture, store):
+    fixture.pages = {
+        1: [platform_card(), *[recent_post(i, isAd=False) for i in range(100, 120)]],
+        2: [recent_post(120, isAd=False)],
+    }
+    batch = await fetch_weibo({"uid": UID}, store)
+    assert batch.complete and batch.skipped == 1
+    assert {row["id"] for row in batch.rows} == {str(i) for i in range(100, 121)}
+
+
+async def test_history_target_row_with_card_markers_is_never_dropped(tmp_path):
+    q = queue(tmp_path)
+    marked = post("100")
+    marked.update({"followBtnCode": "synthetic", "buttons": []})
+    client = FakeClient(pages=[{"list": [marked], "since_id": "one"}])
+    proposed = await fetch_history_page(
+        q, SETTINGS, Credentials(), client_factory=lambda _: client
+    )
+    assert [row["id"] for row in proposed["post_rows"]] == ["100"]
+    q.acknowledge()
+    assert q.status()["posts_total"] == 1
     q.close()
 
 
