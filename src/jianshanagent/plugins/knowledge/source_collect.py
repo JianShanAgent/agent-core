@@ -24,7 +24,32 @@ from jianshanagent.plugins.knowledge.settings import kb_root
 from jianshanagent.plugins.knowledge.source_import import _atomic_json, _read_json
 
 ACTIVE_STATES = frozenset({"queued", "fetching", "importing", "committing", "stopping"})
-STATUS_FIELDS = frozenset(
+HISTORY_STATUS_FIELDS = frozenset(
+    {
+        "history_phase",
+        "history_complete",
+        "history_started_at",
+        "snapshot_at",
+        "posts_total",
+        "comments_total",
+        "replies_total",
+        "pending_posts",
+        "pending_comments",
+        "pending_replies",
+        "index_pending",
+        "inaccessible",
+        "count_mismatches",
+        "oldest_date",
+        "resource_bytes",
+        "vector_bytes",
+        "next_batch_at",
+        "paused",
+        "coverage_message",
+        "measurement",
+        "parent_source_id",
+    }
+)
+STATUS_FIELDS = HISTORY_STATUS_FIELDS | frozenset(
     {
         "state",
         "phase",
@@ -61,6 +86,9 @@ _MESSAGES = {
     "failed": "采集失败，旧资料与断点保持不变。",
     "cancelled": "采集已取消，断点未推进。",
     "ownership_unverified": "已有资料无法确认属于目标账号，拒绝混合历史。",
+    "linked_source": "讨论子来源由主来源统一采集，请操作主来源。",
+    "resource_limit": "组合存储或内存预算不足，历史已安全暂停；请评估容量后手动继续。",
+    "count_mismatch": "评论数量或终点证据尚未核实，历史未完成，已保留断点。",
 }
 
 
@@ -90,8 +118,24 @@ class SourceOperationLease:
         self.close()
 
 
+def source_operation_group(config: AppConfig, source_id: str) -> str:
+    """Single parent namespace is the fixed group-lock order for both data lanes."""
+    source = source_instance(config, source_id)
+    parent = source.raw.get("discussion_of")
+    if parent:
+        if not isinstance(parent, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", parent):
+            raise SourceCollectError("invalid_source", status=400)
+        root = source_instance(config, parent)
+        if root.raw.get("discussion_of") or root.platform.id != "weibo":
+            raise SourceCollectError("invalid_source", status=400)
+        return parent
+    return source_id
+
+
 def _directory(config: AppConfig, source_id: str, *, operation: bool = False) -> Path:
     try:
+        if operation:
+            source_id = source_operation_group(config, source_id)
         source = source_instance(config, source_id)
         if source.driver != "documents" or not re.fullmatch(r"[a-z][a-z0-9_]*", source_id):
             raise ValueError()
@@ -186,6 +230,8 @@ def _settings(config: AppConfig, source_id: str, *, mounted: bool = False) -> di
         source = source_instance(config, source_id)
         if source.platform.id != "weibo" or source.driver != "documents":
             raise ValueError()
+        if source.raw.get("discussion_of"):
+            raise SourceCollectError("linked_source", status=400)
         settings = parse_weibo_collector(source.raw.get("collector"))
         if not isinstance(settings, dict):
             raise ValueError()
@@ -214,7 +260,21 @@ def _config_signature(config: AppConfig, source_id: str) -> str:
         _signature(_settings(config, source_id)),
         str(kb_root(config)),
         embedding.provider().fingerprint if embedding else None,
+        source.raw.get("storage"),
     ]
+    discussion_id = _settings(config, source_id).get("discussion_source_id")
+    if discussion_id:
+        child = source_instance(config, discussion_id)
+        identity.extend(
+            [
+                child.id,
+                child.mounted,
+                child.role,
+                child.platform.id,
+                child.raw.get("discussion_of"),
+                child.raw.get("storage"),
+            ]
+        )
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
@@ -235,6 +295,7 @@ def _public(value: dict[str, Any]) -> dict[str, Any]:
         "interrupted": _MESSAGES["interrupted"],
         "authentication_required": "微博会话已失效，请重新同步登录会话。",
         "recovery_required": "提交恢复未完成，请重试恢复；断点未推进。",
+        "blocked": "历史采集存在未解决阻塞，请核实后手动继续。",
     }
     state = value.get("state")
     state = state if isinstance(state, str) and state in states else "failed"
@@ -303,6 +364,7 @@ def _public(value: dict[str, Any]) -> dict[str, Any]:
             "invalid_settings",
             "detail_unavailable",
             "row_too_large",
+            "inaccessible",
         }
         if code in _MESSAGES:
             result.update(error_code=code, message=_MESSAGES[code])
@@ -316,10 +378,82 @@ def _public(value: dict[str, Any]) -> dict[str, Any]:
             result.update(error_code=code, message=WeiboCollectError(code).public_message)
         else:
             result.update(error_code="failed", message=_MESSAGES["failed"])
+    if any(field in value for field in HISTORY_STATUS_FIELDS):
+        phases = {"posts", "comments", "indexing", "verifying", "incremental", "paused", "blocked"}
+        phase = value.get("history_phase")
+        result["history_phase"] = phase if isinstance(phase, str) and phase in phases else "posts"
+        for field in ("history_complete", "paused"):
+            result[field] = value.get(field) is True
+        for field in (
+            "posts_total",
+            "comments_total",
+            "replies_total",
+            "pending_posts",
+            "pending_comments",
+            "pending_replies",
+            "index_pending",
+            "inaccessible",
+            "count_mismatches",
+            "resource_bytes",
+            "vector_bytes",
+        ):
+            number = value.get(field)
+            result[field] = number if type(number) is int and 0 <= number <= 2**63 - 1 else 0
+        for field in ("history_started_at", "next_batch_at"):
+            number = value.get(field)
+            result[field] = (
+                number
+                if isinstance(number, (int, float))
+                and not isinstance(number, bool)
+                and math.isfinite(number)
+                and 0 <= number <= 253402300799
+                else None
+            )
+        for field in ("snapshot_at", "oldest_date"):
+            text = value.get(field)
+            if isinstance(text, str) and re.fullmatch(r"[0-9T:+.Z -]{10,40}", text):
+                result[field] = text
+        parent = value.get("parent_source_id")
+        if isinstance(parent, str) and re.fullmatch(r"[a-z][a-z0-9_]*", parent):
+            result["parent_source_id"] = parent
+        result["coverage_message"] = (
+            "历史队列已核验，正在增量复查。"
+            if result["history_complete"]
+            else "历史尚未完整核验；批次完成不代表全历史完成。"
+        )
+        measurement = value.get("measurement")
+        result["measurement"] = {}
+        if isinstance(measurement, dict):
+            for field in (
+                "posts",
+                "discussion_nodes",
+                "disk_bytes",
+                "pg_bytes",
+                "free_bytes",
+                "peak_rss_bytes",
+                "rss_growth_bytes",
+                "elapsed_seconds",
+                "sample_disk_bytes",
+                "projected_known_bytes",
+                "batch_seconds",
+            ):
+                number = measurement.get(field)
+                if (
+                    isinstance(number, (int, float))
+                    and not isinstance(number, bool)
+                    and math.isfinite(number)
+                    and 0 <= number <= 2**63 - 1
+                ):
+                    result["measurement"][field] = number
+            result["measurement"]["evaluated"] = measurement.get("evaluated") is True
     return result
 
 
 def collector_overview(config: AppConfig, source_id: str) -> dict[str, Any]:
+    parent_id = source_operation_group(config, source_id)
+    if parent_id != source_id:
+        state = collector_overview(config, parent_id)
+        return _public({**state, "source_id": source_id, "parent_source_id": parent_id})
     directory = _directory(config, source_id)
     state = _read(directory / "status.json")
     request = _read(directory / "request.json")
@@ -352,12 +486,31 @@ def collector_overview(config: AppConfig, source_id: str) -> dict[str, Any]:
         state["next_run_at"] = None
         if state["state"] == "idle":
             state.update(state="not_configured", phase="not_configured")
+    if (
+        _read(directory / "pause.json").get("paused") is True
+        and state.get("state") not in ACTIVE_STATES
+    ):
+        blocked = state.get("history_phase") == "blocked"
+        state.update(
+            state="blocked" if blocked else "paused",
+            phase="blocked" if blocked else "paused",
+            paused=True,
+            history_phase="blocked" if blocked else "paused",
+            next_run_at=None,
+            next_batch_at=None,
+        )
     return _public(state)
 
 
+def source_operation_active(config: AppConfig, source_id: str) -> bool:
+    """Operation occupancy, separate from collector status (e.g. admin reload guard)."""
+    return _held(_directory(config, source_id, operation=True) / "operation.lock")
+
+
 def collector_active(config: AppConfig, source_id: str) -> bool:
-    return collector_overview(config, source_id).get("state") in ACTIVE_STATES or _held(
-        _directory(config, source_id, operation=True) / "operation.lock"
+    parent_id = source_operation_group(config, source_id)
+    return collector_overview(config, parent_id).get("state") in ACTIVE_STATES or _held(
+        _directory(config, parent_id) / "collector.lock"
     )
 
 
@@ -368,6 +521,7 @@ def request_collect(config: AppConfig, source_id: str) -> dict[str, Any]:
             raise SourceCollectError("busy")
         old = _read(directory / "status.json")
         value = {
+            **old,
             "source_id": source_id,
             "job_id": uuid.uuid4().hex,
             "state": "queued",
@@ -391,16 +545,34 @@ def request_collect(config: AppConfig, source_id: str) -> dict[str, Any]:
             "message": "采集请求已排队，等待同步进程。",
             "limited": False,
         }
+        if settings.get("mode") == "full_then_incremental":
+            _atomic_json(directory / "pause.json", {"paused": False})
+            value.update(paused=False, next_batch_at=None)
         _atomic_json(directory / "request.json", value)
         _atomic_json(directory / "status.json", value)
         return _public(value)
 
 
 def cancel_collect(config: AppConfig, source_id: str, job_id: str) -> dict[str, Any]:
+    settings = _settings(config, source_id)
+    full = settings.get("mode") == "full_then_incremental"
     with _control(config, source_id) as directory:
         state = collector_overview(config, source_id)
         if not isinstance(job_id, str) or not job_id or state.get("job_id") != job_id:
             raise SourceCollectError("stale_job")
+        if full:
+            _atomic_json(directory / "pause.json", {"paused": True})
+            if state.get("state") not in ACTIVE_STATES:
+                state.update(
+                    state="paused",
+                    phase="paused",
+                    history_phase="paused",
+                    paused=True,
+                    next_run_at=None,
+                    next_batch_at=None,
+                )
+                _atomic_json(directory / "status.json", state)
+                return _public(state)
         if state.get("state") not in ACTIVE_STATES:
             return state
         _atomic_json(directory / "cancel.json", {"job_id": job_id})
@@ -421,6 +593,15 @@ def cancel_collect(config: AppConfig, source_id: str, job_id: str) -> dict[str, 
                 "error_code": "cancelled",
                 "message": _MESSAGES["cancelled"],
             }
+            if full:
+                state.update(
+                    state="paused",
+                    phase="paused",
+                    history_phase="paused",
+                    paused=True,
+                    next_run_at=None,
+                    next_batch_at=None,
+                )
             _atomic_json(directory / "status.json", state)
             (directory / "request.json").unlink(missing_ok=True)
         else:

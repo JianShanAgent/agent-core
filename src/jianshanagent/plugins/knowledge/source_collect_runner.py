@@ -104,11 +104,34 @@ class SourceCollectorRunner:
                     state = _read(directory / "status.json")
                     request = _read(directory / "request.json")
                     requested = bool(request and request.get("state") == "queued")
+                    full = settings.get("mode") == "full_then_incremental"
+                    if (
+                        full
+                        and not requested
+                        and (
+                            _read(directory / "pause.json").get("paused") is True
+                            or state.get("history_phase") in {"paused", "blocked"}
+                        )
+                    ):
+                        continue
                     schedule_signature = json.dumps(settings, sort_keys=True)
                     schedule_changed = state.get("schedule_signature") != schedule_signature
-                    due = self.clock() >= (state.get("next_run_at") or 0)
+                    continuing_history = (
+                        full
+                        and state.get("history_started_at") is not None
+                        and state.get("history_complete") is not True
+                    )
+                    due = self.clock() >= (
+                        state.get("next_batch_at") or state.get("next_run_at") or 0
+                    )
                     if not requested and not (
-                        source.mounted and settings["enabled"] and (schedule_changed or due)
+                        source.mounted
+                        and (
+                            settings["enabled"]
+                            and (schedule_changed or due)
+                            or continuing_history
+                            and due
+                        )
                     ):
                         continue
                     if not source.mounted:
@@ -122,6 +145,30 @@ class SourceCollectorRunner:
                         continue
                     collector = _acquire(directory / "collector.lock")
                     value = {
+                        **{
+                            key: state[key]
+                            for key in state
+                            if key.startswith("history_")
+                            or key
+                            in {
+                                "snapshot_at",
+                                "posts_total",
+                                "comments_total",
+                                "replies_total",
+                                "pending_posts",
+                                "pending_comments",
+                                "pending_replies",
+                                "index_pending",
+                                "inaccessible",
+                                "count_mismatches",
+                                "oldest_date",
+                                "resource_bytes",
+                                "vector_bytes",
+                                "measurement",
+                                "coverage_message",
+                            }
+                        },
+                        "manual": requested,
                         "source_id": source.id,
                         "job_id": request["job_id"] if requested else uuid.uuid4().hex,
                         "uid": settings["uid"],
@@ -191,6 +238,9 @@ class SourceCollectorRunner:
         lease: SourceOperationLease,
         collector: SourceOperationLease,
     ) -> None:
+        if settings.get("mode") == "full_then_incremental":
+            await self._run_history(config, source_id, settings, state, lease, collector)
+            return
         directory = _directory(config, source_id)
         service: SourceImportService | None = None
         close: Callable[[], Awaitable[None]] | None = None
@@ -414,11 +464,276 @@ class SourceCollectorRunner:
                 collector.close()
                 lease.close()
 
+    async def _run_history(
+        self,
+        config: AppConfig,
+        source_id: str,
+        settings: dict[str, Any],
+        state: dict[str, Any],
+        lease: SourceOperationLease,
+        collector: SourceOperationLease,
+    ) -> None:
+        from jianshanagent.plugins.knowledge.settings import kb_root
+        from jianshanagent.weibo_client import RequestBudgetReached, WeiboCollectError
+        from jianshanagent.weibo_history import (
+            FREE_FLOOR,
+            MAX_BATCH_BYTES,
+            fetch_history_page,
+            measure_resources,
+        )
+        from jianshanagent.weibo_history_queue import HistoryQueue
+
+        directory = _directory(config, source_id)
+        queue: HistoryQueue | None = None
+        service: SourceImportService | None = None
+        close: Callable[[], Awaitable[None]] | None = None
+        work: asyncio.Task[Any] | None = None
+        import_source: str | None = None
+        stop_code: str | None = None
+        identity = _config_signature(config, source_id)
+        batch_started = time.monotonic()
+        resources: dict[str, Any] = {}
+
+        def save(**extra: Any) -> None:
+            if queue is not None:
+                state.update(queue.status())
+            state.update({key: value for key, value in resources.items() if key != "blocked"})
+            state.update(extra)
+            state["heartbeat_at"] = self.clock()
+            _atomic_json(directory / "status.json", state)
+
+        def check() -> str | None:
+            if self._closing or _read(directory / "cancel.json").get("job_id") == state["job_id"]:
+                return "cancelled"
+            if _read(directory / "pause.json").get("paused") is True:
+                return "cancelled"
+            try:
+                if _config_signature(self.config_provider(), source_id) != identity:
+                    return "config_changed"
+            except (ValueError, OSError):
+                return "config_changed"
+            return None
+
+        async def wait_work() -> Any:
+            nonlocal stop_code
+            assert work is not None
+            while not work.done():
+                stop_code = stop_code or check()
+                if stop_code:
+                    save(state="stopping", phase="stopping")
+                    if import_source and service is not None:
+                        service.cancel(import_source)
+                    else:
+                        work.cancel()
+                if import_source and service is not None:
+                    progress = service.status(import_source) or {}
+                    if progress.get("state") == "committing":
+                        save(state="stopping" if stop_code else "committing", phase="committing")
+                await asyncio.wait({work}, timeout=0.25)
+            return await work
+
+        async def measure() -> dict[str, Any]:
+            assert queue is not None and service is not None
+            members = [source_id]
+            if settings.get("discussion_source_id"):
+                members.append(settings["discussion_source_id"])
+            from jianshanagent.plugins.knowledge.source_import_v2 import measure_stream_resources
+
+            # Shared API/CLI/worker ledger also validates the physical-volume proof.
+            usage = await measure_stream_resources(
+                config, service.store, source_id, resource_probe=service.resource_probe
+            )
+            pg_growth = int(usage["pg_growth_bytes"])
+            if int(usage["pg_disk_free_bytes"]) < FREE_FLOOR + 2 * MAX_BATCH_BYTES:
+                raise SourceCollectError("resource_limit")
+            return await _blocking(
+                partial(
+                    measure_resources,
+                    queue,
+                    [kb_root(config) / member for member in members],
+                    pg_bytes=pg_growth,
+                )
+            )
+
+        try:
+            queue = HistoryQueue(
+                directory / "history.sqlite3",
+                settings["uid"],
+                _signature(settings),
+                now=self.clock(),
+            )
+            if state.get("manual"):
+                queue.pause(False)
+            if queue.get("paused"):
+                save(state="paused", phase="paused", next_run_at=None, next_batch_at=None)
+                return
+            service, close = await self.service_factory(config)
+            try:
+                await service.store.info()
+            except Exception:
+                raise SourceCollectError("database_unavailable", status=503) from None
+            if not queue.get("ownership_verified"):
+                await _blocking(self._verify_ownership, service, source_id, settings["uid"])
+                with queue.transaction():
+                    queue.set("ownership_verified", True)
+            if check():
+                raise SourceCollectError(check() or "cancelled")
+            resources = await measure()
+            if resources["blocked"]:
+                raise SourceCollectError("resource_limit")
+            save(state="fetching", phase="fetching")
+            work = asyncio.create_task(
+                fetch_history_page(queue, settings, WeiboCredentialStore(config.root))
+            )
+            pending = await wait_work()
+            if stop_code or check():
+                raise SourceCollectError(stop_code or check() or "cancelled")
+            if pending is not None:
+                published = 0
+                for lane, rows in queue.publications():
+                    if published and (time.monotonic() - batch_started >= 180 or published >= 100):
+                        save(
+                            state="completed",
+                            phase="completed",
+                            limited=True,
+                            finished_at=self.clock(),
+                            error_code=None,
+                        )
+                        return
+                    target = source_id if lane == "posts" else settings.get("discussion_source_id")
+                    if not target:
+                        raise SourceCollectError("invalid_source")
+                    content = b"".join(
+                        (
+                            json.dumps(
+                                row, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+                            )
+                            + "\n"
+                        ).encode("utf-8")
+                        for row in rows
+                    )
+                    save(
+                        state="importing",
+                        phase="importing",
+                        history_phase="indexing",
+                        accepted=len(rows),
+                    )
+                    import_source = target
+                    work = asyncio.create_task(service.import_data(target, content))
+                    result = await wait_work()
+                    if result.get("state") != "completed":
+                        raise SourceCollectError(stop_code or "failed")
+                    state.update(
+                        new=result.get("new", 0),
+                        updated=result.get("updated", 0),
+                        unchanged=result.get("unchanged", 0),
+                    )
+                    import_source = None
+                    if stop_code or check():
+                        raise SourceCollectError(stop_code or check() or "cancelled")
+                    queue.publication_succeeded()
+                    published += 1
+                # Empty terminal pages require no index publication, but their proposed
+                # cursor still receives the same cancellation/config checks above.
+                queue.acknowledge(now=self.clock())
+                save(last_success_at=self.clock())
+            resources = await measure()
+            if resources["blocked"]:
+                raise SourceCollectError("resource_limit")
+            if queue.get("history_phase") == "verifying" and not queue.verify():
+                raise SourceCollectError("count_mismatch")
+            measurement = queue.get("measurement", {})
+            measurement["batch_seconds"] = round(time.monotonic() - batch_started, 3)
+            with queue.transaction():
+                queue.set("measurement", measurement)
+            save(
+                state="completed",
+                phase="completed",
+                error_code=None,
+                finished_at=self.clock(),
+                message="本批资料已成功发布，历史队列按真实水位继续。",
+            )
+        except (RequestBudgetReached, TimeoutError):
+            # A page is retried in its entirety; no cursor or node packet is committed halfway.
+            save(
+                state="completed",
+                phase="completed",
+                limited=True,
+                finished_at=self.clock(),
+                error_code=None,
+            )
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                code, message = stop_code or "cancelled", _MESSAGES[stop_code or "cancelled"]
+            elif isinstance(exc, (SourceCollectError, WeiboCollectError)):
+                code, message = exc.code, exc.public_message
+            elif isinstance(exc, SourceImportCapacityError):
+                code, message = f"capacity_{exc.code}", exc.public_message
+            elif isinstance(exc, Exception):
+                code, message = "failed", _MESSAGES["failed"]
+            else:
+                raise
+            if work is not None and not work.done():
+                if import_source and service is not None:
+                    service.cancel(import_source)
+                else:
+                    work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+            if queue is not None:
+                queue.pause(True, reason=None if code == "cancelled" else code)
+            _atomic_json(directory / "pause.json", {"paused": True})
+            save(
+                state="paused" if code == "cancelled" else "blocked",
+                phase="paused" if code == "cancelled" else "blocked",
+                history_phase="paused" if code == "cancelled" else "blocked",
+                paused=True,
+                error_code=code,
+                message=message,
+                finished_at=self.clock(),
+                next_run_at=None,
+                next_batch_at=None,
+            )
+        finally:
+            try:
+                if service is not None:
+                    await service.aclose()
+                if close is not None:
+                    with contextlib.suppress(Exception):
+                        await close()
+                paused = queue is not None and queue.get("paused")
+                if queue is not None and not paused:
+                    pending = queue.status()
+                    unfinished = any(
+                        pending[key]
+                        for key in (
+                            "pending_posts",
+                            "pending_comments",
+                            "pending_replies",
+                            "index_pending",
+                        )
+                    )
+                    delay = (
+                        2.0
+                        if not queue.get("history_complete") or unfinished
+                        else settings["interval_seconds"]
+                    )
+                    next_at = (
+                        self.clock() + delay
+                        if settings["enabled"] or not queue.get("history_complete")
+                        else None
+                    )
+                    save(next_run_at=next_at, next_batch_at=next_at)
+            finally:
+                if queue is not None:
+                    queue.close()
+                collector.close()
+                lease.close()
+
     @staticmethod
     def _verify_ownership(service: SourceImportService, source_id: str, uid: str) -> None:
-        directory = service._directory(source_id)
-        previous = service._metadata(directory, service._current(directory))
-        for row in (previous or {}).get("rows", []):
+        from jianshanagent.plugins.knowledge.source_import_v2 import iter_source_rows
+
+        for row in iter_source_rows(service.config, source_id):
             if not isinstance(row, dict) or row.get("author_id") != uid:
                 raise SourceCollectError("ownership_unverified")
 

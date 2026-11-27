@@ -21,7 +21,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from jianshanagent.plugins.knowledge.source_import_v2 import StreamImportLimits
 
 from jianshanagent.core.config import AppConfig
 from jianshanagent.core.embedding import EmbeddingProvider, EmbeddingSettings
@@ -70,6 +73,7 @@ CAPACITY_ERROR_CODES = frozenset(
         "snapshot_read_memory",
         "metadata_read_memory",
         "disk_free_bytes",
+        "resource_measurement",
     }
 )
 
@@ -219,7 +223,13 @@ class SourceImportService:
         *,
         limits: ImportLimits | None = None,
         config_provider: Callable[[], AppConfig] | None = None,
+        v2_limits: StreamImportLimits | None = None,
+        resource_probe: Callable[[list[str]], Awaitable[dict[str, Any]]] | None = None,
     ):
+        from jianshanagent.plugins.knowledge.source_import_v2 import StreamImportLimits
+
+        self.v2_limits = v2_limits if v2_limits is not None else StreamImportLimits()
+        self.resource_probe = resource_probe
         self.config = config
         self.store = store
         self.embedder = embedder
@@ -458,6 +468,13 @@ class SourceImportService:
 
     def preview(self, source_id: str, content: str | bytes) -> dict[str, Any]:
         """同步、零写入/零嵌入；后台应使用 asyncio.to_thread 调用。"""
+        from jianshanagent.plugins.knowledge.source_import_v2 import (
+            StreamSourceImporter,
+            uses_stream_v2,
+        )
+
+        if uses_stream_v2(self.config, source_id):
+            return StreamSourceImporter(self).candidate(source_id, content)[0]
         return self._candidate(source_id, content)[0]
 
     @staticmethod
@@ -716,6 +733,13 @@ class SourceImportService:
         self._check_authors(source_id, incoming, documents)
 
     async def import_data(self, source_id: str, content: str | bytes) -> dict[str, Any]:
+        from jianshanagent.plugins.knowledge.source_import_v2 import (
+            StreamSourceImporter,
+            uses_stream_v2,
+        )
+
+        if uses_stream_v2(self.config, source_id):
+            return await StreamSourceImporter(self).import_data(source_id, content)
         if self._closed:
             raise SourceImportError("导入服务已关闭")
         if source_id in self._tasks:

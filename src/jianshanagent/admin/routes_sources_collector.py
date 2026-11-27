@@ -32,6 +32,27 @@ _STATUS_FIELDS = frozenset(
         "limited",
         "heartbeat_at",
         "source_id",
+        "parent_source_id",
+        "history_phase",
+        "history_complete",
+        "history_started_at",
+        "snapshot_at",
+        "posts_total",
+        "comments_total",
+        "replies_total",
+        "pending_posts",
+        "pending_comments",
+        "pending_replies",
+        "index_pending",
+        "inaccessible",
+        "count_mismatches",
+        "oldest_date",
+        "resource_bytes",
+        "vector_bytes",
+        "next_batch_at",
+        "paused",
+        "coverage_message",
+        "measurement",
     }
 )
 
@@ -48,7 +69,7 @@ def collection_status(admin: Admin, source: SourceInstance) -> dict[str, Any] | 
         status = public_collection(
             source_collect.collector_overview(admin.disk_config(), source.id)
         )
-        if "collector" not in source.raw:
+        if "collector" not in source.raw and "discussion_of" not in source.raw:
             status.update(state="not_configured", phase="not_configured")
         return status
     except source_collect.SourceCollectError as exc:
@@ -81,6 +102,8 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         source_id = request.match_info["id"]
         async with admin.source_mutation_lock:
             source = target(source_id)
+            if source.raw.get("discussion_of"):
+                fail(409, "讨论分区由父来源统一采集，请在正文来源继续任务")
             if "collector" not in source.raw:
                 fail(409, "请先保存这个来源的微博目标 UID")
             if not admin.has_database:

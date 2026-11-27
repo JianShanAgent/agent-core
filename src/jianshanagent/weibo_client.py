@@ -27,6 +27,7 @@ _MESSAGES = {
     "invalid_settings": "微博采集配置无效",
     "detail_unavailable": "微博完整正文暂不可用，已保留已有资料",
     "row_too_large": "微博单条完整资料超过导入大小限制，已保留已有资料",
+    "inaccessible": "微博讨论已删除或不可访问，已记录未核实项",
 }
 _MAX_BODY = 2 * 1024 * 1024
 _MAX_REQUESTS = 100
@@ -200,6 +201,7 @@ class WeiboClient:
                 cookie["name"], cookie["value"], domain=cookie["domain"], path=cookie["path"]
             )
         self.requests = 0
+        self._started = time.monotonic()
 
     async def __aenter__(self) -> WeiboClient:
         return self
@@ -209,12 +211,17 @@ class WeiboClient:
 
     async def _read(self, path: str, params: dict[str, str] | None = None) -> bytes:
         global _LAST_REQUEST
-        if path not in {"/", "/ajax/statuses/mymblog", "/ajax/statuses/longtext"}:
+        if path not in {
+            "/",
+            "/ajax/statuses/mymblog",
+            "/ajax/statuses/longtext",
+            "/ajax/statuses/buildComments",
+        }:
             raise WeiboCollectError("schema_changed")
         scope = _LOGIN_LOG_SCOPE.set(True)
         try:
             for attempt in range(_RETRIES + 1):
-                if self.requests >= _MAX_REQUESTS:
+                if self.requests >= _MAX_REQUESTS or time.monotonic() - self._started >= 180:
                     raise RequestBudgetReached
                 retry_code = "network"
                 try:
@@ -228,6 +235,8 @@ class WeiboClient:
                             "GET", "https://weibo.com" + path, params=params
                         ) as response:
                             status = response.status_code
+                            if path == "/ajax/statuses/buildComments" and status in {404, 410}:
+                                raise WeiboCollectError("inaccessible")
                             if status in {301, 302, 303, 307, 308, 401}:
                                 raise WeiboCollectError("authentication_required")
                             if status in {403, 418}:
@@ -264,7 +273,7 @@ class WeiboClient:
         if not viewer_confirmed(await self._read("/")):
             raise WeiboCollectError("authentication_required")
 
-    async def json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
+    async def _envelope(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         body = await self._read(path, params)
         if body.lstrip().startswith(b"<"):
             raise WeiboCollectError("authentication_required")
@@ -279,7 +288,65 @@ class WeiboClient:
             if code in {"100001", "100002", "21301", "21314", "21315", "21327", "21332"}:
                 raise WeiboCollectError("authentication_required")
             raise WeiboCollectError("risk_control")
+        return result
+
+    async def json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
+        result = await self._envelope(path, params)
         data = result.get("data")
         if not isinstance(data, dict):
             raise WeiboCollectError("schema_changed")
         return data
+
+    async def comments(
+        self,
+        post_id: str,
+        uid: str,
+        *,
+        root_id: str | None = None,
+        root_author_id: str | None = None,
+        max_id: str = "0",
+    ) -> dict[str, Any]:
+        """Real buildComments envelope has an array; it is not timeline data-dict."""
+        for value in (post_id, uid, root_id, root_author_id):
+            if value is not None and (
+                not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{0,31}", value)
+            ):
+                raise WeiboCollectError("invalid_settings")
+        if (root_id is None) != (root_author_id is None):
+            raise WeiboCollectError("invalid_settings")
+        if not isinstance(max_id, str) or not re.fullmatch(r"[0-9]{1,32}", max_id):
+            raise WeiboCollectError("invalid_checkpoint")
+        params = {
+            "id": root_id or post_id,
+            "uid": root_author_id or uid,
+            "is_reload": "1",
+            "is_show_bulletin": "2",
+            "is_mix": "1" if root_id else "0",
+            "count": "20",
+            "fetch_level": "1" if root_id else "0",
+            "locale": "zh-CN",
+        }
+        if max_id != "0":
+            params["max_id"] = max_id
+        result = await self._envelope("/ajax/statuses/buildComments", params)
+        data, cursor, total = result.get("data"), result.get("max_id"), result.get("total_number")
+        if (
+            not isinstance(data, list)
+            or len(data) > 200
+            or any(not isinstance(row, dict) for row in data)
+        ):
+            raise WeiboCollectError("schema_changed")
+        if type(cursor) not in (int, str) or not re.fullmatch(r"[0-9]{1,32}", str(cursor)):
+            raise WeiboCollectError("schema_changed")
+        if type(total) is not int or not 0 <= total <= 10**12:
+            raise WeiboCollectError("schema_changed")
+        root_comment = result.get("rootComment") or None
+        if root_comment is not None and not isinstance(root_comment, dict):
+            raise WeiboCollectError("schema_changed")
+        # Do not expose tip_msg/headers/profile responses to queue or status callers.
+        return {
+            "data": data,
+            "max_id": str(cursor),
+            "total_number": total,
+            "rootComment": root_comment,
+        }

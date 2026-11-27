@@ -323,7 +323,9 @@ async def fetch_weibo(
         config = parse_weibo_collector(dict(settings))
     except (ValueError, TypeError):
         raise WeiboCollectError("invalid_settings") from None
-    if config is None:
+    if config is None or config.get("mode") == "full_then_incremental":
+        # Full history requires the durable SQLite coordinator; never silently run
+        # the legacy bounded-date path for a full-history configuration.
         raise WeiboCollectError("invalid_settings")
     target_end = _now()
     proposed = _checkpoint(config, checkpoint)

@@ -164,8 +164,15 @@ const COLLECTOR_NUMBER_FIELDS = [
   { key: "interval_seconds", label: "更新周期（秒）", min: 900, max: 86400 },
 ] as const;
 
-function collectorProblem(config: WeiboCollectorConfig): string {
-  if (!config.uid.trim()) return config.enabled ? "开启定时前请填写目标主页或 UID" : "";
+export function collectorProblem(config: WeiboCollectorConfig, sourceId?: string): string {
+  if (!config.uid.trim()) return config.enabled || config.mode === "full_then_incremental" || config.include_comments || config.include_replies ? "请先填写目标主页或 UID" : "";
+  if (config.include_replies && !config.include_comments) return "采集楼中楼需要同时包含评论";
+  if (config.include_comments) {
+    if (config.mode !== "full_then_incremental") return "采集评论及楼中楼需先选择「全部历史 → 核验后增量」模式";
+    const discussionId = config.discussion_source_id?.trim() ?? "";
+    if (!SOURCE_ID.test(discussionId)) return "请填写有效的社区讨论分区 ID（小写字母开头，最多 32 位）";
+    if (discussionId === sourceId) return "社区讨论分区不能使用主来源 ID";
+  }
   for (const { key, label, min, max } of COLLECTOR_NUMBER_FIELDS) {
     if (!Number.isInteger(config[key]) || config[key] < min || config[key] > max) {
       return `${label}需为 ${min}–${max} 之间的整数`;
@@ -174,13 +181,23 @@ function collectorProblem(config: WeiboCollectorConfig): string {
   return "";
 }
 
-function confirmSchedule(config: WeiboCollectorConfig, previouslyEnabled = false): boolean {
-  return !config.enabled || previouslyEnabled || window.confirm(
-    "开启定时后会自动启动首轮采集，并按更新周期继续运行。确认保存并开启？",
-  );
+export function collectorConfirmation(config: WeiboCollectorConfig, previous?: WeiboCollectorConfig | null): string | null {
+  const full = config.mode === "full_then_incremental";
+  const expanded = (full && previous?.mode !== "full_then_incremental")
+    || (!!config.include_comments && !previous?.include_comments)
+    || (!!config.include_replies && !previous?.include_replies)
+    || (!!config.include_comments && config.discussion_source_id !== previous?.discussion_source_id);
+  if (expanded) return `确认保存采集范围：${full ? "全部可访问历史帖子，不受首次回溯天数限制" : "最近窗口帖子"}${config.include_comments ? "、评论" : "（不含评论）"}${config.include_replies ? "、楼中楼回复" : ""}。${config.include_comments ? `讨论单独保存到社区分区 ${config.discussion_source_id}，不会变成官方发言。` : ""}${full ? "历史队列、索引和核验全部完成后才进入定时增量；资源不足会保留断点并阻塞，不保证固定篇数或完成时间。" : ""}${config.enabled ? "保存后将自动运行。" : "保存后可手动启动。"}后续有界批次自动续采，不逐批确认。`;
+  return config.enabled && !previous?.enabled
+    ? "开启定时后会自动启动采集，并按所选模式继续运行。确认保存并开启？" : null;
 }
 
-function CollectorFields({ value, onChange, disabled, uidLocked = false }: {
+function confirmSchedule(config: WeiboCollectorConfig, previous?: WeiboCollectorConfig | null): boolean {
+  const message = collectorConfirmation(config, previous);
+  return !message || window.confirm(message);
+}
+
+export function CollectorFields({ value, onChange, disabled, uidLocked = false }: {
   value: WeiboCollectorConfig;
   onChange: (value: WeiboCollectorConfig) => void;
   disabled: boolean;
@@ -206,10 +223,45 @@ function CollectorFields({ value, onChange, disabled, uidLocked = false }: {
           : "仅接受数字 UID 或微博官方 /u/UID 主页，保存时由服务端规范化；留空可仅用 JSONL 导入。已有资料首次绑定会校验作者归属。"}
         登录会话不是采集目标；来源身份由管理员选择，不按名称或登录身份推断。
       </p>
+      <label className="flex flex-col gap-1.5 text-sm">
+        采集模式
+        <SimpleSelect value={value.mode ?? "legacy"} disabled={disabled}
+          onChange={(mode) => {
+            if (mode === "legacy") { const next = { ...value }; delete next.mode; onChange(next); }
+            else onChange({ ...value, mode: mode as WeiboCollectorConfig["mode"] });
+          }}
+          options={[
+            { value: "legacy", label: "保留旧行为（最近窗口）" },
+            { value: "recent", label: "最近窗口采集" },
+            { value: "full_then_incremental", label: "全部历史 → 核验后增量" },
+          ]} />
+      </label>
+      {value.mode === "full_then_incremental" ? <p className="text-warning text-xs leading-relaxed">
+        遍历全部可访问历史，分批继续，不以首次天数或单批完成作为历史终点。先完成帖子、讨论、索引与完整性核验，再开启定时增量；资源不足会保留进度并阻塞。
+      </p> : null}
+      <label className="flex items-center justify-between gap-3 text-sm">
+        包含公开评论
+        <Switch checked={!!value.include_comments} disabled={disabled} aria-label="包含公开评论"
+          onCheckedChange={(include_comments) => onChange({ ...value, include_comments, ...(include_comments ? {} : { include_replies: false }) })} />
+      </label>
+      <label className="flex items-center justify-between gap-3 text-sm">
+        包含楼中楼回复
+        <Switch checked={!!value.include_replies} disabled={disabled} aria-label="包含楼中楼回复"
+          onCheckedChange={(include_replies) => onChange({ ...value, include_replies, ...(include_replies ? { include_comments: true } : {}) })} />
+      </label>
+      <p className="text-muted-foreground text-xs leading-relaxed">
+        评论及楼中楼仅支持「全部历史 → 核验后增量」模式；最近窗口不支持。请显式选择模式，界面不会自动扩大采集范围。
+      </p>
+      {value.include_comments ? <label className="flex flex-col gap-1.5 text-sm">
+        社区讨论分区 ID
+        <Input value={value.discussion_source_id ?? ""} disabled={disabled} maxLength={32}
+          placeholder="weibo_yys_comments" onChange={(e) => onChange({ ...value, discussion_source_id: e.target.value.trim() })} />
+        <span className="text-muted-foreground text-xs">保存时创建或校验关联社区分区；不会覆盖同名来源。评论按真实作者保存，与官方正文隔离，由主来源统一采集。</span>
+      </label> : null}
       <div className="grid grid-cols-2 gap-3">
-        {COLLECTOR_NUMBER_FIELDS.map(({ key, label, min, max }) => (
+        {COLLECTOR_NUMBER_FIELDS.filter(({ key }) => value.mode !== "full_then_incremental" || key !== "initial_days").map(({ key, label, min, max }) => (
           <label key={key} className="flex flex-col gap-1.5 text-xs">
-            {label}
+            {value.mode === "full_then_incremental" && key === "interval_seconds" ? "历史完成后的增量周期（秒）" : key === "max_posts" ? "每个有界批次最多帖子" : label}
             <Input type="number" min={min} max={max} step={1}
               value={Number.isFinite(value[key]) ? value[key] : ""}
               onChange={(e) => onChange({ ...value, [key]: e.target.value === "" ? NaN : Number(e.target.value) })}
@@ -327,7 +379,7 @@ function CreateSourceDialog({
           <Button variant="outline" disabled={busy} onClick={onClose}>取消</Button>
           <Button
             loading={busy}
-            disabled={!id || !!idProblem || !label.trim() || !!collectorProblem(collector)}
+            disabled={!id || !!idProblem || !label.trim() || !!collectorProblem(collector, id)}
             onClick={() => {
               if (confirmSchedule(collector)) onCreate(id, label.trim(), role, collector.uid.trim() ? { ...collector, uid: collector.uid.trim() } : null);
             }}
@@ -667,6 +719,9 @@ const COLLECTOR_STATES: Record<string, { label: string; tone: "muted" | "info" |
   interrupted: { label: "采集已中断", tone: "warning" },
   needs_login: { label: "需要重新同步登录", tone: "warning" },
   limited: { label: "采集范围受限", tone: "warning" },
+  blocked: { label: "采集受阻", tone: "warning" },
+  indexing: { label: "索引中", tone: "info" },
+  verifying: { label: "核验中", tone: "info" },
 };
 
 const COLLECTION_PHASE_LABELS: Record<string, string> = {
@@ -677,13 +732,67 @@ const COLLECTION_PHASE_LABELS: Record<string, string> = {
 };
 
 function collectionIsActive(state: string): boolean {
-  return ["queued", "fetching", "collecting", "importing", "committing", "stopping"].includes(state);
+  return ["queued", "fetching", "collecting", "importing", "committing", "indexing", "verifying", "stopping"].includes(state);
 }
 
 function collectionTime(value: number | string | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";
   const date = new Date(typeof value === "number" ? value * 1000 : value);
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+const HISTORY_PHASE_LABELS: Record<string, string> = {
+  posts: "历史帖子采集中", comments: "历史评论 / 楼中楼采集中", indexing: "历史资料索引中",
+  verifying: "历史完整性核验中", incremental: "增量采集中", paused: "历史采集已暂停", blocked: "历史采集受阻",
+};
+
+export function historyIsIncremental(status?: CollectorStatus | null): boolean {
+  return status?.history_complete === true && status.history_phase === "incremental";
+}
+
+function measuredCount(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? fmtCount(value) : "—";
+}
+
+function measuredBytes(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "—";
+  return value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(2)} GiB`
+    : value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(2)} MiB` : `${fmtCount(value)} B`;
+}
+
+/** 只使用服务端累计提交/核验结果，不从本批统计或规模估计推导百分比。 */
+export function HistoryProgress({ status, intervalSeconds }: { status?: CollectorStatus | null; intervalSeconds: number }) {
+  const incremental = historyIsIncremental(status);
+  const phase = status?.history_phase;
+  const measurement = Object.entries(status?.measurement ?? {}).filter(([, value]) =>
+    typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)),
+  ).slice(0, 24);
+  return <section aria-label="全历史采集进度" className="flex flex-col gap-2 rounded-lg border p-3">
+    <p className={incremental ? "text-success font-medium" : "text-warning font-medium"}>
+      {incremental ? `全历史已核验完成 · ${intervalSeconds === 1800 ? "每 30 分钟" : `每 ${intervalSeconds} 秒`}增量`
+        : status?.history_complete === true ? "历史已核验 · 当前尚未进入增量" : "历史尚未完成 · 尚未进入增量"}
+    </p>
+    <p>历史阶段：{status?.paused ? "历史采集已暂停" : phase === "incremental" && !incremental ? "状态待核实（尚无历史完成证据）" : phase && Object.hasOwn(HISTORY_PHASE_LABELS, phase) ? HISTORY_PHASE_LABELS[phase] : "等待服务端报告历史阶段"}</p>
+    {!phase ? <p className="text-muted-foreground">尚无新版历史状态；旧窗口或本批完成记录不能作为全历史完成证据。</p> : null}
+    <div className="grid grid-cols-1 gap-1 sm:grid-cols-3">
+      <span>累计提交历史帖子 <strong>{measuredCount(status?.posts_total)}</strong></span>
+      <span>累计提交评论 <strong>{measuredCount(status?.comments_total)}</strong></span>
+      <span>累计提交楼中楼 <strong>{measuredCount(status?.replies_total)}</strong></span>
+    </div>
+    <p className="text-muted-foreground">已保存时间范围：{collectionTime(status?.oldest_date)} → 快照上界 {collectionTime(status?.snapshot_at)}</p>
+    <p className="text-muted-foreground">历史开始：{collectionTime(status?.history_started_at)} · 下批运行：{collectionTime(status?.next_batch_at)}</p>
+    <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1">
+      <span>待处理帖子 {measuredCount(status?.pending_posts)}</span><span>待处理评论 {measuredCount(status?.pending_comments)}</span>
+      <span>待处理楼中楼 {measuredCount(status?.pending_replies)}</span><span>待索引 {measuredCount(status?.index_pending)}</span>
+      <span>无法访问 / 未能访问 {measuredCount(status?.inaccessible)}</span><span>数量差异 {measuredCount(status?.count_mismatches)}</span>
+    </div>
+    <p className="text-muted-foreground">资源占用 {measuredBytes(status?.resource_bytes)} · 向量占用 {measuredBytes(status?.vector_bytes)}（缺失数据以 — 表示）</p>
+    {status?.coverage_message ? <p className={phase === "blocked" ? "text-warning" : ""}>覆盖 / 索引 / 资源说明：{status.coverage_message}</p> : null}
+    {phase === "blocked" ? <p className="text-warning">历史仍未完成，已保留断点；请根据服务端阻塞说明处理，不会提前转增量。{!status?.coverage_message && !status?.message ? "阻塞原因尚未返回，请刷新确认。" : ""}</p> : null}
+    {measurement.length ? <details><summary className="cursor-pointer">服务端有界测量结果</summary>
+      <dl className="mt-1 grid grid-cols-1 gap-1 text-muted-foreground sm:grid-cols-2">{measurement.map(([key, value]) => <div key={key} className="break-words"><dt className="inline">{key.slice(0, 100)}：</dt><dd className="inline">{String(value).slice(0, 500)}</dd></div>)}</dl>
+    </details> : <p className="text-muted-foreground">测量结果尚未返回；不据此估算全量或完成时间。</p>}
+  </section>;
 }
 
 /** 独立轮询当前任务；取消始终绑定点击时的 job_id，不重试取消新任务。 */
@@ -703,8 +812,15 @@ function CollectorLine({ source }: { source: SourceInfo }) {
   });
   const status = query.data ?? source.collection;
   const state = status?.state ?? source.collector_status;
+  const fullMode = source.collector?.mode === "full_then_incremental";
+  const incremental = fullMode && historyIsIncremental(status);
+  const historyPaused = status?.paused === true || status?.history_phase === "paused";
   const knownState = Object.hasOwn(COLLECTOR_STATES, state);
-  const presentation = knownState ? COLLECTOR_STATES[state] : { label: "未知状态，先刷新确认", tone: "warning" as const };
+  const batchPresentation = knownState ? COLLECTOR_STATES[state] : { label: "未知状态，先刷新确认", tone: "warning" as const };
+  const presentation = fullMode && historyPaused ? { label: "历史采集已暂停", tone: "muted" as const }
+    : fullMode && state === "completed" && !incremental
+      ? { label: status?.history_complete ? "本批完成 · 等待增量阶段" : "本批完成 · 历史未完成", tone: "info" as const }
+      : batchPresentation;
   const active = collectionIsActive(state);
   const committing = state === "committing" || status?.phase === "committing";
   const configured = !!source.collector;
@@ -745,7 +861,9 @@ function CollectorLine({ source }: { source: SourceInfo }) {
       }
       saveStatus(value);
       // 接受停止请求不代表已经取消，更不能当作采集成功。
-      toast.message(value.state === "cancelled" ? "本次任务已取消" : "停止请求已提交，请等待任务安全结束");
+      toast.message(fullMode && !incremental
+        ? value.paused || value.history_phase === "paused" ? "历史采集已持久暂停，可继续断点采集" : "历史暂停请求已提交，请等待安全保存断点"
+        : value.state === "cancelled" ? "本次任务已取消" : "停止请求已提交，请等待任务安全结束");
     },
     onError: (error: Error) => {
       toast.error(error instanceof ApiError && error.status === 409
@@ -769,18 +887,21 @@ function CollectorLine({ source }: { source: SourceInfo }) {
           {active ? <Loader2 className="mr-1 size-3 animate-spin" /> : null}{presentation.label}
         </Badge>
         <span className="text-muted-foreground">
-          {configured ? (source.collector?.enabled ? "定时开启" : "定时暂停 · 可手动采集") : "请在采集设置中填写目标；仍可导入 JSONL"}
+          {configured ? fullMode && !incremental ? (historyPaused ? "断点已保留 · 等待继续" : "历史阶段 · 按有界批次续采") : (source.collector?.enabled ? "定时开启" : "定时暂停 · 可手动采集") : "请在采集设置中填写目标；仍可导入 JSONL"}
         </span>
         <div className="ml-auto flex items-center gap-2">
           <Button size="xs" variant="outline" disabled={busy || !canStart} loading={collect.isPending}
-            onClick={() => collect.mutate()}>{retry ? "重试采集" : "立即采集"}</Button>
-          {active ? (
+            onClick={() => collect.mutate()}>{fullMode && !incremental ? "继续采集" : retry ? "重试采集" : "立即采集"}</Button>
+          {active || (fullMode && !incremental && !historyPaused) ? (
             <Button size="xs" variant="outline" loading={cancel.isPending}
-              disabled={busy || committing || state === "stopping" || !status?.job_id}
+              disabled={busy || committing || state === "stopping" || !status?.job_id || query.isError}
               onClick={() => {
                 const jobId = status?.job_id;
-                if (jobId && !committing && window.confirm("停止当前这次采集？未提交内容不会计作成功；定时开关不会改变。")) cancel.mutate(jobId);
-              }}>停止本次</Button>
+                const question = fullMode && !incremental
+                  ? "暂停历史采集？断点会持久保留，后台不会自动续批；点击继续采集后从断点恢复。"
+                  : "停止当前这次采集？未提交内容不会计作成功；定时开关不会改变。";
+                if (jobId && !committing && window.confirm(question)) cancel.mutate(jobId);
+              }}>{fullMode && !incremental ? "暂停历史" : "停止本次"}</Button>
           ) : null}
           <Button size="xs" variant="ghost" disabled={query.isFetching || busy}
             onClick={() => void query.refetch()} aria-label="刷新采集状态"><RefreshCw className="size-3.5" /></Button>
@@ -792,19 +913,21 @@ function CollectorLine({ source }: { source: SourceInfo }) {
         </a>
       ) : null}
       {source.collector ? <p className="text-muted-foreground">
-        首轮 {source.collector.initial_days} 天 · 回扫 {source.collector.overlap_days} 天 · 每轮最多 {source.collector.max_posts} 条 · 周期 {source.collector.interval_seconds} 秒 · {source.collector.include_reposts ? "含公开转发" : "仅原创"}
+        {fullMode ? "全部可访问历史（不按天数截断）" : `首轮 ${source.collector.initial_days} 天 · 回扫 ${source.collector.overlap_days} 天`} · 每批最多 {source.collector.max_posts} 条 · {fullMode ? "完成核验后增量" : `周期 ${source.collector.interval_seconds} 秒`} · {source.collector.include_reposts ? "含公开转发" : "仅原创"}
+        {source.collector.include_comments ? ` · 评论 → 社区分区 ${source.collector.discussion_source_id ?? "未配置"}${source.collector.include_replies ? "（含楼中楼）" : "（不含楼中楼）"}` : " · 不含评论"}
       </p> : null}
+      {fullMode ? <HistoryProgress status={status} intervalSeconds={source.collector?.interval_seconds ?? 1800} /> : null}
       {status ? <>
-        {status.phase ? <p className="text-muted-foreground">阶段：{Object.hasOwn(COLLECTION_PHASE_LABELS, status.phase) ? COLLECTION_PHASE_LABELS[status.phase] : "未知阶段，请以任务状态与说明为准"}</p> : null}
+        {status.phase ? <p className="text-muted-foreground">{fullMode ? "本批阶段" : "阶段"}：{Object.hasOwn(COLLECTION_PHASE_LABELS, status.phase) ? COLLECTION_PHASE_LABELS[status.phase] : "未知阶段，请以任务状态与说明为准"}</p> : null}
         <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1">
-          <span>页数 {status.pages ?? 0}</span><span>获取 {status.fetched ?? 0}</span><span>接纳 {status.accepted ?? 0}</span>
+          {fullMode ? <span>以下仅为本批：</span> : null}<span>页数 {status.pages ?? 0}</span><span>获取 {status.fetched ?? 0}</span><span>接纳 {status.accepted ?? 0}</span>
           <span>新增 {status.new ?? 0}</span><span>更新 {status.updated ?? 0}</span><span>未变 {status.unchanged ?? 0}</span>
         </div>
         <div className="text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
           <span>本次开始 {collectionTime(status.started_at)}</span>
           <span>本次结束 {collectionTime(status.finished_at)}</span>
           <span>最近成功 {collectionTime(status.last_success_at)}</span>
-          <span>下次运行 {collectionTime(status.next_run_at)}</span>
+          {!fullMode || incremental ? <span>下次增量运行 {collectionTime(status.next_run_at)}</span> : null}
         </div>
         {status.message ? <p>{status.message}</p> : null}
         {status.limited || state === "limited" ? <p className="text-warning">本轮范围或容量受限，不代表完整历史；保留断点与已有资料，请检查状态说明及限额后继续。</p> : null}
@@ -889,7 +1012,7 @@ function ImportStatusLine({
 }
 
 /** 微博来源卡片 */
-function WeiboSourceCard({
+export function WeiboSourceCard({
   source,
   locked,
   onToggleMounted,
@@ -916,7 +1039,7 @@ function WeiboSourceCard({
         {!source.mounted ? <Badge tone="warning">已停用</Badge> : null}
         <div className="ml-auto flex items-center gap-2">
           <Button variant="ghost" size="xs" onClick={onEdit} disabled={locked}>
-            {source.platform === "weibo" ? "采集设置" : "编辑"}
+            {source.platform === "weibo" && !source.discussion_of ? "采集设置" : "编辑"}
           </Button>
           <label className="flex items-center gap-1.5">
             <span className="text-muted-foreground text-xs">参与回答</span>
@@ -951,7 +1074,10 @@ function WeiboSourceCard({
       )}
 
       {/* 采集器状态 */}
-      {source.platform === "weibo" ? <CollectorLine source={source} /> : null}
+      {source.platform === "weibo" && !source.discussion_of ? <CollectorLine source={source} /> : null}
+      {source.platform === "weibo" && source.discussion_of ? <p className="text-muted-foreground text-xs">
+        社区讨论分区 · 关联主来源 <code>{source.discussion_of}</code>。评论与楼中楼保留真实作者，不作为官方正文；由主来源统一采集、暂停和继续，不单独启动时间线采集器。
+      </p> : null}
 
       {/* 导入状态 */}
       <ImportStatusLine status={source.import_status} onOpenImport={onOpenImport} onRecover={onRecover} />
@@ -1024,7 +1150,7 @@ function EditSourceDialog({
     <Dialog open={source !== null} onOpenChange={(o) => { if (!o && !busy) onClose(); }}>
       <DialogContent className="max-h-[90dvh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{source?.platform === "weibo" ? "采集设置" : "编辑来源"} · {source?.id}</DialogTitle>
+          <DialogTitle>{source?.platform === "weibo" && !source.discussion_of ? "采集设置" : "编辑来源"} · {source?.id}</DialogTitle>
           <DialogDescription>来源 ID 和平台不能更改；身份由管理员指定，与登录身份无关。运行中修改请先停止本次任务，提交阶段需等待结束。</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
@@ -1043,7 +1169,7 @@ function EditSourceDialog({
             <SimpleSelect
               value={role}
               onChange={(v) => setRole(v as SourceInfo["role"])}
-              disabled={busy}
+              disabled={busy || !!source?.discussion_of}
               className="w-full"
               options={[
                 { value: "unknown", label: "身份未知" },
@@ -1052,19 +1178,19 @@ function EditSourceDialog({
               ]}
             />
           </div>
-          {source?.platform === "weibo" ? (
+          {source?.platform === "weibo" && !source.discussion_of ? (
             <CollectorFields value={collector} onChange={setCollector} disabled={busy} uidLocked={!!source.collector} />
-          ) : null}
+          ) : source?.discussion_of ? <p className="text-muted-foreground text-xs">此社区讨论分区关联 {source.discussion_of}，身份固定为社区；范围与采集控制请在主来源中设置。</p> : null}
         </div>
         <DialogFooter>
           <Button variant="outline" disabled={busy} onClick={onClose}>取消</Button>
           <Button
             loading={busy}
-            disabled={!label.trim() || (source?.platform === "weibo" && !!collectorProblem(collector))}
+            disabled={!label.trim() || (source?.platform === "weibo" && !source.discussion_of && !!collectorProblem(collector, source.id))}
             onClick={() => {
               if (!source) return;
-              if (source.platform !== "weibo") { onSave(source.id, label.trim(), role); return; }
-              if (confirmSchedule(collector, source.collector?.enabled)) {
+              if (source.platform !== "weibo" || source.discussion_of) { onSave(source.id, label.trim(), source.discussion_of ? "community" : role); return; }
+              if (confirmSchedule(collector, source.collector)) {
                 onSave(source.id, label.trim(), role, collector.uid.trim() ? { ...collector, uid: collector.uid.trim() } : null);
               }
             }}
@@ -1333,6 +1459,15 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
   );
 }
 
+export function groupWeiboSources(sources: SourceInfo[]): { source: SourceInfo; discussions: SourceInfo[] }[] {
+  const weibo = sources.filter((source) => source.platform === "weibo");
+  const parents = new Set(weibo.filter((source) => !source.discussion_of).map((source) => source.id));
+  return weibo.filter((source) => !source.discussion_of || !parents.has(source.discussion_of)).map((source) => ({
+    source,
+    discussions: source.discussion_of ? [] : weibo.filter((child) => child.discussion_of === source.id),
+  }));
+}
+
 export default function Sources() {
   const client = useQueryClient();
   const query = useQuery({
@@ -1435,6 +1570,7 @@ export default function Sources() {
   const locked = busy || !data?.writable;
 
   const weiboSources = data?.sources.filter((s) => s.platform === "weibo") ?? [];
+  const weiboGroups = groupWeiboSources(weiboSources);
   const otherDocumentSources = data?.sources.filter((s) => s.driver === "documents" && s.platform !== "weibo") ?? [];
   const wikiSources = data?.sources.filter((s) => s.driver === "mediawiki") ?? [];
   const takenIds = data?.sources.map((s) => s.id) ?? [];
@@ -1481,18 +1617,18 @@ export default function Sources() {
             </Card>
           ) : (
             <div className="flex flex-col gap-2">
-              {weiboSources.map((s) => (
-                <WeiboSourceCard
-                  key={s.id}
-                  source={s}
-                  locked={locked}
-                  onToggleMounted={(mounted) =>
-                    setMounted.mutate({ id: s.id, label: s.label, mounted })
-                  }
-                  onOpenImport={() => setImporting(s)}
-                  onRecover={() => recover.mutate(s.id)}
-                  onEdit={() => setEditing(s)}
-                />
+              {weiboGroups.map(({ source: s, discussions }) => (
+                <section key={s.id} aria-label={`${s.label} 来源组`} className="flex flex-col gap-2">
+                  <WeiboSourceCard source={s} locked={locked}
+                    onToggleMounted={(mounted) => setMounted.mutate({ id: s.id, label: s.label, mounted })}
+                    onOpenImport={() => setImporting(s)} onRecover={() => recover.mutate(s.id)} onEdit={() => setEditing(s)} />
+                  {discussions.length ? <div className="ml-3 flex flex-col gap-2 border-l-2 pl-3">
+                    <p className="text-muted-foreground text-xs">关联社区讨论 · 不是另一个官方账号来源</p>
+                    {discussions.map((child) => <WeiboSourceCard key={child.id} source={child} locked={locked}
+                      onToggleMounted={(mounted) => setMounted.mutate({ id: child.id, label: child.label, mounted })}
+                      onOpenImport={() => setImporting(child)} onRecover={() => recover.mutate(child.id)} onEdit={() => setEditing(child)} />)}
+                  </div> : null}
+                </section>
               ))}
             </div>
           )}

@@ -23,6 +23,7 @@ from jianshanagent.plugins.knowledge.source_collect import (
     acquire_source_operation,
     collector_active,
     collector_overview,
+    source_operation_active,
 )
 from jianshanagent.plugins.knowledge.source_import import (
     CAPACITY_ERROR_CODES,
@@ -55,29 +56,61 @@ _META_FIELDS = {
     "mirror_url",
     "repost_of",
     "canonical_id",
+    "content_type",
+    "discussion_of",
+    "post_url",
+    "post_author_id",
+    "evidence_group",
+    "author_ids",
+    "node_ids",
+    "target_reply_ids",
+    "discussion_nodes",
+    "untrusted_content",
+    "packet_id",
+    "logical_packet_id",
+    "fragment_id",
 }
 
 
 def safe_provenance(meta: Any) -> dict[str, Any]:
-    """Only reference metadata crosses this API boundary, never arbitrary adapter config."""
+    """Only bounded reference metadata crosses the API, never arbitrary config."""
     if not isinstance(meta, dict):
         return {}
+    node_fields = {
+        "id",
+        "root_id",
+        "parent_id",
+        "reply_to_id",
+        "url",
+        "text",
+        "author_id",
+        "author_name",
+        "published_at",
+        "is_target_reply",
+        "text_start",
+        "text_end",
+        "text_length",
+        "body_start",
+        "body_end",
+    }
 
     def clean(value: Any, depth: int = 0) -> Any:
         if isinstance(value, str):
             return value[:4000]
         if value is None or isinstance(value, (bool, int, float)):
             return value
-        if isinstance(value, dict) and depth < 2:
+        if isinstance(value, (list, tuple)) and depth < 3:
+            return [clean(item, depth + 1) for item in value[:64]]
+        if isinstance(value, dict) and depth < 3:
             return {
-                str(key): clean(item, depth + 1)
+                str(key): safe_url(item) if key == "url" else clean(item, depth + 1)
                 for key, item in value.items()
-                if key in {"id", "url", "text", "author_id", "author_name", "published_at"}
+                if key in node_fields
             }
         return None
 
     result = {key: clean(value) for key, value in meta.items() if key in _META_FIELDS}
-    for key in {"origin_url", "mirror_url"} & result.keys():
+    for key in {"origin_url", "mirror_url", "post_url"} & result.keys():
         result[key] = safe_url(result[key])
     if isinstance(result.get("repost"), dict) and "url" in result["repost"]:
         result["repost"]["url"] = safe_url(result["repost"]["url"])
@@ -97,6 +130,45 @@ def safe_url(value: Any) -> str:
     except ValueError:
         return ""
     return value
+
+
+def _with_discussion_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Create a requested community partition atomically with its parent configuration."""
+    result = [dict(item) for item in items]
+    known = {item["id"]: item for item in result}
+    for item in tuple(result):
+        collector = item.get("collector") or {}
+        if collector.get("mode") != "full_then_incremental":
+            continue
+        item["storage"] = "stream_v2"
+        if not collector.get("include_comments"):
+            continue
+        child_id = collector["discussion_source_id"]
+        if child_id == item["id"]:
+            raise ValueError("讨论分区不能与正文来源相同")
+        existing = known.get(child_id)
+        if existing is not None:
+            if (
+                existing.get("discussion_of") != item["id"]
+                or existing.get("platform") != "weibo"
+                or existing.get("role") != "community"
+                or existing.get("storage") != "stream_v2"
+                or "collector" in existing
+            ):
+                raise ValueError("讨论分区 ID 已被其他来源占用，未覆盖现有配置")
+            continue
+        child = {
+            "id": child_id,
+            "label": str(item.get("label") or item["id"])[:35] + "·评论",
+            "platform": "weibo",
+            "mounted": item.get("mounted", True),
+            "role": "community",
+            "discussion_of": item["id"],
+            "storage": "stream_v2",
+        }
+        result.append(child)
+        known[child_id] = child
+    return result
 
 
 class _CurrentConfig:
@@ -125,7 +197,7 @@ class SourceImports:
             return True
         disk = self.admin.disk_config()
         return any(
-            collector_active(disk, source.id)
+            collector_active(disk, source.id) or source_operation_active(disk, source.id)
             for source in source_instances(disk)
             if not source.is_wiki
         )
@@ -331,6 +403,8 @@ async def source_overview(admin: Admin) -> list[dict[str, Any]]:
                 },
                 "import_status": imports(admin).status(source.id) if not source.is_wiki else None,
                 "collector": source.raw.get("collector"),
+                "discussion_of": source.raw.get("discussion_of"),
+                "storage": source.raw.get("storage"),
                 "collection": collection,
                 "collector_status": (
                     collection["state"]
@@ -357,7 +431,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         return source
 
     def editable(body: dict[str, Any], *, creating: bool = False) -> dict[str, Any]:
-        allowed = {"label", "role", "mounted", "collector"} | (
+        allowed = {"label", "role", "mounted", "collector", "storage", "discussion_of"} | (
             {"id", "platform"} if creating else set()
         )
         if body.keys() - allowed:
@@ -372,6 +446,12 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             fail(400, "mounted 应该是 true 或 false")
         if "role" in body and (not isinstance(body["role"], str) or body["role"] not in _ROLES):
             fail(400, "role 只能是 unknown、official 或 community")
+        if "storage" in body and body["storage"] != "stream_v2":
+            fail(400, "storage 仅允许 stream_v2")
+        if "discussion_of" in body and (
+            not isinstance(body["discussion_of"], str) or not _ID.fullmatch(body["discussion_of"])
+        ):
+            fail(400, "discussion_of 必须是合法的父来源 ID")
         normalized = {**body, **({"label": body["label"].strip()} if "label" in body else {})}
         if "collector" in body:
             from jianshanagent.weibo_collector_config import parse_weibo_collector
@@ -392,13 +472,16 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         # with a worker starting in another process; acquiring its exact lease closes that gap.
         with ExitStack() as leases:
             try:
+                held_groups: set[str] = set()
                 for source in source_instances(disk):
-                    if not source.is_wiki:
+                    group = source.raw.get("discussion_of") or source.id
+                    if not source.is_wiki and group not in held_groups:
                         leases.enter_context(acquire_source_operation(disk, source.id))
+                        held_groups.add(group)
             except SourceCollectError as exc:
                 fail(exc.status, exc.public_message)
             try:
-                write_source_instances(disk, items)
+                write_source_instances(disk, _with_discussion_sources(items))
             except ValueError:
                 fail(409, "来源配置无法保存；已绑定 UID 不能更换或移除，历史作者不明请新建来源")
             try:

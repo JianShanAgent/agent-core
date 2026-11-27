@@ -10,10 +10,12 @@ KIND_ENTRY = "entry"
 KIND_ANNOUNCEMENT = "announcement"
 KIND_STORY = "story"
 KIND_POST = "post"
+KIND_DISCUSSION = "discussion"  # 独立社区讨论，永不当作官方原帖或独立官方佐证
 KIND_DATA = "data"  # 由 Data 数据集生成的文档（皮肤、百鬼棋局图鉴、花合战对白、状态说明……）
 KIND_LABELS = {
     KIND_ENTRY: "条目",
     KIND_POST: "帖子",
+    KIND_DISCUSSION: "讨论",
     KIND_ANNOUNCEMENT: "公告",
     KIND_STORY: "剧情",
     KIND_DATA: "数据",

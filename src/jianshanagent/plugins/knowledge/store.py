@@ -46,6 +46,9 @@ Record = tuple["KbChunk", Sequence[float] | None]
 STATS_KEY = "stats"
 SYNC_STATUS_KEY = "sync"
 _UPSERT_BATCH = 100
+# 所有修改 kb_chunks/kb_terms 的路径共用；先取得锁再读取快照，避免 full sync
+# 的全量重算和文档差量互相覆盖（也覆盖 keep_only）。事务结束自动释放。
+_TERMS_WRITE_LOCK = 0x4A53414B425446
 #: 关键词检索粗选多少片来细算
 KEYWORD_POOL = 100
 
@@ -60,6 +63,20 @@ def _check_namespace(chunk: KbChunk, wiki: str) -> None:
         wiki and not all(value.startswith(f"{wiki}:") for value in (chunk.chunk_id, chunk.doc_key))
     ):
         raise ValueError("切片来源及主键前缀必须属于目标来源")
+
+
+def _document_scope(wiki: str, doc_keys: Sequence[str]) -> set[str]:
+    """局部发布必须显式指定非空来源和完整文档主键；空集合表示不发布文档。"""
+    if not isinstance(wiki, str) or not wiki or ":" in wiki or wiki.strip() != wiki:
+        raise ValueError("文档同步必须指定有效的非空来源")
+    if not isinstance(doc_keys, Sequence) or isinstance(doc_keys, (str, bytes)):
+        raise ValueError("doc_keys 必须是完整文档主键的序列")
+    prefix = f"{wiki}:"
+    if any(
+        not isinstance(key, str) or not key.startswith(prefix) or key == prefix for key in doc_keys
+    ):
+        raise ValueError("文档主键必须带目标来源前缀且本地标识非空")
+    return set(doc_keys)
 
 
 def meta_key(kind: str, wiki: str) -> str:
@@ -226,8 +243,30 @@ class KnowledgeStore(Protocol):
         （分 wiki 之前导入的）算它的，一起换掉——导入主 wiki 时用。
         """
 
+    async def sync_documents(
+        self,
+        records: Iterable[Record],
+        *,
+        fingerprint: str,
+        wiki: str,
+        doc_keys: Sequence[str],
+    ) -> SyncReport:
+        """事务替换完整 scoped ``doc_keys`` 内的全部切片，其他文档/来源不动。
+
+        ``records`` 可为空（恢复此前不存在的文档）；越界记录及主键冲突整批失败。
+        返回的 total/with_vectors 仅计本批；info() 仍统计整个来源。
+        """
+
     async def info(self) -> StoreInfo:
         """整库的概况；各个 wiki 的在 ``wikis`` 里。"""
+
+    async def resource_usage(self, source_ids: Collection[str]) -> dict[str, int]:
+        """PG资源快照：database_bytes含全库表/索引/TOAST，wal_position_bytes为LSN字节。
+
+        共享索引、WAL不能精确归属来源，预算用两者前后差量保守计；
+        source_rows_bytes只供诊断，不能代替物理空间。无法测量须抛错。
+        pg_started_at为Unix epoch整数微秒，用于使宿主同盘证明在PG重启后失效。
+        """
 
     async def keep_only(self, wikis: Collection[str]) -> int:
         """删掉不在 ``wikis`` 里的 wiki 的切片（从配置里拿掉了的 wiki）；返回删了几片。
@@ -358,6 +397,83 @@ class MemoryKnowledgeStore:
         )
         report.seconds = time.perf_counter() - started
         return report
+
+    async def sync_documents(
+        self,
+        records: Iterable[Record],
+        *,
+        fingerprint: str,
+        wiki: str,
+        doc_keys: Sequence[str],
+    ) -> SyncReport:
+        started = time.perf_counter()
+        scope = _document_scope(wiki, doc_keys)
+        report = SyncReport()
+        # 先验证全部输入，再修改内存；迭代器中途失败同样不留下半批数据。
+        pending: dict[str, Record] = {}
+        for chunk, vector in records:
+            _check_namespace(chunk, wiki)
+            if chunk.doc_key not in scope or chunk.chunk_id == f"{wiki}:":
+                raise ValueError("切片不属于指定文档作用域")
+            old = self._chunks.get(chunk.chunk_id)
+            if chunk.chunk_id in pending or (
+                old is not None and (old.wiki != wiki or old.doc_key not in scope)
+            ):
+                raise ValueError("切片主键重复或属于作用域外文档")
+            pending[chunk.chunk_id] = chunk, vector
+        hashes = {
+            key: chunk.row_hash(fingerprint if vector is not None else None)
+            for key, (chunk, vector) in pending.items()
+        }
+        terms = {key: extract_terms(chunk.text) for key, (chunk, _) in pending.items()}
+        old_ids = {
+            key
+            for key, chunk in self._chunks.items()
+            if chunk.wiki == wiki and chunk.doc_key in scope
+        }
+        for key in old_ids:
+            for term in self._terms.pop(key):
+                self._df[term] -= 1
+                if self._df[term] == 0:
+                    del self._df[term]
+            if key not in pending:
+                del self._chunks[key], self._hashes[key]
+                self._vectors.pop(key, None)
+                self._fingerprints.pop(key, None)
+                report.deleted += 1
+        for key, (chunk, vector) in pending.items():
+            report.total += 1
+            if self._hashes.get(key) == hashes[key]:
+                report.unchanged += 1
+            else:
+                report.upserted += 1
+            self._chunks[key], self._hashes[key], self._terms[key] = chunk, hashes[key], terms[key]
+            if vector is not None:
+                self._vectors[key], self._fingerprints[key] = vector, fingerprint
+                report.with_vectors += 1
+            else:
+                self._vectors.pop(key, None)
+                self._fingerprints.pop(key, None)
+            for term in terms[key]:
+                self._df[term] = self._df.get(term, 0) + 1
+        if scope:
+            mine = [chunk for chunk in self._chunks.values() if chunk.wiki == wiki]
+            fingerprints = {
+                self._fingerprints[c.chunk_id] for c in mine if c.chunk_id in self._vectors
+            }
+            self._wikis[wiki] = StoreInfo(
+                chunks=len(mine),
+                with_vectors=sum(c.chunk_id in self._vectors for c in mine),
+                fingerprint=next(iter(fingerprints)) if len(fingerprints) == 1 else None,
+                loaded_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                average_chars=sum(len(c.text) for c in mine) / max(len(mine), 1),
+            )
+        report.terms = len(self._df)
+        report.seconds = time.perf_counter() - started
+        return report
+
+    async def resource_usage(self, source_ids: Collection[str]) -> dict[str, int]:
+        raise RuntimeError("内存知识库无法测量 PostgreSQL 物理空间及 WAL，不能报告为零")
 
     async def info(self) -> StoreInfo:
         return combined_info(self._wikis)
@@ -500,6 +616,44 @@ ON CONFLICT (chunk_id) DO UPDATE SET
     terms = EXCLUDED.terms, embedding = EXCLUDED.embedding, fingerprint = EXCLUDED.fingerprint,
     row_hash = EXCLUDED.row_hash, updated_at = now()
 """
+
+# 临时表只存本批文档，向量随有限 batch 流入 PG，不在 Python 汇集全部向量。
+_STAGE_DOCUMENT = _UPSERT.partition("ON CONFLICT")[0].replace(
+    "INSERT INTO kb_chunks", "INSERT INTO kb_sync_documents"
+)
+_PUBLISH_DOCUMENTS = (
+    "INSERT INTO kb_chunks SELECT * FROM kb_sync_documents "
+    "WHERE wiki = $1 AND doc_key = ANY($2::text[]) ON CONFLICT"
+    + _UPSERT.partition("ON CONFLICT")[2]
+    + " WHERE kb_chunks.wiki = $1 AND kb_chunks.doc_key = ANY($2::text[])"
+    " AND kb_chunks.row_hash IS DISTINCT FROM EXCLUDED.row_hash"
+)
+
+
+def _record_values(
+    chunk: KbChunk, vector: Sequence[float] | None, fingerprint: str
+) -> tuple[Any, ...]:
+    return (
+        chunk.chunk_id,
+        chunk.doc_key,
+        chunk.kind,
+        chunk.title,
+        chunk.text,
+        chunk.url,
+        chunk.source,
+        list(chunk.section_path),
+        chunk.seq,
+        chunk.date,
+        chunk.date_inferred,
+        json.dumps(chunk.entities, ensure_ascii=False),
+        json.dumps(chunk.meta, ensure_ascii=False),
+        sorted(extract_terms(chunk.text)),
+        vector_literal(vector) if vector is not None else None,
+        fingerprint if vector is not None else None,
+        chunk.row_hash(fingerprint if vector is not None else None),
+        chunk.wiki,
+    )
+
 
 # 查询向量先在 q 里算好一次：直接把 $1::text::vector 写在 ORDER BY 里，
 # 预备语句换成通用计划后会每一行都重新解析一遍这几万个字符
@@ -694,6 +848,7 @@ class PostgresKnowledgeStore:
         report = SyncReport()
         mine = sorted({wiki, ""} if replace_unlabelled else {wiki})
         async with self._db.pool.acquire() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", _TERMS_WRITE_LOCK)
             rows = await conn.fetch(
                 "SELECT chunk_id, row_hash FROM kb_chunks WHERE wiki = ANY($1::text[])", mine
             )
@@ -769,6 +924,147 @@ class PostgresKnowledgeStore:
         report.seconds = time.perf_counter() - started
         return report
 
+    async def sync_documents(
+        self,
+        records: Iterable[Record],
+        *,
+        fingerprint: str,
+        wiki: str,
+        doc_keys: Sequence[str],
+    ) -> SyncReport:
+        started = time.perf_counter()
+        scope = sorted(_document_scope(wiki, doc_keys))
+        report = SyncReport()
+        async with self._db.pool.acquire() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", _TERMS_WRITE_LOCK)
+            await conn.execute(
+                "CREATE TEMP TABLE kb_sync_documents (LIKE kb_chunks INCLUDING DEFAULTS, "
+                "PRIMARY KEY (chunk_id)) ON COMMIT DROP"
+            )
+            batch: list[tuple[Any, ...]] = []
+            batch_ids: set[str] = set()
+
+            async def flush() -> None:
+                if not batch:
+                    return
+                if await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM kb_sync_documents "
+                    "WHERE chunk_id = ANY($1::text[]))",
+                    list(batch_ids),
+                ):
+                    raise ValueError("同批切片主键重复")
+                await conn.executemany(_STAGE_DOCUMENT, batch)
+                batch.clear()
+                batch_ids.clear()
+
+            scope_set = set(scope)
+            for chunk, vector in records:
+                _check_namespace(chunk, wiki)
+                if chunk.doc_key not in scope_set or chunk.chunk_id == f"{wiki}:":
+                    raise ValueError("切片不属于指定文档作用域")
+                if chunk.chunk_id in batch_ids:
+                    raise ValueError("同批切片主键重复")
+                batch.append(_record_values(chunk, vector, fingerprint))
+                batch_ids.add(chunk.chunk_id)
+                report.total += 1
+                report.with_vectors += vector is not None
+                if len(batch) >= _UPSERT_BATCH:
+                    await flush()
+            await flush()
+            if await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM kb_chunks c JOIN kb_sync_documents s "
+                "USING (chunk_id) WHERE c.wiki <> $1 OR NOT (c.doc_key = ANY($2::text[])))",
+                wiki,
+                scope,
+            ):
+                raise ValueError("切片主键属于作用域外文档或来源")
+            report.unchanged = int(
+                await conn.fetchval(
+                    "SELECT count(*) FROM kb_sync_documents s JOIN kb_chunks c USING (chunk_id) "
+                    "WHERE c.wiki = $1 AND c.doc_key = ANY($2::text[]) AND c.row_hash = s.row_hash",
+                    wiki,
+                    scope,
+                )
+            )
+            report.upserted = report.total - report.unchanged
+            # DF 是每个词所在切片数，不是词出现次数；先聚合本作用域前后差量。
+            # 不读旧向量、不 TRUNCATE 全库；与 full sync/keep_only 共用事务锁。
+            await conn.execute(
+                "CREATE TEMP TABLE kb_sync_term_delta ON COMMIT DROP AS "
+                "SELECT term, sum(delta)::int AS delta FROM ("
+                " SELECT term, -1 AS delta FROM kb_chunks c, unnest(c.terms) AS term"
+                " WHERE c.wiki = $1 AND c.doc_key = ANY($2::text[])"
+                " UNION ALL SELECT term, 1 AS delta FROM kb_sync_documents, unnest(terms) AS term"
+                ") changes GROUP BY term HAVING sum(delta) <> 0",
+                wiki,
+                scope,
+            )
+            deleted = await conn.execute(
+                "DELETE FROM kb_chunks c WHERE c.wiki = $1 AND c.doc_key = ANY($2::text[]) "
+                "AND NOT EXISTS (SELECT 1 FROM kb_sync_documents s WHERE s.chunk_id = c.chunk_id)",
+                wiki,
+                scope,
+            )
+            report.deleted = int(deleted.rpartition(" ")[2])
+            await conn.execute(_PUBLISH_DOCUMENTS, wiki, scope)
+            await conn.execute(
+                "INSERT INTO kb_terms (term, df) SELECT term, delta FROM kb_sync_term_delta "
+                "ON CONFLICT (term) DO UPDATE SET df = kb_terms.df + EXCLUDED.df"
+            )
+            if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM kb_terms WHERE df < 0)"):
+                raise ValueError("关键词词频统计不一致，事务已取消")
+            await conn.execute("DELETE FROM kb_terms WHERE df = 0")
+            report.terms = int(await conn.fetchval("SELECT count(*) FROM kb_terms"))
+            if scope:
+                stats_row = await conn.fetchrow(
+                    "SELECT count(*) AS chunks, count(embedding) AS with_vectors, "
+                    "CASE WHEN count(DISTINCT fingerprint) "
+                    "FILTER (WHERE embedding IS NOT NULL) = 1 "
+                    "THEN min(fingerprint) FILTER (WHERE embedding IS NOT NULL) "
+                    "END AS fingerprint, "
+                    "coalesce(avg(length(text)), 0) AS average_chars "
+                    "FROM kb_chunks WHERE wiki = $1",
+                    wiki,
+                )
+                stats = dict(stats_row)
+                stats["average_chars"] = float(stats["average_chars"])
+                stats["loaded_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                await conn.execute(
+                    "INSERT INTO kb_meta (key, value) VALUES ($1, $2::jsonb) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    meta_key(STATS_KEY, wiki),
+                    json.dumps(stats),
+                )
+        report.seconds = time.perf_counter() - started
+        return report
+
+    async def resource_usage(self, source_ids: Collection[str]) -> dict[str, int]:
+        """只读物理快照；全库和 WAL 的增量包含其他来源，故只可作保守预算。"""
+        if isinstance(source_ids, (str, bytes)):
+            raise ValueError("source_ids 必须是来源集合")
+        sources = sorted(set(source_ids))
+        for source_id in sources:
+            _document_scope(source_id, ())
+        row = await self._db.pool.fetchrow(
+            "SELECT coalesce(sum(pg_column_size(c)), 0)::bigint AS source_rows_bytes, "
+            "pg_database_size(current_database())::bigint AS database_bytes, "
+            "pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0'::pg_lsn)::bigint "
+            "AS wal_position_bytes, "
+            "(extract(epoch from pg_postmaster_start_time()) * 1000000)::bigint AS pg_started_at "
+            "FROM kb_chunks c WHERE c.wiki = ANY($1::text[])",
+            sources,
+        )
+        # 权限/连接/恢复模式等错误由 PG 原样抛出，不能用 0 掩盖测量失败。
+        return {
+            key: int(row[key])
+            for key in (
+                "source_rows_bytes",
+                "database_bytes",
+                "wal_position_bytes",
+                "pg_started_at",
+            )
+        }
+
     async def info(self) -> StoreInfo:
         prefix = meta_key(STATS_KEY, "")
         rows = await self._db.pool.fetch(
@@ -780,6 +1076,7 @@ class PostgresKnowledgeStore:
 
     async def keep_only(self, wikis: Collection[str]) -> int:
         async with self._db.pool.acquire() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", _TERMS_WRITE_LOCK)
             status = await conn.execute(
                 "DELETE FROM kb_chunks WHERE wiki <> '' AND wiki <> ALL($1::text[])", list(wikis)
             )

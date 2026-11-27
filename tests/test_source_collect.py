@@ -137,7 +137,8 @@ def _cancel_from_other_process(config, job_id):
 def test_operation_lease_is_immediate_nonblocking_and_cross_process(tmp_path):
     config = configured(tmp_path)
     held = control.acquire_source_operation(config, "social")
-    assert control.collector_active(config, "social")
+    assert control.source_operation_active(config, "social")
+    assert not control.collector_active(config, "social")  # 操作锁与采集器运行状态独立。
     with pytest.raises(control.SourceCollectError, match="已有"):
         control.acquire_source_operation(config, "social")
     # spawn 不继承父进程持有的 fd；证明真实 flock，而非本进程 task 字典。

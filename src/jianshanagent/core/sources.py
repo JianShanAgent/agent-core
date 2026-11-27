@@ -25,7 +25,9 @@ SOURCE_FILE = "core.sources"
 SOURCE_INSTANCES = "sources"
 EXTENSION_DOCUMENTS = "documents"
 _SOURCE_ID = re.compile(r"[a-z][a-z0-9_]*")
-_SOURCE_KEYS = frozenset({"id", "label", "platform", "mounted", "role", "collector"})
+_SOURCE_KEYS = frozenset(
+    {"id", "label", "platform", "mounted", "role", "collector", "storage", "discussion_of"}
+)
 SOURCE_ROLES = frozenset({"unknown", "official", "community"})
 
 
@@ -100,10 +102,64 @@ def document_source_instances(
             if platform.id != "weibo":
                 raise ValueError("collector 仅支持微博平台")
             raw["collector"] = parse_weibo_collector(item["collector"])
+        if "storage" in item:
+            if platform.id != "weibo" or item["storage"] != "stream_v2":
+                raise ValueError("storage 仅允许微博来源使用 stream_v2")
+        if raw.get("collector", {}).get("mode") == "full_then_incremental":
+            if raw.get("storage") != "stream_v2":
+                raise ValueError("完整历史采集需要 stream_v2 存储")
+        if "discussion_of" in item:
+            parent = item["discussion_of"]
+            if (
+                platform.id != "weibo"
+                or not isinstance(parent, str)
+                or not _SOURCE_ID.fullmatch(parent)
+                or parent == source_id
+                or role != "community"
+                or "collector" in raw
+                or raw.get("storage") != "stream_v2"
+            ):
+                raise ValueError(
+                    "讨论分区必须关联其他微博来源，使用社区角色和 stream_v2，不能单独配置采集器"
+                )
         found.append(
             SourceInstance(source_id, label.strip(), platform, platform.driver, mounted, role, raw)
         )
-    return found
+    by_id = {source.id: source for source in found}
+    associated: dict[str, str] = {}
+    for source in found:
+        parent_id = source.raw.get("discussion_of")
+        if parent_id is None:
+            continue
+        parent_source = by_id.get(parent_id)
+        if (
+            parent_source is None
+            or parent_source.platform.id != "weibo"
+            or parent_source.raw.get("discussion_of") is not None
+            or not parent_source.raw.get("collector")
+            or parent_source.raw.get("storage") != "stream_v2"
+        ):
+            raise ValueError("讨论分区的父来源必须是已绑定目标账号的微博 stream_v2 来源")
+        if parent_id in associated:
+            raise ValueError("一个微博来源只能绑定一个讨论分区")
+        associated[parent_id] = source.id
+        requested = parent_source.raw["collector"].get("discussion_source_id")
+        if requested is not None and requested != source.id:
+            raise ValueError("讨论分区与父来源配置不一致")
+    for source in found:
+        collector = source.raw.get("collector") or {}
+        if collector.get("include_comments") and associated.get(source.id) != collector.get(
+            "discussion_source_id"
+        ):
+            raise ValueError("启用评论采集前必须登记匹配的讨论分区")
+    return [
+        SourceInstance(
+            source.id, source.label, source.platform, source.driver, False, source.role, source.raw
+        )
+        if source.raw.get("discussion_of") and not by_id[source.raw["discussion_of"]].mounted
+        else source
+        for source in found
+    ]
 
 
 def source_instances(config: AppConfig) -> list[SourceInstance]:

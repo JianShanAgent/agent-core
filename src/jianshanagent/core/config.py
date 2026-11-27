@@ -866,6 +866,14 @@ def write_source_instances(config: AppConfig, items: Sequence[dict[str, Any]]) -
             raise ValueError(f"来源「{source.id}」不能删除登记，请设 mounted: false 停用")
         if next_platforms[source.id] != source.platform.id:
             raise ValueError(f"来源「{source.id}」不能更换平台或复用存储命名空间")
+        next_raw = next_sources[source.id].raw
+        if source.raw.get("storage") == "stream_v2" and next_raw.get("storage") != "stream_v2":
+            raise ValueError("stream_v2 来源不能移除存储版本标记，请保留资料并使用兼容回切流程")
+        if (
+            source.raw.get("discussion_of") is not None
+            and next_raw.get("discussion_of") != source.raw["discussion_of"]
+        ):
+            raise ValueError("已关联的讨论分区不能更换或移除父来源")
         old_collector = source.raw.get("collector")
         new_collector = next_sources[source.id].raw.get("collector")
         if old_collector is not None and (

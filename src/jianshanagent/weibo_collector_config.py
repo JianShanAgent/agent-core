@@ -21,6 +21,10 @@ _KEYS = frozenset(
         "max_posts",
         "interval_seconds",
         "include_reposts",
+        "mode",
+        "include_comments",
+        "include_replies",
+        "discussion_source_id",
     }
 )
 
@@ -71,6 +75,27 @@ def parse_weibo_collector(value: Any) -> dict[str, Any]:
         if type(item) is not int or not low <= item <= high:
             raise ValueError(f"collector.{key} 必须是 {low} 到 {high} 的整数")
         result[key] = item
+    # Do not add fields to serialized legacy configurations merely by reading them.
+    if "mode" in value:
+        mode = value["mode"]
+        if not isinstance(mode, str) or mode not in {"recent", "full_then_incremental"}:
+            raise ValueError("collector.mode 必须是 recent 或 full_then_incremental")
+        result["mode"] = mode
+    for key in ("include_comments", "include_replies"):
+        if key in value:
+            if not isinstance(value[key], bool):
+                raise ValueError(f"collector.{key} 必须是布尔值")
+            result[key] = value[key]
+    if result.get("include_replies") and not result.get("include_comments"):
+        raise ValueError("采集楼中楼必须同时启用评论采集")
+    if "discussion_source_id" in value:
+        discussion = value["discussion_source_id"]
+        if not isinstance(discussion, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", discussion):
+            raise ValueError("讨论分区必须是合法的来源 ID")
+        result["discussion_source_id"] = discussion
+    if result.get("include_comments"):
+        if result.get("mode") != "full_then_incremental" or not result.get("discussion_source_id"):
+            raise ValueError("评论采集需要完整历史模式和关联讨论分区")
     return result
 
 
@@ -105,6 +130,13 @@ def validate_weibo_history(config: AppConfig, source_id: str, uid: str) -> None:
         stage = directory / "generations" / generation
         if stage.is_symlink():
             raise ValueError("来源历史无法确认归属，请新建来源")
+        if config.source(source_id).raw.get("storage") == "stream_v2":
+            from jianshanagent.plugins.knowledge.source_import_v2 import iter_source_rows
+
+            for row in iter_source_rows(config, source_id):
+                if not isinstance(row, dict) or row.get("author_id") != uid:
+                    raise ValueError("已有资料作者与目标 UID 不一致或无法确认，请新建来源")
+            return
         metadata = stage / "documents.json"
         if not metadata.exists():
             metadata = stage / "snapshot.json"

@@ -930,7 +930,14 @@ export interface WeiboCollectorConfig {
   max_posts: number;
   interval_seconds: number;
   include_reposts: boolean;
+  /** 缺省保留旧窗口采集语义，不在编辑旧来源时自动写入。 */
+  mode?: "recent" | "full_then_incremental";
+  include_comments?: boolean;
+  include_replies?: boolean;
+  discussion_source_id?: string;
 }
+
+export type HistoryPhase = "posts" | "comments" | "indexing" | "verifying" | "incremental" | "paused" | "blocked";
 
 export type CollectorState =
   | "not_configured" | "paused" | "idle" | "queued" | "fetching" | "collecting"
@@ -958,6 +965,28 @@ export interface CollectorStatus {
   error_code: string | null;
   message: string;
   limited: boolean;
+  /** 以下字段由新版全历史队列提供；旧服务缺省时不得推断为完成或零。 */
+  parent_source_id?: string | null;
+  history_phase?: HistoryPhase | (string & {}) | null;
+  history_complete?: boolean;
+  history_started_at?: number | string | null;
+  snapshot_at?: number | string | null;
+  posts_total?: number | null;
+  comments_total?: number | null;
+  replies_total?: number | null;
+  pending_posts?: number | null;
+  pending_comments?: number | null;
+  pending_replies?: number | null;
+  index_pending?: number | null;
+  inaccessible?: number | null;
+  count_mismatches?: number | null;
+  oldest_date?: number | string | null;
+  resource_bytes?: number | null;
+  vector_bytes?: number | null;
+  next_batch_at?: number | string | null;
+  paused?: boolean;
+  coverage_message?: string | null;
+  measurement?: Record<string, unknown> | null;
 }
 
 /** 一个来源实例 */
@@ -981,6 +1010,9 @@ export interface SourceInfo {
   /** 仅微博平台支持；旧来源未配置时为 null。 */
   collector: WeiboCollectorConfig | null;
   collection: CollectorStatus | null;
+  storage?: "stream_v2" | null;
+  /** 社区讨论分区所属主来源；不是第二个时间线采集器。 */
+  discussion_of?: string | null;
 }
 
 /** 文档平台 manifest（GET /api/sources 返回的 platforms 只含 documents 平台） */

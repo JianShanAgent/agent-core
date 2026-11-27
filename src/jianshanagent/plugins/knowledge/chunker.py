@@ -35,6 +35,7 @@ from jianshanagent.plugins.knowledge.models import (
     BLOCK_PARA,
     BLOCK_TABLE,
     KIND_ANNOUNCEMENT,
+    KIND_DISCUSSION,
     KIND_POST,
     Block,
     Chunk,
@@ -350,13 +351,97 @@ def make_header(doc: Document, path: tuple[str, ...] | list[str]) -> str:
         # 推断出来的年份要让读到这一片的人（和模型）知道它是推断的
         label = SOURCE_LABELS.get(str((doc.date_source or {}).get("kind")), "推断")
         header = f"{header}（时间：{doc.date_inferred}，{label}）"
-    if doc.kind in {KIND_ANNOUNCEMENT, KIND_POST}:
+    if doc.kind in {KIND_ANNOUNCEMENT, KIND_POST, KIND_DISCUSSION}:
         extras = [f"发布于 {doc.date}" if doc.date else "", doc.source]
         header = " ｜ ".join([header, *(e for e in extras if e)])
     return header
 
 
+def _chunk_discussion(doc: Document, cfg: ChunkSettings, stats: ChunkStats) -> list[Chunk]:
+    """有界打包短评论；长节点按原文字符区间拆分，节点映射可无损还原。"""
+    nodes = doc.meta.get("discussion_nodes")
+    if not isinstance(nodes, list) or not nodes:
+        raise ValueError("讨论文档必须包含已校验的 discussion_nodes")
+    chunks: list[Chunk] = []
+    parts: list[str] = []
+    members: list[dict[str, object]] = []
+
+    def flush() -> None:
+        if not members:
+            return
+        body = "\n\n".join(parts)
+        digest = sha256_hex(body)
+        meta = {key: value for key, value in doc.meta.items() if key != "discussion_nodes"}
+        meta.update(
+            discussion_nodes=list(members),
+            node_ids=list(dict.fromkeys(str(node["id"]) for node in members)),
+            author_ids=list(dict.fromkeys(str(node["author_id"]) for node in members)),
+            target_reply_ids=[node["id"] for node in members if node["is_target_reply"]],
+        )
+        # 混合作者绝不伪造 author_id；每片仅保留实际成员作者和原文范围。
+        meta.pop("author_id", None)
+        meta.pop("author_name", None)
+        seq = len(chunks)
+        chunks.append(
+            Chunk(
+                chunk_id=sha256_hex("\x1f".join([doc.doc_key, str(seq), digest]))[:24],
+                doc_key=doc.doc_key,
+                kind=doc.kind,
+                title=doc.title,
+                section_path=[],
+                header=make_header(doc, []),
+                body=body,
+                content_hash=digest,
+                url=str(members[0]["url"]),
+                source=doc.source,
+                date=doc.date,
+                seq=seq,
+                meta=meta,
+            )
+        )
+        parts.clear()
+        members.clear()
+
+    for node in nodes:
+        text = node["text"]
+        label = (
+            f"[评论 {node['id']}；作者 {node['author_name']}（UID {node['author_id']}）；"
+            f"{node['published_at']}；根 {node['root_id']}；"
+            f"父 {node['parent_id'] or '未知'}；回复 {node['reply_to_id'] or '未知'}；"
+            f"{'目标账号回复' if node['is_target_reply'] else '社区用户发言'}]"
+        )
+        capacity = cfg.max_chars - len(label) - 1
+        if capacity < 1:
+            raise ValueError("讨论切片上限不足以保留节点出处")
+        for start in range(0, len(text), capacity):
+            end = min(len(text), start + capacity)
+            fragment = text[start:end]
+            rendered = f"{label}\n{fragment}"
+            current_size = sum(map(len, parts)) + 2 * max(0, len(parts) - 1)
+            if parts and current_size + 2 + len(rendered) > min(cfg.target_chars, cfg.max_chars):
+                flush()
+            body_start = sum(map(len, parts)) + 2 * len(parts) + len(label) + 1
+            parts.append(rendered)
+            members.append(
+                {
+                    **node,
+                    "text": fragment,
+                    "text_start": start,
+                    "text_end": end,
+                    "text_length": len(text),
+                    "body_start": body_start,
+                    "body_end": body_start + len(fragment),
+                }
+            )
+            if end < len(text):
+                stats.hard_splits += 1
+    flush()
+    return chunks
+
+
 def chunk_document(doc: Document, cfg: ChunkSettings, stats: ChunkStats) -> list[Chunk]:
+    if doc.kind == KIND_DISCUSSION:
+        return _chunk_discussion(doc, cfg, stats)
     units = _merge(_emit(_build_tree(doc.blocks), cfg, stats), cfg, stats)
     chunks: list[Chunk] = []
     for seq, unit in enumerate(units):

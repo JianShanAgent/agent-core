@@ -21,10 +21,19 @@ class SourceFilter:
     exclude_source_platforms: tuple[str, ...] = ()
     exclude_author_ids: tuple[str, ...] = ()
     any_of: tuple[SourceFilter, ...] = ()
+    content_types: tuple[str, ...] | None = None
+    exclude_content_types: tuple[str, ...] = ()
+    discussion_of_ids: tuple[str, ...] | None = None
+    exclude_discussion_of_ids: tuple[str, ...] = ()
+    target_reply_only: bool = False
 
     def __post_init__(self) -> None:
         for field in fields(self):
             value = getattr(self, field.name)
+            if field.name == "target_reply_only":
+                if type(value) is not bool:
+                    raise ValueError("target_reply_only 必须是布尔值")
+                continue
             if field.name == "any_of":
                 if not isinstance(value, (tuple, list)) or any(
                     not isinstance(v, SourceFilter) for v in value
@@ -48,10 +57,25 @@ class SourceFilter:
                 self.source_platforms,
                 self.exclude_source_platforms,
             ),
-            (str(chunk.meta.get("author_id") or ""), self.author_ids, self.exclude_author_ids),
+            (chunk.kind, self.content_types, self.exclude_content_types),
+            (
+                str(chunk.meta.get("discussion_of") or ""),
+                self.discussion_of_ids,
+                self.exclude_discussion_of_ids,
+            ),
         ):
             if (allowed is not None and value not in allowed) or value in excluded:
                 return False
+        if self.target_reply_only and not chunk.meta.get("target_reply_ids"):
+            return False
+        authors = {str(chunk.meta.get("author_id") or "")}
+        members = chunk.meta.get("author_ids")
+        if isinstance(members, list):
+            authors.update(value for value in members if isinstance(value, str))
+        if self.author_ids is not None and not authors.intersection(self.author_ids):
+            return False
+        if authors.intersection(self.exclude_author_ids):
+            return False
         return not self.any_of or any(branch.allows(chunk) for branch in self.any_of)
 
     def intersect(self, other: SourceFilter | None) -> SourceFilter:
@@ -60,7 +84,9 @@ class SourceFilter:
         values: dict[str, Any] = {}
         for field in fields(self):
             left, right = getattr(self, field.name), getattr(other, field.name)
-            if field.name == "any_of":
+            if field.name == "target_reply_only":
+                values[field.name] = left or right
+            elif field.name == "any_of":
                 if left and right:
                     values[field.name] = tuple(a.intersect(b) for a in left for b in right)
                 else:
@@ -98,12 +124,35 @@ class SourceFilter:
                 self.source_platforms,
                 self.exclude_source_platforms,
             ),
-            (f"coalesce({alias}.meta->>'author_id', '')", self.author_ids, self.exclude_author_ids),
+            (f"{alias}.type", self.content_types, self.exclude_content_types),
+            (
+                f"coalesce({alias}.meta->>'discussion_of', '')",
+                self.discussion_of_ids,
+                self.exclude_discussion_of_ids,
+            ),
         ):
             for values, operator in ((allowed, "= ANY"), (excluded or None, "<> ALL")):
                 if values is not None:
                     clauses.append(f"{column} {operator}(${start + len(args)}::text[])")
                     args.append(list(values))
+        for values, is_excluded in (
+            (self.author_ids, False),
+            (self.exclude_author_ids or None, True),
+        ):
+            if values is not None:
+                param = f"${start + len(args)}::text[]"
+                member = (
+                    f"(coalesce({alias}.meta->>'author_id', '') = ANY({param}) OR "
+                    f"CASE WHEN jsonb_typeof({alias}.meta->'author_ids') = 'array' "
+                    f"THEN {alias}.meta->'author_ids' ELSE '[]'::jsonb END ?| {param})"
+                )
+                clauses.append(f"NOT {member}" if is_excluded else member)
+                args.append(list(values))
+        if self.target_reply_only:
+            clauses.append(
+                f"CASE WHEN jsonb_typeof({alias}.meta->'target_reply_ids') = 'array' "
+                f"THEN jsonb_array_length({alias}.meta->'target_reply_ids') > 0 ELSE FALSE END"
+            )
         if self.any_of:
             branches = []
             for branch in self.any_of:
@@ -119,6 +168,10 @@ def canonical_document_id(chunk: KbChunk) -> str | None:
     if chunk.meta.get("source_platform") != "weibo":
         return None
     explicit = chunk.meta.get("canonical_document_id")
+    if chunk.kind == "discussion":
+        if isinstance(explicit, str) and re.fullmatch(r"weibo:discussion:[0-9]+:[0-9]+", explicit):
+            return explicit
+        return None
     if isinstance(explicit, str) and re.fullmatch(r"weibo:[0-9]+", explicit):
         return explicit
     local = chunk.doc_key.removeprefix(f"{chunk.wiki}:") if chunk.wiki else chunk.doc_key
@@ -135,6 +188,17 @@ def provenance(chunk: KbChunk) -> dict[str, Any]:
         "canonical_document_id": canonical_document_id(chunk),
         "author_id": chunk.meta.get("author_id"),
         "author_name": chunk.meta.get("author_name"),
+        "author_ids": chunk.meta.get("author_ids"),
+        "discussion_of": chunk.meta.get("discussion_of"),
+        "discussion_nodes": chunk.meta.get("discussion_nodes"),
+        "node_ids": chunk.meta.get("node_ids"),
+        "packet_id": chunk.meta.get("packet_id"),
+        "logical_packet_id": chunk.meta.get("logical_packet_id"),
+        "fragment_id": chunk.meta.get("fragment_id"),
+        "target_reply_ids": chunk.meta.get("target_reply_ids"),
+        "post_url": chunk.meta.get("post_url"),
+        "evidence_group": chunk.meta.get("evidence_group"),
+        "untrusted_content": chunk.kind == "discussion",
         "source_role": role if role in ("unknown", "official", "community") else "unknown",
         "post_id": chunk.meta.get("post_id"),
         "origin_id": chunk.meta.get("origin_id"),
@@ -153,7 +217,11 @@ def canonical_sql(alias: str) -> str:
         f"THEN substr({alias}.doc_key, length({alias}.wiki) + 2) ELSE {alias}.doc_key END"
     )
     return f"""CASE WHEN {alias}.meta->>'source_platform' = 'weibo' THEN
-        CASE WHEN {alias}.meta->>'canonical_document_id' ~ '^weibo:[0-9]+$'
+        CASE WHEN {alias}.type = 'discussion' THEN
+                  CASE WHEN {alias}.meta->>'canonical_document_id'
+                            ~ '^weibo:discussion:[0-9]+:[0-9]+$'
+                       THEN {alias}.meta->>'canonical_document_id' END
+             WHEN {alias}.meta->>'canonical_document_id' ~ '^weibo:[0-9]+$'
              THEN {alias}.meta->>'canonical_document_id'
              WHEN ({local}) ~ '^weibo:[0-9]+$' THEN ({local})
              WHEN ({local}) ~ '^huiji:weibo:[0-9]+$'
