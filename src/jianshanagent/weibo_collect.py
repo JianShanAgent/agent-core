@@ -249,10 +249,17 @@ async def _row(post: dict[str, Any], client: WeiboClient) -> dict[str, Any]:
     if repost is not None:
         if not isinstance(repost, dict) or not _public(repost):
             raise WeiboCollectError("schema_changed")
-        reference = await _row_reference(repost, client)
-        if reference["id"] == post_id:
-            raise WeiboCollectError("schema_changed")
-        result["repost"] = reference
+        try:
+            reference = await _row_reference(repost, client)
+        except WeiboCollectError as error:
+            # Deleted, invisible or unfetchable reposted original: keep the
+            # outer post and drop the shallow reference (skip record).
+            if error.code not in {"schema_changed", "detail_unavailable"}:
+                raise
+        else:
+            if reference["id"] == post_id:
+                raise WeiboCollectError("schema_changed")
+            result["repost"] = reference
     return result
 
 

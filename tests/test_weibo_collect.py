@@ -897,3 +897,13 @@ async def test_unsafe_settings_fixed_failure_before_network(fixture, store, valu
     with pytest.raises(WeiboCollectError) as error:
         await fetch_weibo(values, store)
     assert error.value.code == "invalid_settings" and not fixture.calls
+
+
+async def test_deleted_reposted_original_keeps_outer_post_without_reference(fixture, store):
+    original = post(200, user={"id": 9999, "screen_name": "引用作者"}, isLongText=True)
+    original.pop("mblogid")  # Deleted original: identity no longer resolvable.
+    fixture.pages = {1: [post(retweeted_status=original)]}
+    batch = await fetch_weibo({"uid": _UID}, store)
+    assert len(batch.rows) == 1
+    assert "repost" not in batch.rows[0]
+    assert "合成正文" in batch.rows[0]["text"]  # Outer post's own text kept.
