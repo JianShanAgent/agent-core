@@ -131,6 +131,7 @@ from jianshanagent.plugins.knowledge.settings import (
     load_settings,
 )
 from jianshanagent.plugins.knowledge.sink import CHUNKS_FILE, DOCUMENTS_FILE, JsonlSink
+from jianshanagent.plugins.knowledge.source_collect_runner import SourceCollectorRunner
 from jianshanagent.plugins.knowledge.sources import WikiSource, wiki_time
 from jianshanagent.plugins.knowledge.store import (
     SYNC_STATUS_KEY,
@@ -1212,6 +1213,8 @@ async def run_loop(config_dir: str | None = None) -> int:
             await asyncio.sleep(HEARTBEAT_SECONDS)
 
     beating = loop.create_task(beat())
+    collector = SourceCollectorRunner(lambda: load_config(config_dir))
+    collecting = loop.create_task(collector.run(stop))
     interval = SyncSettings().interval_seconds
     #: 各个 wiki 上一轮是什么时候开始的
     last: dict[str, float] = {}
@@ -1285,10 +1288,17 @@ async def run_loop(config_dir: str | None = None) -> int:
             if not stop.is_set() and (restart_needed() or site_updated):
                 # 机器人那边换了核心或者某个站点插件的版本（管理后台里点的更新）：这个进程也换过去
                 logger.warning("kb_sync_restarting_for_update")
+                stop.set()
+                await collector.aclose()
+                await collecting
                 beating.cancel()
                 os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
     finally:
+        stop.set()
+        await collector.aclose()
+        await collecting
         beating.cancel()
+        await asyncio.gather(beating, return_exceptions=True)
     logger.info("kb_sync_loop_stopped")
     return 0
 

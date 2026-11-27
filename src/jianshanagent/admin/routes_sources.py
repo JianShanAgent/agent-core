@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextlib import ExitStack
 from typing import Any, cast
 from urllib.parse import urlsplit
 
 from aiohttp import web
 
 from jianshanagent.admin.core import Admin, fail, read_body, reply
+from jianshanagent.admin.routes_sources_collector import collection_status
+from jianshanagent.admin.routes_sources_collector import routes as collector_routes
 from jianshanagent.admin.routes_sources_session import routes as session_routes
 from jianshanagent.core.config import AppConfig, restore_override, write_source_instances
 from jianshanagent.core.manifest import platforms
 from jianshanagent.core.sources import SourceInstance, source_instance, source_instances
+from jianshanagent.plugins.knowledge.source_collect import (
+    ACTIVE_STATES,
+    SourceCollectError,
+    acquire_source_operation,
+    collector_active,
+    collector_overview,
+)
 from jianshanagent.plugins.knowledge.source_import import (
     CAPACITY_ERROR_CODES,
     CAPACITY_PUBLIC_MESSAGE,
@@ -111,7 +121,14 @@ class SourceImports:
         self.config = cast(AppConfig, _CurrentConfig(admin))
 
     def active(self) -> bool:
-        return any(not task.done() for task in self.tasks.values())
+        if any(not task.done() for task in self.tasks.values()):
+            return True
+        disk = self.admin.disk_config()
+        return any(
+            collector_active(disk, source.id)
+            for source in source_instances(disk)
+            if not source.is_wiki
+        )
 
     def get(self) -> SourceImportService:
         database = self.admin.runtime.db
@@ -120,7 +137,11 @@ class SourceImports:
             store = (
                 PostgresKnowledgeStore(database) if database is not None else MemoryKnowledgeStore()
             )
-            self.service = SourceImportService(self.config, store)
+            self.service = SourceImportService(
+                self.config,
+                store,
+                config_provider=self.admin.disk_config,
+            )
             self._database = database
         self.service.config = self.config
         return self.service
@@ -175,31 +196,47 @@ class SourceImports:
     async def start(self, source_id: str, content: str) -> dict[str, Any]:
         if source_id in self.tasks and not self.tasks[source_id].done():
             fail(409, "这个来源已有导入正在运行")
-        service = self.get()
-        # Recovery is an explicit empty batch: replay the last complete snapshot, no new records.
-        recovering = (self.status(source_id) or {}).get("state") == "recovery_required"
-        if recovering and not content.strip():
-            preview = {
-                "source_id": source_id,
-                "records": 0,
-                "new": 0,
-                "updated": 0,
-                "unchanged": 0,
-                "total_documents": 0,
-                "chunks": 0,
-                "empty": True,
-                "sample": [],
-                "recovery_requested": True,
-            }
-        else:
-            # Full validation before accepting a task; preview has zero network IO.
-            try:
+        disk = self.admin.disk_config()
+        if collector_active(disk, source_id):
+            fail(409, "该来源已有导入或采集任务，请先停止任务再导入")
+        try:
+            lease = acquire_source_operation(disk, source_id)
+        except SourceCollectError as exc:
+            fail(exc.status, exc.public_message)
+        try:
+            # A queued request releases its short lease; recheck the durable job while
+            # holding our lease so a queue write racing the first check cannot slip in.
+            if collector_overview(disk, source_id).get("state") in ACTIVE_STATES:
+                fail(409, "该来源已有采集任务，请先停止任务再导入")
+            service = self.get()
+            # Recovery replays the last complete snapshot without new records.
+            recovering = (self.status(source_id) or {}).get("state") == "recovery_required"
+            if recovering and not content.strip():
+                preview = {
+                    "source_id": source_id,
+                    "records": 0,
+                    "new": 0,
+                    "updated": 0,
+                    "unchanged": 0,
+                    "total_documents": 0,
+                    "chunks": 0,
+                    "empty": True,
+                    "sample": [],
+                    "recovery_requested": True,
+                }
+            else:
+                # The operation lease is already held before expensive validation starts.
                 preview = await asyncio.to_thread(service.preview, source_id, content)
-            except SourceImportCapacityError as exc:
-                fail(413, exc.public_message)
-            except (ValueError, OSError):
-                fail(400, "资料校验未通过，请检查版本、字段、原生数字帖 ID、时间及来源状态")
-        self.results[source_id] = {"source_id": source_id, "state": "validating", **preview}
+            self.results[source_id] = {"source_id": source_id, "state": "validating", **preview}
+        except SourceImportCapacityError as exc:
+            lease.close()
+            fail(413, exc.public_message)
+        except (ValueError, OSError):
+            lease.close()
+            fail(400, "资料校验未通过，请检查版本、字段、原生数字帖 ID、时间及来源状态")
+        except BaseException:
+            lease.close()
+            raise
 
         async def run() -> None:
             try:
@@ -215,8 +252,12 @@ class SourceImports:
             except Exception:
                 # No exception text: provider URLs/headers and adapter settings are not public data.
                 self.results[source_id] = {"source_id": source_id, "state": "failed"}
+            finally:
+                lease.close()
 
         self.tasks[source_id] = asyncio.create_task(run(), name=f"source-import:{source_id}")
+        # A task cancelled before its coroutine starts never reaches the finally block.
+        self.tasks[source_id].add_done_callback(lambda _task: lease.close())
         return self.results[source_id]
 
     async def close(self, _app: web.Application) -> None:
@@ -272,6 +313,7 @@ async def source_overview(admin: Admin) -> list[dict[str, Any]]:
             ),
             default=None,
         )
+        collection = collection_status(admin, source)
         result.append(
             {
                 "id": source.id,
@@ -288,7 +330,15 @@ async def source_overview(admin: Admin) -> list[dict[str, Any]]:
                     "loaded_at": details.loaded_at if details else None,
                 },
                 "import_status": imports(admin).status(source.id) if not source.is_wiki else None,
-                "collector_status": "not_configured" if not source.is_wiki else "wiki_managed",
+                "collector": source.raw.get("collector"),
+                "collection": collection,
+                "collector_status": (
+                    collection["state"]
+                    if collection is not None
+                    else "wiki_managed"
+                    if source.is_wiki
+                    else "not_available"
+                ),
             }
         )
     return result
@@ -307,7 +357,9 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         return source
 
     def editable(body: dict[str, Any], *, creating: bool = False) -> dict[str, Any]:
-        allowed = {"label", "role", "mounted"} | ({"id", "platform"} if creating else set())
+        allowed = {"label", "role", "mounted", "collector"} | (
+            {"id", "platform"} if creating else set()
+        )
         if body.keys() - allowed:
             fail(400, "不接受来源 ID/平台变更、地址、路径、代码或凭据等字段")
         if "label" in body and (
@@ -320,23 +372,40 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             fail(400, "mounted 应该是 true 或 false")
         if "role" in body and (not isinstance(body["role"], str) or body["role"] not in _ROLES):
             fail(400, "role 只能是 unknown、official 或 community")
-        return {**body, **({"label": body["label"].strip()} if "label" in body else {})}
+        normalized = {**body, **({"label": body["label"].strip()} if "label" in body else {})}
+        if "collector" in body:
+            from jianshanagent.weibo_collector_config import parse_weibo_collector
+
+            try:
+                normalized["collector"] = parse_weibo_collector(body["collector"])
+            except ValueError:
+                fail(400, "微博采集配置无效，请检查目标 UID、字段类型与允许范围")
+        return normalized
 
     async def save(items: list[dict[str, Any]]) -> None:
         if manager.active():
-            fail(409, "导入任务运行中，完成或取消后才能修改来源配置")
+            fail(409, "来源导入或采集运行中，请先停止任务再修改配置")
         disk = admin.disk_config()
         path = disk.override_path(_SOURCE_FILE)
         previous = path.read_text("utf-8") if path is not None and path.is_file() else None
-        try:
-            write_source_instances(disk, items)
-        except ValueError:
-            fail(409, "来源配置无法保存，请检查覆写目录和来源设置")
-        try:
-            await admin.runtime.reload()
-        except Exception:
-            restore_override(disk, _SOURCE_FILE, previous)
-            fail(409, "来源配置无法生效，已恢复原配置")
+        # Hold every existing documents namespace across write + reload. The check alone races
+        # with a worker starting in another process; acquiring its exact lease closes that gap.
+        with ExitStack() as leases:
+            try:
+                for source in source_instances(disk):
+                    if not source.is_wiki:
+                        leases.enter_context(acquire_source_operation(disk, source.id))
+            except SourceCollectError as exc:
+                fail(exc.status, exc.public_message)
+            try:
+                write_source_instances(disk, items)
+            except ValueError:
+                fail(409, "来源配置无法保存；已绑定 UID 不能更换或移除，历史作者不明请新建来源")
+            try:
+                await admin.runtime.reload()
+            except Exception:
+                restore_override(disk, _SOURCE_FILE, previous)
+                fail(409, "来源配置无法生效，已恢复原配置")
 
     async def list_sources(_request: web.Request) -> web.Response:
         disk = admin.disk_config()
@@ -367,6 +436,8 @@ def routes(admin: Admin) -> list[web.RouteDef]:
         platform = platforms().get(platform_id) if isinstance(platform_id, str) else None
         if platform is None or platform.driver != "documents":
             fail(400, "只能登记已安装的文档来源平台")
+        if "collector" in body and platform.id != "weibo":
+            fail(400, "只有微博平台可以配置微博采集目标")
         async with admin.source_mutation_lock:
             disk = admin.disk_config()
             existing = source_instances(disk)
@@ -388,7 +459,21 @@ def routes(admin: Admin) -> list[web.RouteDef]:
 
     async def update_source(source_id: str, body: dict[str, Any]) -> web.Response:
         async with admin.source_mutation_lock:
-            target(source_id, documents=True)
+            source = target(source_id, documents=True)
+            if "collector" in body and source.platform.id != "weibo":
+                fail(400, "只有微博平台可以配置微博采集目标")
+            if "collector" in body and admin.runtime.db is not None:
+                uid = body["collector"]["uid"]
+                try:
+                    owners = await admin.runtime.db.pool.fetch(
+                        "SELECT DISTINCT meta->>'author_id' AS author_id "
+                        "FROM kb_chunks WHERE wiki = $1",
+                        source_id,
+                    )
+                except Exception:
+                    fail(503, "暂时无法核验已有资料作者，未修改来源配置")
+                if any(row["author_id"] != uid for row in owners):
+                    fail(409, "已有资料作者与目标 UID 不一致或无法确认，请新建来源")
             entries = [
                 dict(item.raw) for item in source_instances(admin.disk_config()) if not item.is_wiki
             ]
@@ -424,7 +509,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
             fail(400, "上传资料必须是合法 UTF-8 文本")
         if size > _MAX_CONTENT:
             fail(413, "上传资料不能超过 10 MiB")
-        return body["content"]
+        return cast(str, body["content"])
 
     async def preview(request: web.Request) -> web.Response:
         source_id = request.match_info["id"]
@@ -470,6 +555,7 @@ def routes(admin: Admin) -> list[web.RouteDef]:
 
     return [
         *session_routes(admin),
+        *collector_routes(admin),
         web.get("/api/sources", list_sources),
         web.post("/api/sources", create),
         web.put("/api/sources/{id}", update),

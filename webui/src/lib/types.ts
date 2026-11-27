@@ -921,6 +921,45 @@ export interface WeiboLoginPoll {
   error: string;
 }
 
+/** 微博公开目标作者；不包含登录身份或凭据。UID 由服务端规范化。 */
+export interface WeiboCollectorConfig {
+  uid: string;
+  enabled: boolean;
+  initial_days: number;
+  overlap_days: number;
+  max_posts: number;
+  interval_seconds: number;
+  include_reposts: boolean;
+}
+
+export type CollectorState =
+  | "not_configured" | "paused" | "idle" | "queued" | "fetching" | "collecting"
+  | "importing" | "committing" | "stopping" | "completed" | "failed"
+  | "cancelled" | "interrupted" | "needs_login" | "limited"
+  | (string & {});
+
+/** GET collector / POST collect / POST collect/cancel 均返回平铺的安全状态。 */
+export interface CollectorStatus {
+  state: CollectorState;
+  phase: string | null;
+  job_id: string | null;
+  uid: string | null;
+  profile_url: string | null;
+  pages: number;
+  fetched: number;
+  accepted: number;
+  new: number;
+  updated: number;
+  unchanged: number;
+  started_at: number | string | null;
+  finished_at: number | string | null;
+  last_success_at: number | string | null;
+  next_run_at: number | string | null;
+  error_code: string | null;
+  message: string;
+  limited: boolean;
+}
+
 /** 一个来源实例 */
 export interface SourceInfo {
   id: string;
@@ -939,6 +978,9 @@ export interface SourceInfo {
   import_status: ImportStatus | null;
   /** 采集器状态；"not_configured" = 尚未配置采集器 */
   collector_status: "not_configured" | string;
+  /** 仅微博平台支持；旧来源未配置时为 null。 */
+  collector: WeiboCollectorConfig | null;
+  collection: CollectorStatus | null;
 }
 
 /** 文档平台 manifest（GET /api/sources 返回的 platforms 只含 documents 平台） */

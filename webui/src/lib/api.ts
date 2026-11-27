@@ -2,6 +2,8 @@
 
 import type {
   CatalogInfo,
+  CollectorStatus,
+  WeiboCollectorConfig,
   ChatLogMessage,
   ChatSummary,
   ConfigFile,
@@ -267,10 +269,16 @@ export const api = {
 
   // ---- 资料来源 ----
   sources: () => get<SourcesInfo>("/api/sources"),
-  createSource: (body: { id: string; label: string; platform: string; mounted: boolean; role: SourceInfo["role"] }) =>
+  createSource: (body: { id: string; label: string; platform: string; mounted: boolean; role: SourceInfo["role"]; collector?: WeiboCollectorConfig | null }) =>
     post<{ source: SourceInfo }>("/api/sources", body),
-  updateSource: (id: string, body: { label?: string; role?: SourceInfo["role"]; mounted?: boolean }) =>
+  updateSource: (id: string, body: { label?: string; role?: SourceInfo["role"]; mounted?: boolean; collector?: WeiboCollectorConfig | null }) =>
     put<{ source: SourceInfo }>(`/api/sources/${seg(id)}`, body),
+  collectSource: (id: string) =>
+    post<CollectorStatus>(`/api/sources/${seg(id)}/collect`, {}),
+  sourceCollector: (id: string) =>
+    get<CollectorStatus>(`/api/sources/${seg(id)}/collector`),
+  cancelSourceCollection: (id: string, jobId: string) =>
+    post<CollectorStatus>(`/api/sources/${seg(id)}/collect/cancel`, { job_id: jobId }),
   setSourceMounted: (id: string, mounted: boolean) =>
     post<{ source: SourceInfo }>(`/api/sources/${seg(id)}/mount`, { mounted }),
   previewImport: (id: string, content: string) =>

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import threading
 import uuid
 from array import array
@@ -13,12 +14,17 @@ import pytest
 from jianshanagent.core.config import AppConfig
 from jianshanagent.plugins.knowledge import cli, source_import
 from jianshanagent.plugins.knowledge.embed import VectorStore, read_embeddable
+from jianshanagent.plugins.knowledge.source_collect import (
+    SourceCollectError,
+    acquire_source_operation,
+)
 from jianshanagent.plugins.knowledge.source_import import (
     CAPACITY_ERROR_CODES,
     CAPACITY_PUBLIC_MESSAGE,
     ImportLimits,
     SourceImportCapacityError,
     SourceImportError,
+    SourceImportPublishedError,
     SourceImportService,
 )
 from jianshanagent.plugins.knowledge.store import KbChunk, MemoryKnowledgeStore
@@ -87,10 +93,13 @@ class FakeEmbedder:
         return self.minimum
 
 
-def setup(tmp_path, limits=None):
+def setup(tmp_path, limits=None, *, config_provider=None):
     store = MemoryKnowledgeStore()
     embedder = FakeEmbedder()
-    return SourceImportService(conf(tmp_path), store, embedder, limits=limits), store, embedder
+    service = SourceImportService(
+        conf(tmp_path), store, embedder, limits=limits, config_provider=config_provider
+    )
+    return service, store, embedder
 
 
 def docs(store, source="social"):
@@ -102,6 +111,8 @@ def test_preview_zero_embedding_and_no_files(tmp_path):
     preview = service.preview("social", batch())
     assert preview["new"] == preview["chunks"] == 1
     assert preview["sample"][0]["id"] == "100"
+    assert service.status("social") is None
+    assert not service.active("social")
     assert embed.calls == 0
     assert not (tmp_path / "kb").exists()
     assert not store._chunks
@@ -125,6 +136,32 @@ def test_all_file_validation_precedes_writes(tmp_path, content):
     assert not store._chunks
     assert embed.calls == 0
     assert not (tmp_path / "kb").exists()
+
+
+@pytest.mark.parametrize("author", [None, "999", " 42 "])
+async def test_bound_source_rejects_missing_mixed_or_noncanonical_authors(tmp_path, author):
+    service, store, embed = setup(tmp_path)
+    service.config.files["core.sources"]["sources"][0]["collector"] = {
+        "uid": "42",
+        "enabled": False,  # Pausing the schedule does not remove the binding.
+    }
+    second = batch("101") if author is None else batch("101", author_id=author)
+    content = f"{batch(author_id='42')}\n{second}"
+    with pytest.raises(SourceImportError, match="第 2 条.*UID"):
+        service.preview("social", content)
+    with pytest.raises(SourceImportError, match="第 2 条.*UID"):
+        await service.import_data("social", content)
+    assert not (tmp_path / "kb").exists()
+    assert not docs(store) and embed.calls == 0
+
+
+async def test_bound_source_accepts_target_author_with_a_repost(tmp_path):
+    service, store, _ = setup(tmp_path)
+    service.config.files["core.sources"]["sources"][0]["collector"] = {"uid": "42"}
+    content = batch(author_id="42", repost={"id": "50", "author_id": "999", "text": "转发正文"})
+    assert service.preview("social", content)["new"] == 1
+    assert (await service.import_data("social", content))["state"] == "completed"
+    assert docs(store) == {"social:weibo:100"}
 
 
 async def test_incremental_merge_idempotence_update_and_isolation(tmp_path):
@@ -158,6 +195,27 @@ async def test_empty_batch_never_clears_or_embeds(tmp_path):
     before = dict(store._chunks)
     await service.import_data("social", "")
     assert store._chunks == before and embed.calls == 1
+
+
+@pytest.mark.parametrize("content", [batch(), "\n"])
+async def test_noop_requires_reachable_store_even_with_local_snapshot(
+    tmp_path, monkeypatch, content
+):
+    service, store, embed = setup(tmp_path)
+    await service.import_data("social", batch())
+    saved = pointer(service)
+
+    async def unavailable():
+        raise ConnectionError("postgres connection includes private password")
+
+    monkeypatch.setattr(store, "info", unavailable)
+    with pytest.raises(SourceImportError) as error:
+        await service.import_data("social", content)
+    assert "private password" not in str(error.value)
+    assert service.status("social")["state"] == "failed"
+    assert pointer(service) == saved
+    assert docs(store) == {"social:weibo:100"}
+    assert embed.calls == 1
 
 
 @pytest.mark.parametrize("failure", ["api", "verification"])
@@ -207,6 +265,11 @@ async def test_cancel_and_cross_service_lock(tmp_path):
     await embed.started.wait()
     assert service.active("social")
     other = SourceImportService(service.config, store, embed)
+    assert other.active("social")
+    assert not other.cancel("social")
+    assert other.status("social")["state"] == "embedding"
+    with pytest.raises(SourceImportError, match="已有导入任务"):
+        await service.import_data("social", batch("300"))
     with pytest.raises(SourceImportError, match="另一个"):
         await other.import_data("social", batch("300"))
     assert service.cancel("social")
@@ -215,6 +278,47 @@ async def test_cancel_and_cross_service_lock(tmp_path):
     assert result["state"] == "cancelled"
     assert docs(store) == {"social:weibo:100"}
     assert not service.active("social")
+
+
+async def test_status_prefers_disk_and_recognizes_another_process(tmp_path):
+    service, _, _ = setup(tmp_path)
+    await service.import_data("social", batch())  # This service now has a stale cached job.
+    directory = service._directory("social")
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import fcntl, sys\n"
+        "with open(sys.argv[1], 'ab') as lock:\n"
+        "    fcntl.flock(lock, fcntl.LOCK_EX)\n"
+        "    print('locked', flush=True)\n"
+        "    sys.stdin.buffer.read(1)\n",
+        str(directory / "import.lock"),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    try:
+        assert await asyncio.wait_for(process.stdout.readline(), timeout=5) == b"locked\n"
+        state = {"source_id": "social", "job_id": "external", "state": "embedding"}
+        status_path = directory / "status.json"
+        source_import._atomic_json(status_path, state)
+        assert service.active("social")
+        assert service.status("social") == state
+        assert not service.cancel("social")
+
+        state["state"] = "committing"
+        source_import._atomic_json(status_path, state)
+        source_import._atomic_json(directory / "journal.json", {})
+        assert service.status("social") == state
+    finally:
+        await process.communicate(b"x")
+    assert process.returncode == 0
+    assert not service.active("social")
+    assert service.status("social")["state"] == "recovery_required"
+    (directory / "journal.json").unlink()
+    assert service.status("social")["state"] == "interrupted"
+    state["state"] = "completed"
+    source_import._atomic_json(status_path, state)
+    assert service.status("social") == state
 
 
 async def test_task_cancel_during_commit_rolls_back(tmp_path):
@@ -282,6 +386,94 @@ async def test_cli_source_preview_does_not_load_wiki_settings(tmp_path, monkeypa
     monkeypatch.setattr(cli, "load_settings", lambda *a, **k: pytest.fail("不得加载 Wiki 设置"))
     assert await cli._source_command(args, service.config) == 0
     assert json.loads(capsys.readouterr().out)["source_id"] == "social"
+
+
+async def test_cli_operation_conflict_precedes_input_and_database(tmp_path, monkeypatch, capsys):
+    config = conf(tmp_path)
+    missing = tmp_path / "missing.jsonl"
+    preview_file = tmp_path / "input.jsonl"
+    preview_file.write_text(batch(), encoding="utf-8")
+    parse = cli._parser().parse_args
+    monkeypatch.setattr(cli, "Database", lambda *a, **k: pytest.fail("不得连接数据库"))
+    with acquire_source_operation(config, "social"):
+        args = parse(["--source", "social", "import", str(missing)])
+        assert await cli._source_command(args, config) == 2
+        assert capsys.readouterr().err.strip() == str(SourceCollectError("busy"))
+        args = parse(["--source", "social", "preview", str(preview_file)])
+        assert await cli._source_command(args, config) == 0
+        assert json.loads(capsys.readouterr().out)["new"] == 1
+        args = parse(["--source", "social", "status"])
+        assert await cli._source_command(args, config) == 0
+        assert json.loads(capsys.readouterr().out) is None
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_cli_import_reloads_config_and_holds_lease_through_shutdown(
+    tmp_path, monkeypatch, capsys, changed
+):
+    config, current = conf(tmp_path), conf(tmp_path)
+    config.secrets["postgres"] = {"dsn": "postgresql://test.invalid/test"}
+    if changed:
+        current.files["core.sources"]["sources"][0]["label"] = "新的标签"
+    path = tmp_path / "input.jsonl"
+    path.write_text("\n", encoding="utf-8")  # No embedding or external connections needed.
+    events = []
+
+    def check_held(event):
+        with pytest.raises(SourceCollectError) as error:
+            with acquire_source_operation(config, "social"):
+                pytest.fail("导入过早释放操作租约")
+        assert error.value.code == "busy"
+        events.append(event)
+
+    class Database:
+        def __init__(self, *args, **kwargs):
+            check_held("init_db")
+
+        async def connect(self):
+            check_held("connect")
+
+        async def migrate(self):
+            check_held("migrate")
+
+        async def close(self):
+            check_held("close_db")
+
+    class Service(SourceImportService):
+        async def aclose(self):
+            check_held("close_service")
+            await super().aclose()
+
+    def load(config_dir):
+        assert config_dir == str(config.root)
+        if not events:
+            events.append("load")
+            return config
+        check_held("reload")
+        return current
+
+    monkeypatch.setattr(cli, "load_config", load)
+    monkeypatch.setattr(cli, "setup_logging", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "Database", Database)
+    monkeypatch.setattr(cli, "PostgresKnowledgeStore", lambda db: MemoryKnowledgeStore())
+    monkeypatch.setattr(cli, "SourceImportService", Service)
+    args = ["--config-dir", str(config.root), "--source", "social", "import", str(path)]
+    assert cli.main(args) == (2 if changed else 0)
+    output = capsys.readouterr()
+    if changed:
+        assert "配置已变化" in output.err
+    else:
+        assert json.loads(output.out)["noop"]
+    assert events == [
+        "load",
+        "init_db",
+        "connect",
+        "migrate",
+        "reload",
+        "close_service",
+        "close_db",
+    ]
+    acquire_source_operation(config, "social").close()
 
 
 async def test_cleanup_has_separate_text_and_image_allowlists(monkeypatch):
@@ -385,6 +577,30 @@ async def test_config_mutation_during_embedding_rejected(tmp_path):
     assert docs(store) == {"social:weibo:100"}
 
 
+@pytest.mark.parametrize("change", ["source", "kb_root", "embedding"])
+@pytest.mark.parametrize("noop", [False, True])
+async def test_reloaded_config_must_match_startup_even_for_noop(tmp_path, change, noop):
+    current = conf(tmp_path)
+    service, store, embed = setup(tmp_path, config_provider=lambda: current)
+    await service.import_data("social", batch())
+    before = pointer(service)
+    kept = generation_ids(service)
+    if change == "source":
+        current.files["core.sources"]["sources"][0]["mounted"] = False
+    elif change == "kb_root":
+        current.files["plugin.knowledge"]["paths"]["root"] = str(tmp_path / "other-kb")
+    else:
+        current.files["core.embedding"]["providers"]["test"]["text_instruction"] = "新的嵌入指令"
+
+    with pytest.raises(SourceImportError, match="配置已变化"):
+        await service.import_data("social", batch() if noop else batch("200"))
+    assert service.status("social")["state"] == "failed"
+    assert pointer(service) == before
+    assert generation_ids(service) == kept
+    assert docs(store) == {"social:weibo:100"}
+    assert embed.calls == (1 if noop else 2)
+
+
 async def test_role_label_updates_not_lost_to_idempotence(tmp_path):
     service, store, embed = setup(tmp_path)
     await service.import_data("social", batch())
@@ -394,25 +610,42 @@ async def test_role_label_updates_not_lost_to_idempotence(tmp_path):
     assert next(iter(store._chunks.values())).meta["source_role"] == "community"
 
 
-async def test_post_replace_fsync_failure_is_not_reported_as_old_snapshot(tmp_path, monkeypatch):
-    service, store, embed = setup(tmp_path)
+@pytest.mark.parametrize("failure", ["pointer_fsync", "completed_status"])
+async def test_failure_after_publication_is_structured_and_does_not_roll_back(
+    tmp_path, monkeypatch, failure
+):
+    service, store, _ = setup(tmp_path)
     await service.import_data("social", batch())
+    old_pointer = pointer(service)
     atomic = source_import._atomic_json
 
-    def fail_after_replace(path, value):
+    def fail_after_publication(path, value):
+        if (
+            failure == "completed_status"
+            and path.name == "status.json"
+            and value["state"] == "completed"
+        ):
+            raise OSError("internal status write failure at /private/path")
         atomic(path, value)
-        if path.name == "current.json":
-            raise OSError("directory fsync failed after replace")
+        if failure == "pointer_fsync" and path.name == "current.json":
+            raise OSError("internal fsync failure at /private/path")
 
-    monkeypatch.setattr(source_import, "_atomic_json", fail_after_replace)
-    with pytest.raises(SourceImportError, match="已发布"):
+    monkeypatch.setattr(source_import, "_atomic_json", fail_after_publication)
+    with pytest.raises(SourceImportPublishedError) as error:
         await service.import_data("social", batch("200"))
-    assert len(store._chunks) == 2
-    assert service.status("social")["state"] == "recovery_required"
+    assert error.value.published is True
+    assert str(error.value) == "资料已发布，但状态记录待确认；请查询状态后重试"
+    assert pointer(service) != old_pointer
+    assert docs(store) == {"social:weibo:100", "social:weibo:200"}
+    status = service.status("social")
+    if failure == "pointer_fsync":
+        assert status["state"] == "recovery_required"
+    else:
+        assert status["state"] == "completed" and status["published"] is True
+
     monkeypatch.setattr(source_import, "_atomic_json", atomic)
-    await service.import_data("social", batch("200"))
+    assert (await service.import_data("social", batch("200")))["noop"]
     assert service.status("social")["state"] == "completed"
-    assert len(store._chunks) == 2
 
 
 async def test_recovery_failure_retains_journal_then_retries(tmp_path):

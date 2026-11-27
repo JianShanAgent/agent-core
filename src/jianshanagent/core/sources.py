@@ -6,7 +6,7 @@ import importlib
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from jianshanagent.core.manifest import (
     DRIVER_DOCUMENTS,
@@ -15,6 +15,7 @@ from jianshanagent.core.manifest import (
     PluginError,
     platforms,
 )
+from jianshanagent.weibo_collector_config import parse_weibo_collector
 
 if TYPE_CHECKING:
     from jianshanagent.core.config import AppConfig
@@ -24,7 +25,7 @@ SOURCE_FILE = "core.sources"
 SOURCE_INSTANCES = "sources"
 EXTENSION_DOCUMENTS = "documents"
 _SOURCE_ID = re.compile(r"[a-z][a-z0-9_]*")
-_SOURCE_KEYS = frozenset({"id", "label", "platform", "mounted", "role"})
+_SOURCE_KEYS = frozenset({"id", "label", "platform", "mounted", "role", "collector"})
 SOURCE_ROLES = frozenset({"unknown", "official", "community"})
 
 
@@ -94,10 +95,13 @@ def document_source_instances(
         role = item.get("role", "unknown")
         if not isinstance(role, str) or role not in SOURCE_ROLES:
             raise ValueError(f"来源「{source_id}」的 role 必须是 unknown、official 或 community")
+        raw = {**item, "id": source_id, "label": label.strip(), "mounted": mounted, "role": role}
+        if "collector" in item:
+            if platform.id != "weibo":
+                raise ValueError("collector 仅支持微博平台")
+            raw["collector"] = parse_weibo_collector(item["collector"])
         found.append(
-            SourceInstance(
-                source_id, label.strip(), platform, platform.driver, mounted, role, dict(item)
-            )
+            SourceInstance(source_id, label.strip(), platform, platform.driver, mounted, role, raw)
         )
     return found
 
@@ -164,4 +168,4 @@ def load_source_adapter(config: AppConfig, source_id: str) -> SourceAdapter:
     adapter = factory(SourceSetup(config.for_source(source_id), source))
     if not callable(getattr(adapter, "normalize", None)):
         raise PluginError(f"平台「{source.platform.id}」的来源适配器没有 normalize(rows)")
-    return adapter
+    return cast(SourceAdapter, adapter)

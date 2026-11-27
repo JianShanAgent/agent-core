@@ -1,5 +1,5 @@
 id: weibo
 name: 微博
-description: 独立文档来源，接收标准资料导入；未配置采集器时不会抓取或访问微博。
+description: 支持目标账号公开微博增量采集与标准资料导入；凭据仅在服务端保存，未配置或停用时不自动采集。
 driver: documents
 capabilities: [documents]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -275,3 +276,140 @@ def test_adapter_contract_is_validated(tmp_path: Path, monkeypatch: pytest.Monke
     module.create_source_adapter = lambda setup: object()  # type: ignore[attr-defined]
     with pytest.raises(PluginError, match="normalize"):
         load_source_adapter(config, "posts")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["5896401674", " https://weibo.com/u/5896401674/ ", "https://www.weibo.com/u/5896401674"],
+)
+def test_weibo_uid_canonical(value: str) -> None:
+    from jianshanagent.weibo_collector_config import parse_weibo_uid
+
+    assert parse_weibo_uid(value) == "5896401674"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        5896401674,
+        True,
+        "",
+        "0",
+        "0123",
+        "１２３",
+        "https://weibo.com/5896401674",
+        "http://weibo.com/u/5896401674",
+        "https://weibo.com.evil/u/123",
+        "https://evil/u/123",
+        "https://weibo.com:443/u/123",
+        "https://user:token@weibo.com/u/123",
+        "https://weibo.com/u/123?cookie=secret",
+        "https://weibo.com/u/123#fragment",
+        "https://weibo.com/u/123/extra",
+        "https://wei\nbo.com/u/123",
+        "https://weibo.com/u/%31%32%33",
+        "file:///tmp/cookie",
+    ],
+)
+def test_weibo_uid_rejects_untrusted_input(value: object) -> None:
+    from jianshanagent.weibo_collector_config import parse_weibo_uid
+
+    with pytest.raises(ValueError):
+        parse_weibo_uid(value)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"cookie": "secret"},
+        {"proxy": "http://localhost"},
+        {"url": "https://evil"},
+        {"path": "/tmp"},
+        {"package": "evil.module"},
+        {"enabled": 1},
+        {"include_reposts": "false"},
+        {"initial_days": True},
+        {"initial_days": 0},
+        {"initial_days": 366},
+        {"overlap_days": 0},
+        {"overlap_days": 31},
+        {"max_posts": 19},
+        {"max_posts": 501},
+        {"interval_seconds": 899},
+        {"interval_seconds": 86401},
+        {"max_posts": 20.0},
+    ],
+)
+def test_weibo_collector_strict_fields(extra: dict[str, object]) -> None:
+    from jianshanagent.weibo_collector_config import parse_weibo_collector
+
+    with pytest.raises(ValueError):
+        parse_weibo_collector({"uid": "5896401674", **extra})
+    with pytest.raises(ValueError):
+        parse_weibo_collector({})
+
+
+def test_weibo_collector_canonical_raw_and_persisted_defaults(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path, rows=[_row(role="official", collector={"uid": "https://weibo.com/u/5896401674"})]
+    )
+    settings = config.source("posts").raw["collector"]
+    assert settings == {
+        "uid": "5896401674",
+        "enabled": False,
+        "initial_days": 30,
+        "overlap_days": 7,
+        "max_posts": 200,
+        "interval_seconds": 1800,
+        "include_reposts": True,
+    }
+    write_source_instances(config, [_row(role="official", collector={"uid": settings["uid"]})])
+    loaded = load_config(config.root, config.overrides_dir)
+    assert loaded.source("posts").raw["collector"] == settings
+    assert loaded.source("posts").role == "official"
+    path = config.override_path("core.sources")
+    assert path is not None
+    assert yaml.safe_load(path.read_text())["sources"][0]["collector"] == settings
+    for collector in (None, {"uid": "12345"}):
+        row = _row() if collector is None else _row(collector=collector)
+        with pytest.raises(ValueError, match="UID"):
+            write_source_instances(loaded, [row])
+    assert (
+        load_config(config.root, config.overrides_dir).source("posts").raw["collector"] == settings
+    )
+
+
+@pytest.mark.parametrize("author", ["5896401674", "1111", "", None])
+def test_weibo_first_binding_requires_matching_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    author: str | None,
+) -> None:
+    root = tmp_path / "kb"
+    monkeypatch.setenv("JIANSHANAGENT_KB_DIR", str(root))
+    config = _config(tmp_path, rows=[_row()])
+    directory = root / "posts" / "source-import"
+    stage = directory / "generations" / ("a" * 32)
+    stage.mkdir(parents=True)
+    (directory / "current.json").write_text(json.dumps({"generation": "a" * 32}))
+    (stage / "documents.json").write_text(json.dumps({"rows": [{"author_id": author}]}))
+    if author == "5896401674":
+        write_source_instances(config, [_row(collector={"uid": author})])
+        assert (
+            load_config(config.root, config.overrides_dir).source("posts").raw["collector"]["uid"]
+            == author
+        )
+    else:
+        with pytest.raises(ValueError, match="作者"):
+            write_source_instances(config, [_row(collector={"uid": "5896401674"})])
+        assert "collector" not in load_config(config.root, config.overrides_dir).source("posts").raw
+
+
+def test_non_weibo_documents_cannot_configure_weibo_collector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = replace(manifest.platforms()["weibo"], id="other")
+    monkeypatch.setattr(sources, "platforms", lambda: {"other": other})
+    with pytest.raises(ValueError, match="仅支持微博"):
+        sources.document_source_instances([_row(platform="other", collector={"uid": "123"})])

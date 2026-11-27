@@ -54,6 +54,8 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Callable
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from jianshanagent.core.config import AppConfig, load_config
@@ -75,8 +77,10 @@ from jianshanagent.plugins.knowledge.pipeline import ProcessResult, run_pipeline
 from jianshanagent.plugins.knowledge.report import write_outputs
 from jianshanagent.plugins.knowledge.settings import Settings, is_primary, load_settings
 from jianshanagent.plugins.knowledge.sink import CHUNKS_FILE, JsonlSink
+from jianshanagent.plugins.knowledge.source_collect import acquire_source_operation
 from jianshanagent.plugins.knowledge.source_import import MAX_FILE_BYTES, SourceImportService
 from jianshanagent.plugins.knowledge.store import (
+    KnowledgeStore,
     MemoryKnowledgeStore,
     PostgresKnowledgeStore,
     StoreInfo,
@@ -361,40 +365,44 @@ def _one_wiki(args: argparse.Namespace, config: AppConfig, settings: Settings) -
     return _run(args, settings)
 
 
-async def _source_command(args: argparse.Namespace, config: AppConfig) -> int:
+async def _source_command(
+    args: argparse.Namespace,
+    config: AppConfig,
+    *,
+    config_provider: Callable[[], AppConfig] | None = None,
+) -> int:
     """文档命令先分流；预览/状态不创建 Wiki 设置或数据库连接。"""
-    db: Database | None = None
-    service: SourceImportService | None = None
-    try:
-        content = b""
-        if args.command != "status":
-            with Path(args.file).open("rb") as source_file:
-                content = source_file.read(MAX_FILE_BYTES + 1)
-        store = MemoryKnowledgeStore()
-        if args.command == "import":
-            if not config.postgres_dsn:
-                raise ValueError("没有数据库地址，不能执行导入")
-            db = Database(config.postgres_dsn, pool_max=2)
-            await db.connect()
-            await db.migrate()
-            store = PostgresKnowledgeStore(db)
-        service = SourceImportService(config, store)
-        if args.command == "preview":
-            result = service.preview(args.source, content)
-        elif args.command == "status":
-            result = service.status(args.source)
-        else:
-            result = await service.import_data(args.source, content)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-    except (ValueError, OSError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    finally:
-        if service is not None:
-            await service.aclose()
-        if db is not None:
-            await db.close()
+    async with AsyncExitStack() as stack:
+        try:
+            # 按后进先出顺序关闭服务、数据库，最后释放与采集共享的操作租约。
+            if args.command == "import":
+                stack.enter_context(acquire_source_operation(config, args.source))
+            content = b""
+            if args.command != "status":
+                with Path(args.file).open("rb") as source_file:
+                    content = source_file.read(MAX_FILE_BYTES + 1)
+            store: KnowledgeStore = MemoryKnowledgeStore()
+            if args.command == "import":
+                if not config.postgres_dsn:
+                    raise ValueError("没有数据库地址，不能执行导入")
+                db = Database(config.postgres_dsn, pool_max=2)
+                stack.push_async_callback(db.close)
+                await db.connect()
+                await db.migrate()
+                store = PostgresKnowledgeStore(db)
+            service = SourceImportService(config, store, config_provider=config_provider)
+            stack.push_async_callback(service.aclose)
+            if args.command == "status":
+                result = service.status(args.source)
+            elif args.command == "preview":
+                result = service.preview(args.source, content)
+            else:
+                result = await service.import_data(args.source, content)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        except (ValueError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -407,6 +415,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.source:
             print("标准资料命令必须指定 --source <id>", file=sys.stderr)
             return 2
+        if args.command == "import":
+            return asyncio.run(
+                _source_command(args, config, config_provider=lambda: load_config(args.config_dir))
+            )
         return asyncio.run(_source_command(args, config))
     if args.source:
         print("--source 只适用于 preview/import/status；Wiki 命令请用 --wiki", file=sys.stderr)

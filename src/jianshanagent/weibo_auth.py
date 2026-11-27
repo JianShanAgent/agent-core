@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -150,6 +151,39 @@ class WeiboCredentialStore:
         if not isinstance(data, dict) or data.get("format") != 1:
             return None
         return data
+
+    def read_for_collection(self) -> list[dict[str, Any]]:
+        """仅供服务端只读采集使用；返回副本，不代表会话已通过远端身份验证。
+
+        沿用私有存储的大小、域、过期和分区限制，不读取任何浏览器配置。
+        调用方不得序列化返回值至状态、日志或 API。
+        """
+        data: Any = None
+        try:
+            if self.path.parent.is_symlink() or self.path.is_symlink():
+                raise ValueError
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(self.path, flags)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_size > _MAX_COOKIE_FILE
+                    or (sys.platform != "win32" and info.st_mode & 0o077)
+                ):
+                    raise ValueError
+                raw = stream.read(_MAX_COOKIE_FILE + 1)
+                if len(raw) > _MAX_COOKIE_FILE:
+                    raise ValueError
+                data = json.loads(raw)
+        except (OSError, ValueError, RecursionError):
+            raise ValueError("微博服务端会话不可用，请重新同步登录") from None
+        if not isinstance(data, dict) or data.get("format") != 1:
+            raise ValueError("微博服务端会话不可用，请重新同步登录")
+        cookies = _filtered_cookies(data.get("cookies"))
+        if not _has_sub(cookies):
+            raise ValueError("微博服务端会话不可用，请重新同步登录")
+        return cookies
 
     def status(self) -> dict[str, Any]:
         data = self._read()

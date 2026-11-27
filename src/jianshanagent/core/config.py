@@ -856,6 +856,9 @@ def write_source_instances(config: AppConfig, items: Sequence[dict[str, Any]]) -
     listed = list(items)
     validated = document_source_instances(listed, wiki_ids={entry.id for entry in config.wikis})
     next_platforms = {source.id: source.platform.id for source in validated}
+    next_sources = {source.id: source for source in validated}
+    from jianshanagent.weibo_collector_config import validate_weibo_history
+
     for source in config.source_instances:
         if source.is_wiki:
             continue
@@ -863,7 +866,17 @@ def write_source_instances(config: AppConfig, items: Sequence[dict[str, Any]]) -
             raise ValueError(f"来源「{source.id}」不能删除登记，请设 mounted: false 停用")
         if next_platforms[source.id] != source.platform.id:
             raise ValueError(f"来源「{source.id}」不能更换平台或复用存储命名空间")
-    edited = {**config.get(SOURCE_FILE), SOURCE_INSTANCES: [dict(item) for item in listed]}
+        old_collector = source.raw.get("collector")
+        new_collector = next_sources[source.id].raw.get("collector")
+        if old_collector is not None and (
+            new_collector is None or old_collector["uid"] != new_collector["uid"]
+        ):
+            raise ValueError("已绑定的微博来源不能移除或更换 UID，请关闭定时或新建来源")
+    for source in validated:
+        collector = source.raw.get("collector")
+        if collector is not None:
+            validate_weibo_history(config, source.id, collector["uid"])
+    edited = {**config.get(SOURCE_FILE), SOURCE_INSTANCES: [source.raw for source in validated]}
     override = diff_overrides(config.base_files[SOURCE_FILE], edited)
     if override:
         _write_override_file(path, SOURCE_FILE, override)

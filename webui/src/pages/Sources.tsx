@@ -1,5 +1,5 @@
-// 资料来源：列出全部来源（Wiki + 微博），微博支持创建、导入、停用/恢复。
-// Wiki 来源展示简要信息并跳转 /wikis；微博来源完整管理闭环。
+// 资料来源：Wiki 管理入口、文档导入，以及微博目标配置和 worker 采集控制。
+// 登录会话、目标作者与管理员指定的来源身份相互独立。
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -37,7 +37,7 @@ import { SimpleSelect } from "@/components/ui/select";
 import { Hint, Pre, Skeleton, Spinner } from "@/components/ui/misc";
 import { api, ApiError } from "@/lib/api";
 import { formatAgo } from "@/lib/format";
-import type { ImportJob, ImportPreview, ImportState, ImportStatus, SourceInfo, WeiboSessionStatus } from "@/lib/types";
+import type { CollectorStatus, ImportJob, ImportPreview, ImportState, ImportStatus, SourceInfo, WeiboCollectorConfig, WeiboSessionStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** 来源 ID 格式：小写字母开头，只含小写字母/数字/下划线，1-32 位 */
@@ -152,6 +152,92 @@ function PreviewStats({ data }: { data: ImportPreview }) {
   );
 }
 
+const DEFAULT_COLLECTOR: WeiboCollectorConfig = {
+  uid: "", enabled: false, initial_days: 30, overlap_days: 7,
+  max_posts: 200, interval_seconds: 1800, include_reposts: true,
+};
+
+const COLLECTOR_NUMBER_FIELDS = [
+  { key: "initial_days", label: "首次回溯（天）", min: 1, max: 365 },
+  { key: "overlap_days", label: "增量回扫（天）", min: 1, max: 30 },
+  { key: "max_posts", label: "每轮最多帖子", min: 20, max: 500 },
+  { key: "interval_seconds", label: "更新周期（秒）", min: 900, max: 86400 },
+] as const;
+
+function collectorProblem(config: WeiboCollectorConfig): string {
+  if (!config.uid.trim()) return config.enabled ? "开启定时前请填写目标主页或 UID" : "";
+  for (const { key, label, min, max } of COLLECTOR_NUMBER_FIELDS) {
+    if (!Number.isInteger(config[key]) || config[key] < min || config[key] > max) {
+      return `${label}需为 ${min}–${max} 之间的整数`;
+    }
+  }
+  return "";
+}
+
+function confirmSchedule(config: WeiboCollectorConfig, previouslyEnabled = false): boolean {
+  return !config.enabled || previouslyEnabled || window.confirm(
+    "开启定时后会自动启动首轮采集，并按更新周期继续运行。确认保存并开启？",
+  );
+}
+
+function CollectorFields({ value, onChange, disabled, uidLocked = false }: {
+  value: WeiboCollectorConfig;
+  onChange: (value: WeiboCollectorConfig) => void;
+  disabled: boolean;
+  uidLocked?: boolean;
+}) {
+  const problem = collectorProblem(value);
+  return (
+    <fieldset disabled={disabled} className="flex flex-col gap-3 rounded-lg border p-3">
+      <legend className="px-1 text-sm font-medium">微博公开目标账号</legend>
+      <label className="flex flex-col gap-1.5 text-sm">
+        目标主页或 UID
+        <Input
+          value={value.uid}
+          placeholder="https://weibo.com/u/5896401674 或数字 UID"
+          readOnly={uidLocked}
+          disabled={disabled || uidLocked}
+          onChange={(e) => onChange({ ...value, uid: e.target.value })}
+        />
+      </label>
+      <p className="text-muted-foreground text-xs leading-relaxed">
+        {uidLocked
+          ? "此来源已绑定目标，不能更换 UID。请停用旧来源，再新建来源采集其他作者，避免混合历史资料。"
+          : "仅接受数字 UID 或微博官方 /u/UID 主页，保存时由服务端规范化；留空可仅用 JSONL 导入。已有资料首次绑定会校验作者归属。"}
+        登录会话不是采集目标；来源身份由管理员选择，不按名称或登录身份推断。
+      </p>
+      <div className="grid grid-cols-2 gap-3">
+        {COLLECTOR_NUMBER_FIELDS.map(({ key, label, min, max }) => (
+          <label key={key} className="flex flex-col gap-1.5 text-xs">
+            {label}
+            <Input type="number" min={min} max={max} step={1}
+              value={Number.isFinite(value[key]) ? value[key] : ""}
+              onChange={(e) => onChange({ ...value, [key]: e.target.value === "" ? NaN : Number(e.target.value) })}
+            />
+            <span className="text-muted-foreground">{min}–{max}</span>
+          </label>
+        ))}
+      </div>
+      <label className="flex items-center justify-between gap-3 text-sm">
+        包含该账号公开转发
+        <Switch checked={value.include_reposts} disabled={disabled}
+          onCheckedChange={(include_reposts) => onChange({ ...value, include_reposts })} />
+      </label>
+      <label className="flex items-center justify-between gap-3 text-sm">
+        开启定时采集
+        <Switch checked={value.enabled} disabled={disabled}
+          onCheckedChange={(enabled) => onChange({ ...value, enabled })} />
+      </label>
+      <p className={cn("text-xs leading-relaxed", value.enabled ? "text-warning" : "text-muted-foreground")}>
+        {value.enabled
+          ? "保存开启定时后会自动启动首轮；达到单轮数量/时间上限会保留断点，不代表完整历史。"
+          : "定时已暂停；配置目标后仍可手动立即采集。参与回答的挂载开关与定时开关独立。"}
+      </p>
+      {problem ? <p role="alert" className="text-destructive text-xs">{problem}</p> : null}
+    </fieldset>
+  );
+}
+
 function CreateSourceDialog({
   open,
   takenIds,
@@ -163,14 +249,15 @@ function CreateSourceDialog({
   takenIds: string[];
   busy: boolean;
   onClose: () => void;
-  onCreate: (id: string, label: string, role: SourceInfo["role"]) => void;
+  onCreate: (id: string, label: string, role: SourceInfo["role"], collector: WeiboCollectorConfig | null) => void;
 }) {
   const [id, setId] = useState("");
   const [label, setLabel] = useState("");
   const [role, setRole] = useState<SourceInfo["role"]>("unknown");
+  const [collector, setCollector] = useState<WeiboCollectorConfig>({ ...DEFAULT_COLLECTOR });
 
   useEffect(() => {
-    if (open) { setId(""); setLabel(""); setRole("unknown"); }
+    if (open) { setId(""); setLabel(""); setRole("unknown"); setCollector({ ...DEFAULT_COLLECTOR }); }
   }, [open]);
 
   const idProblem = !id
@@ -183,11 +270,11 @@ function CreateSourceDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) onClose(); }}>
-      <DialogContent>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>新建微博来源</DialogTitle>
           <DialogDescription>
-            新建后可上传标准资料 JSONL 进行导入。来源 ID 建好后不要改，它是知识库的命名空间。
+            为目标作者配置公开帖子采集，默认仅手动；也可继续使用标准资料 JSONL 导入。来源 ID 建好后不能更改。
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
@@ -234,13 +321,16 @@ function CreateSourceDialog({
               影响回答里标出处的说法；不确定可先选「身份未知」。
             </p>
           </div>
+          <CollectorFields value={collector} onChange={setCollector} disabled={busy} />
         </div>
         <DialogFooter>
           <Button variant="outline" disabled={busy} onClick={onClose}>取消</Button>
           <Button
             loading={busy}
-            disabled={!id || !!idProblem || !label.trim()}
-            onClick={() => onCreate(id, label.trim(), role)}
+            disabled={!id || !!idProblem || !label.trim() || !!collectorProblem(collector)}
+            onClick={() => {
+              if (confirmSchedule(collector)) onCreate(id, label.trim(), role, collector.uid.trim() ? { ...collector, uid: collector.uid.trim() } : null);
+            }}
           >
             创建
           </Button>
@@ -561,15 +651,171 @@ function ImportDialog({
   );
 }
 
-/** 采集器状态说明行（只显示文字，不提供交互按钮） */
-function CollectorLine({ collectorStatus }: { collectorStatus: string }) {
-  if (collectorStatus === "wiki_managed") return null; // Wiki 自己管，不在这里显示
-  // not_configured 或其他文档来源状态
+const COLLECTOR_STATES: Record<string, { label: string; tone: "muted" | "info" | "success" | "danger" | "warning" }> = {
+  not_configured: { label: "未配置目标", tone: "muted" },
+  paused: { label: "定时暂停", tone: "muted" },
+  idle: { label: "等待采集", tone: "muted" },
+  queued: { label: "已排队", tone: "info" },
+  fetching: { label: "采集中", tone: "info" },
+  collecting: { label: "采集中", tone: "info" },
+  importing: { label: "导入中", tone: "info" },
+  committing: { label: "提交中", tone: "info" },
+  stopping: { label: "正在停止", tone: "warning" },
+  completed: { label: "采集完成", tone: "success" },
+  failed: { label: "采集失败", tone: "danger" },
+  cancelled: { label: "本次已取消", tone: "muted" },
+  interrupted: { label: "采集已中断", tone: "warning" },
+  needs_login: { label: "需要重新同步登录", tone: "warning" },
+  limited: { label: "采集范围受限", tone: "warning" },
+};
+
+const COLLECTION_PHASE_LABELS: Record<string, string> = {
+  queued: "等待后台执行", fetching: "获取公开帖子", collecting: "获取公开帖子",
+  normalizing: "规范化帖子", validating: "校验资料", embedding: "生成向量",
+  importing: "增量导入", committing: "安全提交", stopping: "安全停止",
+  completed: "已结束", failed: "已结束", cancelled: "已取消",
+};
+
+function collectionIsActive(state: string): boolean {
+  return ["queued", "fetching", "collecting", "importing", "committing", "stopping"].includes(state);
+}
+
+function collectionTime(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const date = new Date(typeof value === "number" ? value * 1000 : value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+/** 独立轮询当前任务；取消始终绑定点击时的 job_id，不重试取消新任务。 */
+function CollectorLine({ source }: { source: SourceInfo }) {
+  const client = useQueryClient();
+  const key = ["source-collector", source.id];
+  const query = useQuery({
+    queryKey: key,
+    queryFn: () => api.sourceCollector(source.id),
+    initialData: source.collection ?? undefined,
+    retry: false,
+    refetchInterval: (current) => {
+      const error = current.state.error;
+      if (error instanceof ApiError && [400, 403, 404, 409].includes(error.status)) return false;
+      return collectionIsActive(current.state.data?.state ?? source.collector_status) ? 2500 : 30_000;
+    },
+  });
+  const status = query.data ?? source.collection;
+  const state = status?.state ?? source.collector_status;
+  const knownState = Object.hasOwn(COLLECTOR_STATES, state);
+  const presentation = knownState ? COLLECTOR_STATES[state] : { label: "未知状态，先刷新确认", tone: "warning" as const };
+  const active = collectionIsActive(state);
+  const committing = state === "committing" || status?.phase === "committing";
+  const configured = !!source.collector;
+  const imported = !!source.import_status && importIsActive(source.import_status.state);
+  const refresh = () => {
+    void client.invalidateQueries({ queryKey: key });
+    void client.invalidateQueries({ queryKey: ["sources"] });
+  };
+  const saveStatus = (value: CollectorStatus) => {
+    client.setQueryData(key, value);
+    void client.invalidateQueries({ queryKey: ["sources"] });
+  };
+  const collect = useMutation({
+    mutationFn: () => api.collectSource(source.id),
+    retry: false,
+    onMutate: () => client.cancelQueries({ queryKey: key }),
+    onSuccess: async (value) => {
+      await client.cancelQueries({ queryKey: key });
+      saveStatus(value);
+      toast.message("采集请求已提交", { description: "由后台采集进程执行，请关注当前任务状态。" });
+    },
+    onError: (error: Error) => {
+      toast.error("未能启动采集", { description: error.message });
+      refresh();
+    },
+    onSettled: () => void client.invalidateQueries({ queryKey: key }),
+  });
+  const cancel = useMutation({
+    mutationFn: (jobId: string) => api.cancelSourceCollection(source.id, jobId),
+    retry: false,
+    onMutate: () => client.cancelQueries({ queryKey: key }),
+    onSuccess: async (value, jobId) => {
+      await client.cancelQueries({ queryKey: key });
+      if (value.job_id !== jobId) {
+        toast.warning("任务已变化，未继续停止操作，请确认最新任务");
+        refresh();
+        return;
+      }
+      saveStatus(value);
+      // 接受停止请求不代表已经取消，更不能当作采集成功。
+      toast.message(value.state === "cancelled" ? "本次任务已取消" : "停止请求已提交，请等待任务安全结束");
+    },
+    onError: (error: Error) => {
+      toast.error(error instanceof ApiError && error.status === 409
+        ? "任务已变化或进入提交阶段，停止请求未继续；请刷新确认"
+        : "停止请求失败", { description: error.message });
+      refresh(); // 只读取最新状态；绝不自动用新 job_id 再次取消。
+    },
+    onSettled: () => void client.invalidateQueries({ queryKey: key }),
+  });
+  const busy = collect.isPending || cancel.isPending;
+  const canStart = configured && source.mounted && !active && !committing && !imported && knownState
+    && !query.isError && !query.isPending;
+  const retry = ["failed", "interrupted", "cancelled", "needs_login", "limited"].includes(state);
+  // 仅从规范数字 UID 构造目标链接，不渲染用户提交的任意 URL。
+  const uid = source.collector?.uid ?? status?.uid;
+  const profileUrl = uid && /^\d+$/.test(uid) ? `https://weibo.com/u/${uid}` : null;
   return (
-    <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
-      <span className="inline-block size-1.5 rounded-full bg-muted-foreground/50 shrink-0" />
-      采集未配置，当前支持标准资料导入。
-      {/* 预留：后续微博登录状态/二维码区块插入此处，参考 BWiki 登录行 */}
+    <div className="flex flex-col gap-2 rounded-lg bg-muted/40 p-3 text-xs" aria-live="polite">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={presentation.tone}>
+          {active ? <Loader2 className="mr-1 size-3 animate-spin" /> : null}{presentation.label}
+        </Badge>
+        <span className="text-muted-foreground">
+          {configured ? (source.collector?.enabled ? "定时开启" : "定时暂停 · 可手动采集") : "请在采集设置中填写目标；仍可导入 JSONL"}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <Button size="xs" variant="outline" disabled={busy || !canStart} loading={collect.isPending}
+            onClick={() => collect.mutate()}>{retry ? "重试采集" : "立即采集"}</Button>
+          {active ? (
+            <Button size="xs" variant="outline" loading={cancel.isPending}
+              disabled={busy || committing || state === "stopping" || !status?.job_id}
+              onClick={() => {
+                const jobId = status?.job_id;
+                if (jobId && !committing && window.confirm("停止当前这次采集？未提交内容不会计作成功；定时开关不会改变。")) cancel.mutate(jobId);
+              }}>停止本次</Button>
+          ) : null}
+          <Button size="xs" variant="ghost" disabled={query.isFetching || busy}
+            onClick={() => void query.refetch()} aria-label="刷新采集状态"><RefreshCw className="size-3.5" /></Button>
+        </div>
+      </div>
+      {profileUrl ? (
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex w-fit items-center gap-1 underline underline-offset-2">
+          目标 UID {uid}<ExternalLink className="size-3" />
+        </a>
+      ) : null}
+      {source.collector ? <p className="text-muted-foreground">
+        首轮 {source.collector.initial_days} 天 · 回扫 {source.collector.overlap_days} 天 · 每轮最多 {source.collector.max_posts} 条 · 周期 {source.collector.interval_seconds} 秒 · {source.collector.include_reposts ? "含公开转发" : "仅原创"}
+      </p> : null}
+      {status ? <>
+        {status.phase ? <p className="text-muted-foreground">阶段：{Object.hasOwn(COLLECTION_PHASE_LABELS, status.phase) ? COLLECTION_PHASE_LABELS[status.phase] : "未知阶段，请以任务状态与说明为准"}</p> : null}
+        <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1">
+          <span>页数 {status.pages ?? 0}</span><span>获取 {status.fetched ?? 0}</span><span>接纳 {status.accepted ?? 0}</span>
+          <span>新增 {status.new ?? 0}</span><span>更新 {status.updated ?? 0}</span><span>未变 {status.unchanged ?? 0}</span>
+        </div>
+        <div className="text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+          <span>本次开始 {collectionTime(status.started_at)}</span>
+          <span>本次结束 {collectionTime(status.finished_at)}</span>
+          <span>最近成功 {collectionTime(status.last_success_at)}</span>
+          <span>下次运行 {collectionTime(status.next_run_at)}</span>
+        </div>
+        {status.message ? <p>{status.message}</p> : null}
+        {status.limited || state === "limited" ? <p className="text-warning">本轮范围或容量受限，不代表完整历史；保留断点与已有资料，请检查状态说明及限额后继续。</p> : null}
+        {state === "needs_login" || status.error_code === "authentication_required" ? (
+          <p className="text-warning">请在本机重新同步微博登录会话，再刷新状态并重试。共享登录身份与目标作者独立，无需更改目标 UID。</p>
+        ) : null}
+        {status.error_code ? <p className="text-muted-foreground">错误代码：{status.error_code}</p> : null}
+      </> : null}
+      {committing ? <p className="text-warning">正在安全提交，暂不能停止；请等待最终状态，勿把尚未完成的提交当作取消成功。</p> : null}
+      {!source.mounted ? <p className="text-warning">来源未挂载：不参与回答且不会开始新采集；已有资料保留。恢复挂载与开启定时是两项独立设置。</p> : null}
+      {query.isError ? <p role="alert" className="text-destructive">采集状态读取失败：{query.error.message}。请刷新确认，当前不发起新任务。</p> : null}
     </div>
   );
 }
@@ -666,11 +912,11 @@ function WeiboSourceCard({
         <span className="text-sm font-semibold">{source.label}</span>
         <code className="font-mono text-xs text-muted-foreground">{source.id}</code>
         <Badge tone={ROLE_TONES[source.role]}>{ROLE_LABELS[source.role]}</Badge>
-        <Badge tone="outline">微博</Badge>
+        <Badge tone="outline">{source.platform === "weibo" ? "微博" : source.platform}</Badge>
         {!source.mounted ? <Badge tone="warning">已停用</Badge> : null}
         <div className="ml-auto flex items-center gap-2">
           <Button variant="ghost" size="xs" onClick={onEdit} disabled={locked}>
-            编辑
+            {source.platform === "weibo" ? "采集设置" : "编辑"}
           </Button>
           <label className="flex items-center gap-1.5">
             <span className="text-muted-foreground text-xs">参与回答</span>
@@ -705,7 +951,7 @@ function WeiboSourceCard({
       )}
 
       {/* 采集器状态 */}
-      <CollectorLine collectorStatus={source.collector_status} />
+      {source.platform === "weibo" ? <CollectorLine source={source} /> : null}
 
       {/* 导入状态 */}
       <ImportStatusLine status={source.import_status} onOpenImport={onOpenImport} onRecover={onRecover} />
@@ -763,19 +1009,23 @@ function EditSourceDialog({
   source: SourceInfo | null;
   busy: boolean;
   onClose: () => void;
-  onSave: (id: string, label: string, role: SourceInfo["role"]) => void;
+  onSave: (id: string, label: string, role: SourceInfo["role"], collector?: WeiboCollectorConfig | null) => void;
 }) {
   const [label, setLabel] = useState("");
   const [role, setRole] = useState<SourceInfo["role"]>("unknown");
+  const [collector, setCollector] = useState<WeiboCollectorConfig>({ ...DEFAULT_COLLECTOR });
   useEffect(() => {
-    if (source) { setLabel(source.label); setRole(source.role); }
+    if (source) {
+      setLabel(source.label); setRole(source.role);
+      setCollector({ ...(source.collector ?? DEFAULT_COLLECTOR) });
+    }
   }, [source]);
   return (
     <Dialog open={source !== null} onOpenChange={(o) => { if (!o && !busy) onClose(); }}>
-      <DialogContent>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>编辑来源 · {source?.id}</DialogTitle>
-          <DialogDescription>修改显示名称和身份角色；ID 和平台不能更改。</DialogDescription>
+          <DialogTitle>{source?.platform === "weibo" ? "采集设置" : "编辑来源"} · {source?.id}</DialogTitle>
+          <DialogDescription>来源 ID 和平台不能更改；身份由管理员指定，与登录身份无关。运行中修改请先停止本次任务，提交阶段需等待结束。</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
@@ -802,13 +1052,22 @@ function EditSourceDialog({
               ]}
             />
           </div>
+          {source?.platform === "weibo" ? (
+            <CollectorFields value={collector} onChange={setCollector} disabled={busy} uidLocked={!!source.collector} />
+          ) : null}
         </div>
         <DialogFooter>
           <Button variant="outline" disabled={busy} onClick={onClose}>取消</Button>
           <Button
             loading={busy}
-            disabled={!label.trim()}
-            onClick={() => source && onSave(source.id, label.trim(), role)}
+            disabled={!label.trim() || (source?.platform === "weibo" && !!collectorProblem(collector))}
+            onClick={() => {
+              if (!source) return;
+              if (source.platform !== "weibo") { onSave(source.id, label.trim(), role); return; }
+              if (confirmSchedule(collector, source.collector?.enabled)) {
+                onSave(source.id, label.trim(), role, collector.uid.trim() ? { ...collector, uid: collector.uid.trim() } : null);
+              }
+            }}
           >
             保存
           </Button>
@@ -819,8 +1078,8 @@ function EditSourceDialog({
 }
 
 // ---- 微博平台共享采集会话登录卡片 ----
-// 注意：此处登录账户是采集账号，与帖子作者（source.role）无关。
-// 默认走官方 HTTP 微信扫码，不依赖服务器浏览器；本地保存不等于远端已验证。
+// 此处是访问会话，与目标 UID、管理员指定的 source.role 均无关。
+// 优先沿用本机同步；二维码仅是备用入口，valid=null 不代表失效。
 
 function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
   const [qrOpen, setQrOpen] = useState(false);
@@ -869,7 +1128,7 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
           loginIdRef.current = null;
           void refreshStatus();
           if (res.verified && res.valid === true) {
-            toast.success("微博登录已验证；资料采集仍未配置");
+            toast.success("微博登录已验证；采集目标请在各来源的「采集设置」中管理");
           } else if (res.method === "browser") {
             toast.success("会话已保存，采集可用性待验证");
           } else {
@@ -956,21 +1215,21 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
   const configured = status?.configured ?? false;
   const locallyUsable = status?.locally_usable ?? false;
   const sessionDescription = status?.valid === true
-    ? "微博登录已验证；资料采集仍未配置"
+    ? "微博登录已验证；采集目标请在各来源的「采集设置」中管理"
     : !configured
       ? "未配置采集会话"
       : locallyUsable
         ? "会话已保存，采集可用性待验证"
-        : "本地会话已失效或无法读取，请重新微信扫码";
+        : "本地登录会话不可读取，请在本机重新同步";
 
   return (
     <Card className="flex flex-col gap-0 overflow-hidden p-0">
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 py-3">
         <div>
-          <div className="text-sm font-semibold">微博采集账号（共享）</div>
+          <div className="text-sm font-semibold">微博登录会话（共享）</div>
           <div className="text-muted-foreground mt-0.5 max-w-2xl text-xs leading-relaxed">
-            所有微博来源共用同一个采集登录身份，与各来源帖子的作者无关。
-            当前采集尚未配置，本登录仅备用；不提供抓取按钮。
+            所有微博来源共用访问时的登录会话；被采集的目标作者与管理员指定的来源身份均独立配置。
+            本机同步的会话即使显示「待验证」也不代表失效，不会因此禁止采集。实际提示需要登录时，请在本机重新同步，再重试采集。
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -985,17 +1244,17 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
               清除本地会话
             </Button>
           ) : null}
-          <Hint text={loginUnavailable ? status?.message || "微信扫码登录组件暂不可用" : "微信扫码，通过官方 HTTP 接口，无需服务器浏览器"}>
+          <Hint text={loginUnavailable ? "备用二维码暂不可用；可继续使用本机同步的登录会话" : "备用二维码入口，服务器扫码可用性以实际验证为准；无需为采集重新扫码"}>
             <span>
               <Button
                 size="xs"
-                variant={configured ? "outline" : "default"}
+                variant="outline"
                 loading={qrBusy}
                 disabled={qrBusy || loginUnavailable || statusQuery.isPending}
                 onClick={() => void startQr()}
               >
                 <QrCode className="size-3.5" />
-                {configured ? "重新微信扫码" : "微信扫码登录"}
+                备用微信扫码
               </Button>
             </span>
           </Hint>
@@ -1047,7 +1306,7 @@ function PlatformLoginCard({ hasWeibo }: { hasWeibo: boolean }) {
           <DialogHeader>
             <DialogTitle>使用微信扫码登录微博</DialogTitle>
             <DialogDescription>
-              请本人用微信扫描官方二维码并确认，无需服务器浏览器。此登录身份与帖子作者无关；资料采集仍未配置。
+              这是备用登录入口，以服务端实际验证为准。此登录会话与目标作者无关；已有本机同步会话无需重新扫码。采集提示需要登录时优先在本机重新同步。
             </DialogDescription>
           </DialogHeader>
           {["expired", "error", "cancelled"].includes(qrState) ? (
@@ -1079,14 +1338,15 @@ export default function Sources() {
   const query = useQuery({
     queryKey: ["sources"],
     queryFn: api.sources,
-    // 有进行中导入时勤轮询
+    // 独立任务由 worker 执行，活跃时勤轮询；空闲也刷新以发现自动定时任务。
     refetchInterval: (current) => {
       const sources = current.state.data?.sources ?? [];
       return sources.some(
-        (s) => s.import_status && importIsActive(s.import_status.state),
+        (s) => (s.import_status && importIsActive(s.import_status.state))
+          || (s.platform === "weibo" && collectionIsActive(s.collection?.state ?? s.collector_status)),
       )
         ? 5_000
-        : false;
+        : 30_000;
     },
   });
 
@@ -1097,7 +1357,7 @@ export default function Sources() {
   const invalidate = () => void client.invalidateQueries({ queryKey: ["sources"] });
 
   const create = useMutation({
-    mutationFn: (body: { id: string; label: string; platform: string; mounted: boolean; role: SourceInfo["role"] }) =>
+    mutationFn: (body: { id: string; label: string; platform: string; mounted: boolean; role: SourceInfo["role"]; collector: WeiboCollectorConfig | null }) =>
       api.createSource(body),
     onSuccess: (res) => {
       setCreating(false);
@@ -1108,14 +1368,20 @@ export default function Sources() {
   });
 
   const update = useMutation({
-    mutationFn: (body: { id: string; label: string; role: SourceInfo["role"] }) =>
-      api.updateSource(body.id, { label: body.label, role: body.role }),
+    mutationFn: (body: { id: string; label: string; role: SourceInfo["role"]; collector?: WeiboCollectorConfig | null }) =>
+      api.updateSource(body.id, { label: body.label, role: body.role, ...(body.collector !== undefined ? { collector: body.collector } : {}) }),
     onSuccess: (res) => {
       setEditing(null);
       toast.success(`「${res.source.label}」已更新`);
+      void client.invalidateQueries({ queryKey: ["source-collector", res.source.id] });
       invalidate();
     },
-    onError: (e: Error) => toast.error("保存失败", { description: e.message }),
+    onError: (e: Error) => {
+      toast.error("保存失败", { description: e instanceof ApiError && e.status === 409
+        ? `${e.message}。若任务仍在运行，请先停止本次；提交中需等待结束，再刷新重试。已绑定目标不能换 UID，请停用旧来源并新建。`
+        : e.message });
+      invalidate();
+    },
   });
 
   const setMounted = useMutation({
@@ -1127,9 +1393,15 @@ export default function Sources() {
           ? `「${res.source.label}」已启用，参与回答`
           : `「${res.source.label}」已停用，资料保留，不参与回答`,
       );
+      void client.invalidateQueries({ queryKey: ["source-collector", res.source.id] });
       invalidate();
     },
-    onError: (e: Error) => toast.error("操作失败", { description: e.message }),
+    onError: (e: Error) => {
+      toast.error("挂载状态未更改", { description: e instanceof ApiError && e.status === 409
+        ? `${e.message}。请先停止本次采集；提交中需等待结束，再更改挂载。`
+        : e.message });
+      invalidate();
+    },
   });
 
   // recovery_required：用空批次触发恢复（后端校验空批并执行 journal 恢复）
@@ -1162,7 +1434,8 @@ export default function Sources() {
   const busy = create.isPending || update.isPending || setMounted.isPending || recover.isPending;
   const locked = busy || !data?.writable;
 
-  const weiboSources = data?.sources.filter((s) => s.driver === "documents") ?? [];
+  const weiboSources = data?.sources.filter((s) => s.platform === "weibo") ?? [];
+  const otherDocumentSources = data?.sources.filter((s) => s.driver === "documents" && s.platform !== "weibo") ?? [];
   const wikiSources = data?.sources.filter((s) => s.driver === "mediawiki") ?? [];
   const takenIds = data?.sources.map((s) => s.id) ?? [];
 
@@ -1224,7 +1497,18 @@ export default function Sources() {
             </div>
           )}
 
-          {/* 微博平台采集账号（所有微博来源共用，与帖子作者无关） */}
+          {otherDocumentSources.length > 0 ? <>
+            <div className="text-muted-foreground mt-3 px-1 text-xs font-medium">其他文档来源</div>
+            <div className="flex flex-col gap-2">
+              {otherDocumentSources.map((s) => (
+                <WeiboSourceCard key={s.id} source={s} locked={locked}
+                  onToggleMounted={(mounted) => setMounted.mutate({ id: s.id, label: s.label, mounted })}
+                  onOpenImport={() => setImporting(s)} onRecover={() => recover.mutate(s.id)} onEdit={() => setEditing(s)} />
+              ))}
+            </div>
+          </> : null}
+
+          {/* 微博共享访问会话与目标作者独立 */}
           <PlatformLoginCard hasWeibo={weiboSources.length > 0} />
 
           {/* Wiki 来源区块 */}
@@ -1278,8 +1562,8 @@ export default function Sources() {
         takenIds={takenIds}
         busy={create.isPending}
         onClose={() => setCreating(false)}
-        onCreate={(id, label, role) =>
-          create.mutate({ id, label, platform: "weibo", mounted: true, role })
+        onCreate={(id, label, role, collector) =>
+          create.mutate({ id, label, platform: "weibo", mounted: true, role, collector })
         }
       />
 
@@ -1293,7 +1577,7 @@ export default function Sources() {
         source={editing}
         busy={update.isPending}
         onClose={() => setEditing(null)}
-        onSave={(id, label, role) => update.mutate({ id, label, role })}
+        onSave={(id, label, role, collector) => update.mutate({ id, label, role, collector })}
       />
     </div>
   );

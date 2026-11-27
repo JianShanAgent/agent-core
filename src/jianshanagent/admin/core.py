@@ -393,7 +393,7 @@ def guard(admin: Admin) -> Any:
             if config_change:
                 async with admin.source_mutation_lock:
                     if admin.source_imports is not None and admin.source_imports.active():
-                        fail(409, "资料导入运行中，完成或取消后才能修改配置或重新装配")
+                        fail(409, "资料导入或采集运行中，请先停止任务再修改配置或重新装配")
                     return await handler(request)
             return await handler(request)
         except ApiError as exc:

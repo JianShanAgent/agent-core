@@ -25,10 +25,11 @@ from typing import Any
 
 from jianshanagent.core.config import AppConfig
 from jianshanagent.core.embedding import EmbeddingProvider, EmbeddingSettings
-from jianshanagent.core.sources import load_source_adapter, source_instance
+from jianshanagent.core.sources import SourceInstance, load_source_adapter, source_instance
 from jianshanagent.plugins.knowledge.chunker import ChunkStats, chunk_document
 from jianshanagent.plugins.knowledge.embed import VectorStore, embed_chunks, text_hash, verify_store
 from jianshanagent.plugins.knowledge.load import read_records
+from jianshanagent.plugins.knowledge.models import Document
 from jianshanagent.plugins.knowledge.settings import ChunkSettings, kb_root
 from jianshanagent.plugins.knowledge.store import KbChunk, KnowledgeStore, Record
 
@@ -44,6 +45,16 @@ Embedder = Callable[[EmbeddingProvider, Path, Path], Awaitable[float]]
 
 class SourceImportError(ValueError):
     """不含提供方凭据与原始接口报错的导入错误。"""
+
+
+class SourceImportPublishedError(SourceImportError):
+    """资料已发布，不能按导入失败或回滚处理。"""
+
+    published = True
+    public_message = "资料已发布，但状态记录待确认；请查询状态后重试"
+
+    def __init__(self) -> None:
+        super().__init__(self.public_message)
 
 
 CAPACITY_PUBLIC_MESSAGE = "来源资料超过安全容量或剩余磁盘预算，旧资料保持不变。"
@@ -207,28 +218,66 @@ class SourceImportService:
         embedder: Embedder | None = None,
         *,
         limits: ImportLimits | None = None,
+        config_provider: Callable[[], AppConfig] | None = None,
     ):
         self.config = config
         self.store = store
         self.embedder = embedder
         self.limits = limits if limits is not None else ImportLimits()
+        self._config_provider = config_provider
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._cancelled: set[str] = set()
         self._states: dict[str, dict[str, Any]] = {}
         self._closed = False
 
-    def _directory(self, source_id: str) -> Path:
-        source = source_instance(self.config, source_id)
+    def _directory(self, source_id: str, *, config: AppConfig | None = None) -> Path:
+        if config is None:
+            config = self.config
+        source = source_instance(config, source_id)
         if source.driver != "documents":
             raise SourceImportError("该来源不是标准文档导入来源")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", source_id):
             raise SourceImportError("来源 ID 不能作为安全命名空间")
-        root = kb_root(self.config)
+        root = kb_root(config)
         directory = root / source_id / "source-import"
         for item in (root / source_id, directory, directory / "generations"):
             if item.is_symlink():
                 raise SourceImportError("来源目录不能是符号链接")
         return directory
+
+    @staticmethod
+    def _embedding_provider(config: AppConfig) -> EmbeddingProvider | None:
+        embedding = EmbeddingSettings.from_config(config)
+        return embedding.provider() if embedding is not None else None
+
+    def _check_commit_config(
+        self, source: SourceInstance, directory: Path, provider: EmbeddingProvider | None
+    ) -> None:
+        try:
+            config = self._config_provider() if self._config_provider is not None else self.config
+            current = self._embedding_provider(config)
+            if (
+                source_instance(config, source.id) == source
+                and self._directory(source.id, config=config) == directory
+                and (current.fingerprint if current is not None else None)
+                == (provider.fingerprint if provider is not None else None)
+            ):
+                return
+        except Exception:
+            # A failed reload is unsafe too; don't expose raw configuration errors.
+            pass
+        raise SourceImportError("导入期间来源或嵌入配置已变化或不可用，请按新配置重试")
+
+    def _check_authors(
+        self, source_id: str, rows: list[dict[str, Any]], documents: list[Document]
+    ) -> None:
+        collector = source_instance(self.config, source_id).raw.get("collector")
+        if collector is not None:
+            uid = collector["uid"]
+            for index, (row, doc) in enumerate(zip(rows, documents, strict=True), 1):
+                # The unmodified row is persisted and must pass the same ownership check later.
+                if row.get("author_id") != uid or doc.meta.get("author_id") != uid:
+                    raise SourceImportError(f"第 {index} 条：作者 ID 必须与来源绑定的微博 UID 一致")
 
     @staticmethod
     def _generation(directory: Path, value: str) -> Path:
@@ -243,7 +292,7 @@ class SourceImportService:
         path = directory / "current.json"
         if not path.exists():
             return None
-        generation = _read_json(path)["generation"]
+        generation: str = _read_json(path)["generation"]
         self._generation(directory, generation)
         return generation
 
@@ -262,7 +311,7 @@ class SourceImportService:
     def _snapshot(self, directory: Path, generation: str | None) -> dict[str, Any] | None:
         if generation is None:
             return None
-        value = _read_json(
+        value: dict[str, Any] = _read_json(
             self._guard_snapshot(directory, generation), self.limits.max_snapshot_bytes
         )
         if len(value["rows"]) > self.limits.max_documents:
@@ -279,6 +328,7 @@ class SourceImportService:
             return None
         self._guard_snapshot(directory, generation)
         path = self._generation(directory, generation) / "documents.json"
+        value: dict[str, Any]
         if path.exists():
             if path.stat().st_size * 16 > self.limits.max_working_bytes:
                 raise SourceImportCapacityError("metadata_read_memory")
@@ -298,7 +348,9 @@ class SourceImportService:
             raise SourceImportCapacityError("chunks")
         return value
 
-    def _capacity(self, rows: list, chunks: list, dimensions: int) -> dict[str, int]:
+    def _capacity(
+        self, rows: list[dict[str, Any]], chunks: list[dict[str, Any]], dimensions: int
+    ) -> dict[str, int]:
         limits = self.limits
         if type(dimensions) is not int or dimensions <= 0:
             raise SourceImportCapacityError("vector_bytes")
@@ -334,7 +386,9 @@ class SourceImportService:
             + len(chunks) * 512,
         }
 
-    def _candidate(self, source_id: str, content: str | bytes) -> tuple[dict[str, Any], list, list]:
+    def _candidate(
+        self, source_id: str, content: str | bytes
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         directory = self._directory(source_id)
         if (directory / "journal.json").exists():
             raise SourceImportError("上次导入待恢复；请重新确认导入以恢复后重试")
@@ -346,6 +400,7 @@ class SourceImportService:
             incoming = adapter.normalize(rows)
         except ValueError as exc:
             raise SourceImportError(str(exc)) from None
+        self._check_authors(source_id, rows, incoming)
         previous = self._metadata(directory, self._current(directory))
         old_rows = previous["rows"] if previous else []
         old_docs = adapter.normalize(old_rows)
@@ -405,29 +460,57 @@ class SourceImportService:
         """同步、零写入/零嵌入；后台应使用 asyncio.to_thread 调用。"""
         return self._candidate(source_id, content)[0]
 
+    @staticmethod
+    def _import_lock_held(directory: Path) -> bool:
+        try:
+            fd = os.open(
+                directory / "import.lock",
+                os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError:
+            return False
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise SourceImportError("导入锁必须是普通文件")
+            try:
+                # Only an exclusive holder signals an import; other readers do not.
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            return False
+        finally:
+            os.close(fd)
+
     def active(self, source_id: str) -> bool:
-        return source_id in self._tasks
+        return source_id in self._tasks or self._import_lock_held(self._directory(source_id))
 
     def status(self, source_id: str) -> dict[str, Any] | None:
         directory = self._directory(source_id)
-        state = self._states.get(source_id)
-        if state is None and (directory / "status.json").exists():
+        # Probe before reading state so a finishing worker isn't mistaken for an interrupted one.
+        active = source_id in self._tasks or self._import_lock_held(directory)
+        try:
             state = _read_json(directory / "status.json")
-        if (directory / "journal.json").exists() and not self.active(source_id):
-            return {
-                **(state or {}),
-                "source_id": source_id,
-                "state": "recovery_required",
-                "retryable": True,
-            }
-        if state and state.get("state") in _RUNNING and not self.active(source_id):
+        except FileNotFoundError:
+            state = None
+        if active:
+            return dict(state) if state else None
+        journal = (directory / "journal.json").exists()
+        running = state and state.get("state") in _RUNNING
+        if (journal or running) and not self._import_lock_held(directory):
+            if journal:
+                return {
+                    **(state or {}),
+                    "source_id": source_id,
+                    "state": "recovery_required",
+                    "retryable": True,
+                }
             if state.get("generation") and state["generation"] == self._current(directory):
                 return {**state, "state": "completed", "published": True}
             return {**state, "state": "interrupted", "retryable": True}
         return dict(state) if state else None
 
     def cancel(self, source_id: str) -> bool:
-        if not self.active(source_id) or self._states[source_id].get("state") == "committing":
+        if source_id not in self._tasks or self._states[source_id].get("state") == "committing":
             return False
         self._cancelled.add(source_id)
         return True
@@ -477,7 +560,11 @@ class SourceImportService:
         return sum(SourceImportService._tree_bytes(entry) for entry in path.iterdir())
 
     def _check_disk(
-        self, directory: Path, capacity: dict, previous_id: str | None, remaining: bool = False
+        self,
+        directory: Path,
+        capacity: dict[str, int],
+        previous_id: str | None,
+        remaining: bool = False,
     ) -> None:
         rollback = self._tree_bytes(self._generation(directory, previous_id)) if previous_id else 0
         required = self.limits.disk_safety_bytes + rollback
@@ -528,7 +615,11 @@ class SourceImportService:
         return {"cleanup_pending": pending}
 
     def _prepare_stage(
-        self, stage: Path, chunks: list, previous: dict | None, provider: EmbeddingProvider
+        self,
+        stage: Path,
+        chunks: list[dict[str, Any]],
+        previous: dict[str, Any] | None,
+        provider: EmbeddingProvider,
     ) -> None:
         stage.mkdir(parents=True)
         old = {
@@ -559,7 +650,12 @@ class SourceImportService:
             vectors.close()
 
     def _write_snapshot(
-        self, stage: Path, rows: list, chunks: list, provider: EmbeddingProvider, source_id: str
+        self,
+        stage: Path,
+        rows: list[dict[str, Any]],
+        chunks: list[dict[str, Any]],
+        provider: EmbeddingProvider,
+        source_id: str,
     ) -> list[Record]:
         records = list(read_records(stage / "chunks.jsonl", stage / "vectors", provider, source_id))
         if not records or any(vector is None for _, vector in records):
@@ -616,18 +712,28 @@ class SourceImportService:
         incoming = parse_jsonl(content)
         if len(incoming) > self.limits.max_documents:
             raise SourceImportCapacityError("documents")
-        load_source_adapter(self.config, source_id).normalize(incoming)
+        documents = load_source_adapter(self.config, source_id).normalize(incoming)
+        self._check_authors(source_id, incoming, documents)
 
     async def import_data(self, source_id: str, content: str | bytes) -> dict[str, Any]:
         if self._closed:
             raise SourceImportError("导入服务已关闭")
-        if self.active(source_id):
+        if source_id in self._tasks:
             raise SourceImportError("该来源已有导入任务")
         directory = self._directory(source_id)
         source = source_instance(self.config, source_id)
         if not source.mounted:
             raise SourceImportError("来源已停用，请恢复后导入")
+        # Capture the initial fingerprint before any await, but don't let an invalid
+        # embedding configuration skip recovery of a previous transaction.
+        startup_embedding: EmbeddingProvider | Exception | None
+        try:
+            startup_embedding = self._embedding_provider(self.config)
+        except Exception as exc:
+            startup_embedding = exc
         await _blocking(self._validate_input, source_id, content)
+        if source_id in self._tasks:
+            raise SourceImportError("该来源已有导入任务")
         directory.mkdir(parents=True, exist_ok=True)
         lock = (directory / "import.lock").open("ab")
         try:
@@ -646,10 +752,16 @@ class SourceImportService:
                 await self._restore(directory, source_id)
                 await _blocking(self._gc, directory)
             self._state(directory, source_id, "validating")
+            if isinstance(startup_embedding, Exception):
+                raise startup_embedding
+            provider = startup_embedding
             report, rows, chunks = await _blocking(self._candidate, source_id, content)
             self._check_cancelled(source_id)
             if report["empty"] or (not report["new"] and not report["updated"]):
+                await self.store.info()
                 cleanup = await _blocking(self._gc, directory)
+                await _blocking(self._check_commit_config, source, directory, provider)
+                self._check_cancelled(source_id)
                 return self._state(
                     directory, source_id, "completed", **report, noop=True, **cleanup
                 )
@@ -659,10 +771,8 @@ class SourceImportService:
                 info = (await self.store.info()).wikis.get(source_id)
                 if info and info.chunks:
                     raise SourceImportError("该来源已有不受此导入器管理的数据，拒绝覆盖")
-            embedding = EmbeddingSettings.from_config(self.config)
-            if embedding is None:
+            if provider is None:
                 raise SourceImportError("嵌入未启用，不能将纯关键词导入伪报成功")
-            provider = embedding.provider()
             if previous_meta and previous_meta["fingerprint"] != provider.fingerprint:
                 raise SourceImportError("嵌入指纹已变化，拒绝重嵌或混合旧来源向量")
             await _blocking(self._check_disk, directory, report["capacity"], previous_id)
@@ -683,15 +793,8 @@ class SourceImportService:
                 self._write_snapshot, stage, rows, chunks, provider, source_id
             )
             self._check_cancelled(source_id)
-            current_embedding = EmbeddingSettings.from_config(self.config)
-            if (
-                source_instance(self.config, source_id) != source
-                or self._directory(source_id) != directory
-                or current_embedding is None
-                or current_embedding.provider().fingerprint != provider.fingerprint
-            ):
-                raise SourceImportError("导入期间来源或嵌入配置已变化，请按新配置重试")
             await _blocking(self._check_disk, directory, report["capacity"], previous_id, True)
+            await _blocking(self._check_commit_config, source, directory, provider)
             self._check_cancelled(source_id)
             self._state(directory, source_id, "committing", generation=generation)
             _atomic_json(
@@ -749,7 +852,7 @@ class SourceImportService:
                     )
                     raise SourceImportError("提交恢复未完成，需要重试恢复") from None
             if published:
-                raise SourceImportError("资料已发布，但状态记录失败；请查询状态后重试") from None
+                raise SourceImportPublishedError() from None
             cleanup = await _blocking(self._gc, directory)
             capacity_error = exc if isinstance(exc, SourceImportCapacityError) else None
             self._state(
