@@ -157,6 +157,15 @@ const DEFAULT_COLLECTOR: WeiboCollectorConfig = {
   max_posts: 200, interval_seconds: 1800, include_reposts: true,
 };
 
+const NEW_COLLECTOR: WeiboCollectorConfig = { ...DEFAULT_COLLECTOR, discussion_scope: "target_self" };
+
+export function discussionScopeText(scope: WeiboCollectorConfig["discussion_scope"], uid?: string | null): string {
+  const target = uid && /^\d+$/.test(uid) ? ` UID ${uid} ` : "目标 UID ";
+  return scope === "target_self"
+    ? `仅${target}账号自评及其自评线程自回复，不收其他用户`
+    : "全部公开评论及回复（包含其他用户；旧范围）";
+}
+
 const COLLECTOR_NUMBER_FIELDS = [
   { key: "initial_days", label: "首次回溯（天）", min: 1, max: 365 },
   { key: "overlap_days", label: "增量回扫（天）", min: 1, max: 30 },
@@ -166,6 +175,7 @@ const COLLECTOR_NUMBER_FIELDS = [
 
 export function collectorProblem(config: WeiboCollectorConfig, sourceId?: string): string {
   if (!config.uid.trim()) return config.enabled || config.mode === "full_then_incremental" || config.include_comments || config.include_replies ? "请先填写目标主页或 UID" : "";
+  if (config.discussion_scope !== undefined && !["all_public", "target_self"].includes(config.discussion_scope)) return "请选择有效的讨论作者范围";
   if (config.include_replies && !config.include_comments) return "采集楼中楼需要同时包含评论";
   if (config.include_comments) {
     if (config.mode !== "full_then_incremental") return "采集评论及楼中楼需先选择「全部历史 → 核验后增量」模式";
@@ -186,8 +196,9 @@ export function collectorConfirmation(config: WeiboCollectorConfig, previous?: W
   const expanded = (full && previous?.mode !== "full_then_incremental")
     || (!!config.include_comments && !previous?.include_comments)
     || (!!config.include_replies && !previous?.include_replies)
-    || (!!config.include_comments && config.discussion_source_id !== previous?.discussion_source_id);
-  if (expanded) return `确认保存采集范围：${full ? "全部可访问历史帖子，不受首次回溯天数限制" : "最近窗口帖子"}${config.include_comments ? "、评论" : "（不含评论）"}${config.include_replies ? "、楼中楼回复" : ""}。${config.include_comments ? `讨论单独保存到社区分区 ${config.discussion_source_id}，不会变成官方发言。` : ""}${full ? "历史队列、索引和核验全部完成后才进入定时增量；资源不足会保留断点并阻塞，不保证固定篇数或完成时间。" : ""}${config.enabled ? "保存后将自动运行。" : "保存后可手动启动。"}后续有界批次自动续采，不逐批确认。`;
+    || (!!config.include_comments && config.discussion_source_id !== previous?.discussion_source_id)
+    || (!!config.include_comments && config.discussion_scope !== previous?.discussion_scope);
+  if (expanded) return `确认保存采集范围：${full ? "全部可访问历史帖子，不受首次回溯天数限制" : "最近窗口帖子"}${config.include_comments ? "、评论" : "（不含评论）"}${config.include_replies ? "、楼中楼回复" : ""}。${config.include_comments ? `讨论作者范围：${discussionScopeText(config.discussion_scope, config.uid)}。讨论单独保存到社区分区 ${config.discussion_source_id}，与官方帖子隔离。${previous?.include_comments && config.discussion_scope !== previous.discussion_scope ? "这是显式变更范围，已有历史资料需由后台核验，不会因保存自动证明已过滤。" : ""}` : ""}${full ? "历史队列、索引和核验全部完成后才进入定时增量；资源不足会保留断点并阻塞，不保证固定篇数或完成时间。" : ""}${config.enabled ? "保存后将自动运行。" : "保存后可手动启动。"}后续有界批次自动续采，不逐批确认。`;
   return config.enabled && !previous?.enabled
     ? "开启定时后会自动启动采集，并按所选模式继续运行。确认保存并开启？" : null;
 }
@@ -239,13 +250,28 @@ export function CollectorFields({ value, onChange, disabled, uidLocked = false }
       {value.mode === "full_then_incremental" ? <p className="text-warning text-xs leading-relaxed">
         遍历全部可访问历史，分批继续，不以首次天数或单批完成作为历史终点。先完成帖子、讨论、索引与完整性核验，再开启定时增量；资源不足会保留进度并阻塞。
       </p> : null}
+      <label className="flex flex-col gap-1.5 text-sm">
+        讨论作者范围
+        <SimpleSelect value={value.discussion_scope ?? "legacy"} disabled={disabled}
+          onChange={(scope) => {
+            if (scope === "legacy") { const next = { ...value }; delete next.discussion_scope; onChange(next); }
+            else onChange({ ...value, discussion_scope: scope as WeiboCollectorConfig["discussion_scope"] });
+          }}
+          options={[
+            { value: "legacy", label: "保留旧范围（全部公开讨论）" },
+            { value: "target_self", label: "仅目标账号自评及其自评线程自回复" },
+            { value: "all_public", label: "全部公开评论及回复（含其他用户）" },
+          ]} />
+      </label>
+      <p className="text-muted-foreground text-xs leading-relaxed">{discussionScopeText(value.discussion_scope, value.uid)}。{value.discussion_scope === "target_self" ? "不跟进其他用户的根评论，也不保存或索引其内容。" : "这是旧的全公开范围，不等同于仅目标账号；切换前请确认所需范围。"}</p>
+      {value.discussion_scope === undefined ? <p className="text-warning text-xs">旧配置未指定作者范围，仍按全部公开讨论处理；如需仅目标账号，请显式选择并确认，保存其他设置不会自动缩小或扩大历史范围。</p> : null}
       <label className="flex items-center justify-between gap-3 text-sm">
-        包含公开评论
+        {value.discussion_scope === "target_self" ? "包含目标账号自评" : "包含公开评论（含其他用户）"}
         <Switch checked={!!value.include_comments} disabled={disabled} aria-label="包含公开评论"
           onCheckedChange={(include_comments) => onChange({ ...value, include_comments, ...(include_comments ? {} : { include_replies: false }) })} />
       </label>
       <label className="flex items-center justify-between gap-3 text-sm">
-        包含楼中楼回复
+        {value.discussion_scope === "target_self" ? "包含其自评线程内的自回复" : "包含楼中楼回复（含其他用户）"}
         <Switch checked={!!value.include_replies} disabled={disabled} aria-label="包含楼中楼回复"
           onCheckedChange={(include_replies) => onChange({ ...value, include_replies, ...(include_replies ? { include_comments: true } : {}) })} />
       </label>
@@ -306,10 +332,10 @@ function CreateSourceDialog({
   const [id, setId] = useState("");
   const [label, setLabel] = useState("");
   const [role, setRole] = useState<SourceInfo["role"]>("unknown");
-  const [collector, setCollector] = useState<WeiboCollectorConfig>({ ...DEFAULT_COLLECTOR });
+  const [collector, setCollector] = useState<WeiboCollectorConfig>({ ...NEW_COLLECTOR });
 
   useEffect(() => {
-    if (open) { setId(""); setLabel(""); setRole("unknown"); setCollector({ ...DEFAULT_COLLECTOR }); }
+    if (open) { setId(""); setLabel(""); setRole("unknown"); setCollector({ ...NEW_COLLECTOR }); }
   }, [open]);
 
   const idProblem = !id
@@ -761,8 +787,9 @@ function measuredBytes(value: number | null | undefined): string {
 }
 
 /** 只使用服务端累计提交/核验结果，不从本批统计或规模估计推导百分比。 */
-export function HistoryProgress({ status, intervalSeconds }: { status?: CollectorStatus | null; intervalSeconds: number }) {
+export function HistoryProgress({ status, intervalSeconds, collector }: { status?: CollectorStatus | null; intervalSeconds: number; collector?: WeiboCollectorConfig | null }) {
   const incremental = historyIsIncremental(status);
+  const selfCounts = status?.discussion_scope === "target_self";
   const phase = status?.history_phase;
   const measurement = Object.entries(status?.measurement ?? {}).filter(([, value]) =>
     typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)),
@@ -774,11 +801,15 @@ export function HistoryProgress({ status, intervalSeconds }: { status?: Collecto
     </p>
     <p>历史阶段：{status?.paused ? "历史采集已暂停" : phase === "incremental" && !incremental ? "状态待核实（尚无历史完成证据）" : phase && Object.hasOwn(HISTORY_PHASE_LABELS, phase) ? HISTORY_PHASE_LABELS[phase] : "等待服务端报告历史阶段"}</p>
     {!phase ? <p className="text-muted-foreground">尚无新版历史状态；旧窗口或本批完成记录不能作为全历史完成证据。</p> : null}
+    {collector?.include_comments ? <p>讨论配置范围：{discussionScopeText(collector.discussion_scope, collector.uid)}。</p> : null}
+    {collector?.include_comments && (!status?.discussion_scope || status.discussion_scope !== (collector.discussion_scope ?? "all_public")) ? <p className="text-warning">累计统计范围尚未确认或与当前配置不一致；旧累计数不能证明已按新范围过滤，请以服务端队列迁移和核验结果为准。</p> : null}
+    {status?.discussion_scope ? <p className="text-muted-foreground">累计统计范围：{discussionScopeText(status.discussion_scope, collector?.uid ?? status.uid)}。不将未筛选的源站评论总数与仅目标范围作数量对比。</p> : null}
     <div className="grid grid-cols-1 gap-1 sm:grid-cols-3">
       <span>累计提交历史帖子 <strong>{measuredCount(status?.posts_total)}</strong></span>
-      <span>累计提交评论 <strong>{measuredCount(status?.comments_total)}</strong></span>
-      <span>累计提交楼中楼 <strong>{measuredCount(status?.replies_total)}</strong></span>
+      <span>累计提交评论{selfCounts ? "（仅自评）" : ""} <strong>{measuredCount(status?.comments_total)}</strong></span>
+      <span>累计提交楼中楼{selfCounts ? "（仅自评线程自回复）" : ""} <strong>{measuredCount(status?.replies_total)}</strong></span>
     </div>
+    {status?.counter_basis ? <p className="text-muted-foreground">服务端计数口径：{status.counter_basis}</p> : null}
     <p className="text-muted-foreground">已保存时间范围：{collectionTime(status?.oldest_date)} → 快照上界 {collectionTime(status?.snapshot_at)}</p>
     <p className="text-muted-foreground">历史开始：{collectionTime(status?.history_started_at)} · 下批运行：{collectionTime(status?.next_batch_at)}</p>
     <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1">
@@ -914,9 +945,9 @@ function CollectorLine({ source }: { source: SourceInfo }) {
       ) : null}
       {source.collector ? <p className="text-muted-foreground">
         {fullMode ? "全部可访问历史（不按天数截断）" : `首轮 ${source.collector.initial_days} 天 · 回扫 ${source.collector.overlap_days} 天`} · 每批最多 {source.collector.max_posts} 条 · {fullMode ? "完成核验后增量" : `周期 ${source.collector.interval_seconds} 秒`} · {source.collector.include_reposts ? "含公开转发" : "仅原创"}
-        {source.collector.include_comments ? ` · 评论 → 社区分区 ${source.collector.discussion_source_id ?? "未配置"}${source.collector.include_replies ? "（含楼中楼）" : "（不含楼中楼）"}` : " · 不含评论"}
+        {source.collector.include_comments ? ` · ${discussionScopeText(source.collector.discussion_scope, source.collector.uid)} · 评论 → 社区分区 ${source.collector.discussion_source_id ?? "未配置"}${source.collector.include_replies ? "（含所选范围楼中楼）" : "（不含楼中楼）"}` : " · 不含评论"}
       </p> : null}
-      {fullMode ? <HistoryProgress status={status} intervalSeconds={source.collector?.interval_seconds ?? 1800} /> : null}
+      {fullMode ? <HistoryProgress status={status} intervalSeconds={source.collector?.interval_seconds ?? 1800} collector={source.collector} /> : null}
       {status ? <>
         {status.phase ? <p className="text-muted-foreground">{fullMode ? "本批阶段" : "阶段"}：{Object.hasOwn(COLLECTION_PHASE_LABELS, status.phase) ? COLLECTION_PHASE_LABELS[status.phase] : "未知阶段，请以任务状态与说明为准"}</p> : null}
         <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1">
@@ -1019,8 +1050,10 @@ export function WeiboSourceCard({
   onOpenImport,
   onRecover,
   onEdit,
+  discussionCollector,
 }: {
   source: SourceInfo;
+  discussionCollector?: WeiboCollectorConfig | null;
   locked: boolean;
   onToggleMounted: (mounted: boolean) => void;
   onOpenImport: () => void;
@@ -1076,7 +1109,7 @@ export function WeiboSourceCard({
       {/* 采集器状态 */}
       {source.platform === "weibo" && !source.discussion_of ? <CollectorLine source={source} /> : null}
       {source.platform === "weibo" && source.discussion_of ? <p className="text-muted-foreground text-xs">
-        社区讨论分区 · 关联主来源 <code>{source.discussion_of}</code>。评论与楼中楼保留真实作者，不作为官方正文；由主来源统一采集、暂停和继续，不单独启动时间线采集器。
+        社区讨论分区 · 关联主来源 <code>{source.discussion_of}</code>。{discussionCollector ? `${discussionScopeText(discussionCollector.discussion_scope, discussionCollector.uid)}。` : "作者范围请查看关联主来源，不从社区身份推断。"}评论与楼中楼保留真实作者，与官方帖子隔离；由主来源统一采集、暂停和继续，不单独启动时间线采集器。
       </p> : null}
 
       {/* 导入状态 */}
@@ -1624,7 +1657,7 @@ export default function Sources() {
                     onOpenImport={() => setImporting(s)} onRecover={() => recover.mutate(s.id)} onEdit={() => setEditing(s)} />
                   {discussions.length ? <div className="ml-3 flex flex-col gap-2 border-l-2 pl-3">
                     <p className="text-muted-foreground text-xs">关联社区讨论 · 不是另一个官方账号来源</p>
-                    {discussions.map((child) => <WeiboSourceCard key={child.id} source={child} locked={locked}
+                    {discussions.map((child) => <WeiboSourceCard key={child.id} source={child} discussionCollector={s.collector} locked={locked}
                       onToggleMounted={(mounted) => setMounted.mutate({ id: child.id, label: child.label, mounted })}
                       onOpenImport={() => setImporting(child)} onRecover={() => recover.mutate(child.id)} onEdit={() => setEditing(child)} />)}
                   </div> : null}

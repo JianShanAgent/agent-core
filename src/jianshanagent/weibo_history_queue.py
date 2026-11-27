@@ -27,7 +27,12 @@ def _dump(value: Any) -> str:
 class HistoryQueue:
     """One writer under the source-group lease; status never contains the task graph."""
 
-    def __init__(self, path: Path, uid: str, signature: str, *, now: float | None = None):
+    def __init__(
+        self, path: Path, uid: str, signature: str, *, now: float | None = None,
+        discussion_scope: str = "all_public", legacy_signature: str | None = None,
+    ):
+        if discussion_scope not in {"all_public", "target_self"}:
+            raise WeiboCollectError("invalid_settings")
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.is_symlink():
             raise WeiboCollectError("invalid_checkpoint")
@@ -73,6 +78,9 @@ class HistoryQueue:
             CREATE TABLE IF NOT EXISTS issues(
                 kind TEXT NOT NULL,key TEXT NOT NULL,code TEXT NOT NULL,
                 expected INTEGER,observed INTEGER, PRIMARY KEY(kind,key));
+            CREATE TABLE IF NOT EXISTS counter_reports(
+                kind TEXT NOT NULL,key TEXT NOT NULL,reported_total INTEGER NOT NULL,
+                basis TEXT NOT NULL,PRIMARY KEY(kind,key));
             CREATE TABLE IF NOT EXISTS pending(
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),value TEXT NOT NULL);
         """)
@@ -82,6 +90,7 @@ class HistoryQueue:
                 self.set("version", SCHEMA_VERSION)
                 self.set("uid", uid)
                 self.set("signature", signature)
+                self.set("discussion_scope", discussion_scope)
                 self.set("snapshot_at", datetime.fromtimestamp(stamp, UTC).isoformat())
                 self.set("history_started_at", stamp)
                 self.set("history_phase", "posts")
@@ -91,9 +100,50 @@ class HistoryQueue:
         if self.get("version") != SCHEMA_VERSION or self.get("uid") != uid:
             self.close()
             raise WeiboCollectError("invalid_checkpoint")
-        if self.get("signature") != signature:
-            self.close()
-            raise WeiboCollectError("invalid_checkpoint")
+        previous_scope = self.get("discussion_scope", "all_public")
+        if previous_scope != discussion_scope:
+            try:
+                self._migrate_scope(signature, discussion_scope, legacy_signature)
+            except BaseException:
+                self.close()
+                raise
+        elif self.get("signature") != signature:
+            if discussion_scope == "all_public" and self.get("signature") == legacy_signature:
+                # Explicitly serializing the legacy effective scope changes no data scope.
+                with self.transaction():
+                    self.set("signature", signature)
+                    self.set("discussion_scope", discussion_scope)
+            else:
+                self.close()
+                raise WeiboCollectError("invalid_checkpoint")
+
+    def _migrate_scope(self, signature: str, scope: str, legacy_signature: str | None) -> None:
+        """The caller supplies legacy_signature only after proving the child archive empty."""
+        candidate = self.pending()
+        compatible = (
+            scope == "target_self" and self.get("discussion_scope", "all_public") == "all_public"
+            and legacy_signature is not None and legacy_signature != signature
+            and self.get("signature") == legacy_signature
+            and not self.db.execute("SELECT 1 FROM nodes LIMIT 1").fetchone()
+            and not self.db.execute("SELECT 1 FROM jobs WHERE kind='replies' LIMIT 1").fetchone()
+            and not self.db.execute(
+                "SELECT 1 FROM jobs WHERE kind='comments' AND "
+                "(checked!=0 OR page!=1 OR cursor!='' OR done!=0 OR page_done!='[]') LIMIT 1"
+            ).fetchone()
+            and (candidate is None or (
+                candidate["job"]["kind"] in {"posts", "catchup"}
+                and not candidate.get("logical_packets")
+            ))
+        )
+        if not compatible:
+            raise WeiboCollectError("scope_migration_blocked")
+        with self.transaction():
+            # Deliberately never touch posts, its job, pending post candidate or T0.
+            self.db.execute("UPDATE jobs SET expected=NULL,root_seen=0 WHERE kind='comments'")
+            for table in ("issues", "cursors", "pages", "counter_reports"):
+                self.db.execute(f"DELETE FROM {table} WHERE kind IN ('comments','replies')")
+            self.set("signature", signature)
+            self.set("discussion_scope", scope)
 
     def close(self) -> None:
         self.db.close()
@@ -176,6 +226,17 @@ class HistoryQueue:
             raise WeiboCollectError("invalid_checkpoint")
         return dict(row)
 
+    def require_target_root(self, job: dict[str, Any], uid: str) -> None:
+        row = self.db.execute(
+            "SELECT post_id,node_json,published FROM nodes WHERE id=?", (job["key"],)
+        ).fetchone()
+        if row is None or row[0] != job["post_id"] or row[2] != 1 or job["author_id"] != uid:
+            raise WeiboCollectError("author_mismatch")
+        root = json.loads(row[1])
+        if (root.get("id") != job["key"] or root.get("root_id") != job["key"]
+                or root.get("author_id") != uid or root.get("parent_id") is not None):
+            raise WeiboCollectError("author_mismatch")
+
     def stage(
         self,
         job: dict[str, Any],
@@ -191,6 +252,9 @@ class HistoryQueue:
         include_replies: bool = True,
         advance_page: bool = True,
         processed_ids: list[str] | None = None,
+        page_identity_ids: list[str] | None = None,
+        skipped: int = 0,
+        reported_total: int | None = None,
     ) -> dict[str, Any]:
         """Packet assignments and candidate rows survive failed import and process restart."""
         with self.transaction():
@@ -206,7 +270,15 @@ class HistoryQueue:
                 ).fetchone()
             ):
                 raise WeiboCollectError("pagination_stalled")
-            native_ids = processed_ids or [node["id"] for node in nodes or []]
+            if type(skipped) is not int or not 0 <= skipped <= 40_200:
+                raise WeiboCollectError("invalid_checkpoint")
+            # Ads can repeat on different pages. They count as skipped observations,
+            # not ordinary post identities or terminal/repeated-content evidence.
+            native_ids = (
+                page_identity_ids
+                if page_identity_ids is not None
+                else processed_ids or [node["id"] for node in nodes or []]
+            )
             page_digest = (
                 hashlib.sha256(_dump(sorted(set(native_ids))).encode()).hexdigest()
                 if advance_page and not terminal and native_ids
@@ -220,8 +292,15 @@ class HistoryQueue:
                 ).fetchone()
             ):
                 raise WeiboCollectError("pagination_stalled")
+            if reported_total is not None and (
+                type(reported_total) is not int or not 0 <= reported_total <= 10**12
+            ):
+                raise WeiboCollectError("invalid_checkpoint")
             changed: set[tuple[str, str]] = set()
             for node in nodes or []:
+                if (self.get("discussion_scope", "all_public") == "target_self"
+                        and node.get("author_id") != self.get("uid")):
+                    raise WeiboCollectError("author_mismatch")
                 post_id = job["post_id"]
                 encoded_node = _dump(node)
                 found = self.db.execute(
@@ -278,6 +357,9 @@ class HistoryQueue:
                 "processed_ids": processed_ids or [],
                 "page_digest": page_digest,
                 "publication_index": 0,
+                "skipped": skipped,
+                "reported_total": reported_total,
+                "discussion_scope": self.get("discussion_scope", "all_public"),
             }
             # Keep the full UTF-8 candidate bounded, even if the upstream page was legal.
             encoded = _dump(value)
@@ -358,6 +440,12 @@ class HistoryQueue:
             return
         job = value["job"]
         with self.transaction():
+            self.set("skipped_total", self.get("skipped_total", 0) + value.get("skipped", 0))
+            if value.get("reported_total") is not None:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO counter_reports VALUES(?,?,?,?)",
+                    (job["kind"], job["key"], value["reported_total"], "unfiltered_reported"),
+                )
             for row in value["post_rows"]:
                 self.db.execute(
                     "INSERT OR REPLACE INTO posts VALUES(?,?,?,?)",
@@ -432,6 +520,10 @@ class HistoryQueue:
             self._advance()
 
     def _verify_job(self, kind: str, key: str) -> None:
+        if self.get("discussion_scope", "all_public") == "target_self":
+            # Native totals are unfiltered. Only real selected-scope cursor exhaustion
+            # is evidence; an excluded user's missing/count discrepancy is not ours.
+            return
         job = self.db.execute("SELECT * FROM jobs WHERE kind=? AND key=?", (kind, key)).fetchone()
         if job is None or job["expected"] is None:
             return
@@ -562,10 +654,17 @@ class HistoryQueue:
         oldest = self.db.execute("SELECT MIN(published) FROM posts").fetchone()[0]
         return {
             "history_phase": "blocked" if blocked else "paused" if paused else phase,
+            "discussion_scope": self.get("discussion_scope", "all_public"),
+            "counter_basis": (
+                "target_cursor_exhaustion"
+                if self.get("discussion_scope", "all_public") == "target_self"
+                else "all_public_totals"
+            ),
             "history_complete": self.get("history_complete", False),
             "history_started_at": self.get("history_started_at"),
             "snapshot_at": self.get("snapshot_at"),
             "posts_total": count("SELECT COUNT(*) FROM posts"),
+            "skipped": self.get("skipped_total", 0),
             "comments_total": self.get("comments_total", 0),
             "replies_total": self.get("replies_total", 0),
             "pending_posts": count(

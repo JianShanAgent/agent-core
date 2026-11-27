@@ -212,6 +212,12 @@ class WeiboSourceAdapter:
         if parent.platform.id != "weibo" or not isinstance(collector, dict):
             raise ValueError("讨论父来源必须是配置了 collector.uid 的微博来源")
         uid = _identifier(collector.get("uid"), "collector.uid")
+        discussion_scope = collector.get("discussion_scope", "all_public")
+        if not isinstance(discussion_scope, str) or discussion_scope not in {
+            "all_public",
+            "target_self",
+        }:
+            raise ValueError("collector.discussion_scope 必须是 all_public 或 target_self")
         post_id = _identifier(row.get("post_id"), "post_id")
         if _identifier(row.get("post_author_id"), "post_author_id") != uid:
             raise ValueError("讨论所属帖子作者与关联 UID 不符")
@@ -256,6 +262,8 @@ class WeiboSourceAdapter:
                 name: _identifier(raw.get(name), f"nodes.{name}")
                 for name in ("id", "root_id", "author_id")
             }
+            if discussion_scope == "target_self" and node["author_id"] != uid:
+                raise ValueError("target_self 仅接受目标 UID 自己发表的评论与回复")
             for name in ("parent_id", "reply_to_id"):
                 node[name] = (
                     _identifier(raw[name], f"nodes.{name}") if raw[name] is not None else None
@@ -311,6 +319,7 @@ class WeiboSourceAdapter:
                 "logical_packet_id": logical_packet_id,
                 "fragment_id": packet_id,
                 "discussion_of": parent_id,
+                "discussion_scope": discussion_scope,
                 "post_id": post_id,
                 "post_url": post_url,
                 "post_author_id": uid,
@@ -323,6 +332,42 @@ class WeiboSourceAdapter:
                 "untrusted_content": True,
             },
         )
+
+    def _validate_target_roots(
+        self,
+        documents: list[Document],
+        batch_nodes: dict[str, dict[str, Any]],
+        node_posts: dict[str, str],
+    ) -> None:
+        """仅本人范围不能相信裸 root_id；跨片段/历史根都必须证明作者和原帖归属。"""
+        published_roots: dict[str, dict[str, Any] | None] = {}
+        for document in documents:
+            if document.meta.get("discussion_scope") != "target_self":
+                continue
+            uid = document.meta["post_author_id"]
+            post_id = document.meta["post_id"]
+            for node in document.meta["discussion_nodes"]:
+                root_id = node["root_id"]
+                root: dict[str, Any] | None
+                if root_id in batch_nodes:
+                    root = {**batch_nodes[root_id], "post_id": node_posts[root_id]}
+                else:
+                    if root_id not in published_roots:
+                        from jianshanagent.plugins.knowledge.source_import_v2 import get_source_node
+
+                        published_roots[root_id] = get_source_node(
+                            self.setup.config, self.setup.source.id, root_id
+                        )
+                    root = published_roots[root_id]
+                if (
+                    not isinstance(root, dict)
+                    or root.get("id") != root_id
+                    or root.get("root_id") != root_id
+                    or root.get("parent_id") is not None
+                    or root.get("author_id") != uid
+                    or root.get("post_id") != post_id
+                ):
+                    raise ValueError("target_self 的楼中楼必须归属同帖中已验证的目标账号根评论")
 
     def normalize(self, rows: list[dict[str, Any]]) -> list[Document]:
         documents: list[Document] = []
@@ -437,6 +482,7 @@ class WeiboSourceAdapter:
                 if related in node_posts and node_posts[related] != node_posts[node_id]:
                     raise ValueError("讨论节点关系不能跨微博原帖")
         _validate_node_relations(discussion_nodes)
+        self._validate_target_roots(documents, discussion_nodes, node_posts)
         return documents
 
 

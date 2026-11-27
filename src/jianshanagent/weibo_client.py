@@ -28,6 +28,7 @@ _MESSAGES = {
     "detail_unavailable": "微博完整正文暂不可用，已保留已有资料",
     "row_too_large": "微博单条完整资料超过导入大小限制，已保留已有资料",
     "inaccessible": "微博讨论已删除或不可访问，已记录未核实项",
+    "scope_migration_blocked": "讨论范围与已有资料或断点不兼容，已保留原历史并停止，请人工核实",
 }
 _MAX_BODY = 2 * 1024 * 1024
 _MAX_REQUESTS = 100
@@ -209,7 +210,13 @@ class WeiboClient:
     async def __aexit__(self, *_args: Any) -> None:
         await self._client.aclose()
 
-    async def _read(self, path: str, params: dict[str, str] | None = None) -> bytes:
+    async def _read(
+        self,
+        path: str,
+        params: dict[str, str] | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> bytes:
         global _LAST_REQUEST
         if path not in {
             "/",
@@ -232,7 +239,8 @@ class WeiboClient:
                         self.requests += 1
                         _LAST_REQUEST = time.monotonic()
                         async with self._client.stream(
-                            "GET", "https://weibo.com" + path, params=params
+                            "GET", "https://weibo.com" + path, params=params,
+                            headers=headers,
                         ) as response:
                             status = response.status_code
                             if path == "/ajax/statuses/buildComments" and status in {404, 410}:
@@ -273,8 +281,14 @@ class WeiboClient:
         if not viewer_confirmed(await self._read("/")):
             raise WeiboCollectError("authentication_required")
 
-    async def _envelope(self, path: str, params: dict[str, str]) -> dict[str, Any]:
-        body = await self._read(path, params)
+    async def _envelope(
+        self,
+        path: str,
+        params: dict[str, str],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        body = await self._read(path, params, headers=headers)
         if body.lstrip().startswith(b"<"):
             raise WeiboCollectError("authentication_required")
         try:
@@ -305,6 +319,7 @@ class WeiboClient:
         root_id: str | None = None,
         root_author_id: str | None = None,
         max_id: str = "0",
+        post_alias: str | None = None,
     ) -> dict[str, Any]:
         """Real buildComments envelope has an array; it is not timeline data-dict."""
         for value in (post_id, uid, root_id, root_author_id):
@@ -316,9 +331,17 @@ class WeiboClient:
             raise WeiboCollectError("invalid_settings")
         if not isinstance(max_id, str) or not re.fullmatch(r"[0-9]{1,32}", max_id):
             raise WeiboCollectError("invalid_checkpoint")
+        if post_alias is not None and (
+            not isinstance(post_alias, str) or not re.fullmatch(r"[A-Za-z0-9]{1,64}", post_alias)
+        ):
+            raise WeiboCollectError("invalid_settings")
         params = {
             "id": root_id or post_id,
-            "uid": root_author_id or uid,
+            # Reference-verified: buildComments uid is the post owner (profile uid),
+            # including thread fetches. root_author_id stays a local identity marker;
+            # the read-only probe proved both values return identical rows.
+            "uid": uid,
+            "flow": "0",
             "is_reload": "1",
             "is_show_bulletin": "2",
             "is_mix": "1" if root_id else "0",
@@ -328,7 +351,15 @@ class WeiboClient:
         }
         if max_id != "0":
             params["max_id"] = max_id
-        result = await self._envelope("/ajax/statuses/buildComments", params)
+        # Reference-verified practice: comment requests carry the official post
+        # URL as Referer. Callers supply the post's native alias; a missing or
+        # malformed alias must fail loudly at the caller, never degrade silently.
+        headers = None
+        if post_alias is not None:
+            headers = {"Referer": f"https://weibo.com/{uid}/{post_alias}"}
+        result = await self._envelope(
+            "/ajax/statuses/buildComments", params, headers=headers
+        )
         data, cursor, total = result.get("data"), result.get("max_id"), result.get("total_number")
         if (
             not isinstance(data, list)
@@ -338,6 +369,10 @@ class WeiboClient:
             raise WeiboCollectError("schema_changed")
         if type(cursor) not in (int, str) or not re.fullmatch(r"[0-9]{1,32}", str(cursor)):
             raise WeiboCollectError("schema_changed")
+        # total_number may arrive as a digit string on some responses; normalize
+        # before the strict bound check so callers always see an int.
+        if isinstance(total, str) and re.fullmatch(r"[0-9]{1,13}", total):
+            total = int(total)
         if type(total) is not int or not 0 <= total <= 10**12:
             raise WeiboCollectError("schema_changed")
         root_comment = result.get("rootComment") or None

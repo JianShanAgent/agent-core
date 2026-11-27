@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import resource
 import shutil
 import time
@@ -16,10 +17,12 @@ from typing import Any
 from jianshanagent.weibo_auth import WeiboCredentialStore
 from jianshanagent.weibo_client import RequestBudgetReached, WeiboClient, WeiboCollectError
 from jianshanagent.weibo_collect import (
+    _ad_slot_id,
     _date,
     _html_text,
     _id,
     _identity,
+    _native_ad,
     _public,
     _public_url,
     _row,
@@ -112,14 +115,31 @@ def discussion_node(value: Any, post_id: str, *, root_id: str | None = None) -> 
     return node
 
 
+def _comment_author(value: Any) -> str:
+    if not isinstance(value, dict) or not isinstance(value.get("user"), dict):
+        raise WeiboCollectError("schema_changed")
+    user = value["user"]
+    author = _id(user.get("idstr", user.get("id")))
+    if "id" in user and _id(user["id"]) != author:
+        raise WeiboCollectError("schema_changed")
+    return author
+
+
 def _page_comments(
     queue: HistoryQueue, job: dict[str, Any], envelope: dict[str, Any], settings: dict[str, Any]
 ) -> dict[str, Any]:
     items = envelope.get("data")
     if not isinstance(items, list) or len(items) > 200:
         raise WeiboCollectError("schema_changed")
+    scope = settings.get("discussion_scope", "all_public")
+    if scope != queue.get("discussion_scope", "all_public"):
+        raise WeiboCollectError("scope_migration_blocked")
+    target_only = scope == "target_self"
     nodes, roots = [], []
+    skipped = 0
     reply = job["kind"] == "replies"
+    if reply and target_only:
+        queue.require_target_root(job, settings["uid"])
     root_seen = False
     root_comment = envelope.get("rootComment")
     if reply and root_comment:
@@ -129,25 +149,34 @@ def _page_comments(
         nodes.append(root_node)
         root_seen = True
     for item in items:
+        if target_only and _comment_author(item) != settings["uid"]:
+            # Do not inspect or persist the excluded user's text, name, inline tree,
+            # dates, media or native ID. The response's UID alone selects the lane.
+            skipped += 1
+            continue
         node = discussion_node(item, job["post_id"], root_id=job["key"] if reply else None)
         if reply and node["id"] == job["key"]:
             root_seen = True
         nodes.append(node)
-        if not reply:
+        if not reply and settings.get("include_replies"):
             inline = item.get("comments", [])
             if not isinstance(inline, list) or len(inline) > 200:
                 raise WeiboCollectError("schema_changed")
             total = item.get("total_number")
+            if isinstance(total, str) and re.fullmatch(r"[0-9]{1,13}", total):
+                total = int(total)
             if total is not None and (type(total) is not int or not 0 <= total <= 10**12):
                 raise WeiboCollectError("schema_changed")
-            if settings.get("include_replies"):
-                for child in inline:
-                    nodes.append(discussion_node(child, job["post_id"], root_id=node["id"]))
-                # An inline preview is not a terminal-page proof, even if counts look equal.
-                if inline or total is None or total > 0:
-                    roots.append(
-                        {"id": node["id"], "author_id": node["author_id"], "expected": total}
-                    )
+            for child in inline:
+                if target_only and _comment_author(child) != settings["uid"]:
+                    skipped += 1
+                    continue
+                nodes.append(discussion_node(child, job["post_id"], root_id=node["id"]))
+            # For target_self even a reported zero is not a selected-scope cursor
+            # proof. Never request a root owned by anybody other than the target.
+            if target_only or inline or total is None or total > 0:
+                roots.append({"id": node["id"], "author_id": node["author_id"],
+                              "expected": None if target_only else total})
     cursor = envelope.get("max_id", 0)
     if type(cursor) not in (str, int) or not str(cursor).isdigit() or len(str(cursor)) > 32:
         raise WeiboCollectError("schema_changed")
@@ -163,10 +192,21 @@ def _page_comments(
         roots=roots,
         cursor=str(cursor),
         terminal=terminal,
-        expected=expected,
+        expected=None if target_only else expected,
+        reported_total=expected,
         root_seen=root_seen,
         include_replies=bool(settings.get("include_replies")),
+        skipped=skipped,
     )
+
+
+def _post_alias(queue: HistoryQueue, post_id: str) -> str:
+    """Comment requests must carry the official post URL; a lost alias is a broken checkpoint."""
+    url = str(queue.post(post_id).get("url", ""))
+    alias = url.rstrip("/").rsplit("/", 1)[-1]
+    if not re.fullmatch(r"[A-Za-z0-9]{1,64}", alias):
+        raise WeiboCollectError("invalid_checkpoint")
+    return alias
 
 
 async def _posts_page(
@@ -198,8 +238,20 @@ async def _posts_page(
     lower = datetime.fromisoformat(queue.get("incremental_since", queue.get("snapshot_at")))
     upper = datetime.fromisoformat(queue.get("catchup_until", queue.get("snapshot_at")))
     previous = set(json.loads(job.get("page_done", "[]")))
-    current_ids = {_id(p.get("idstr", p.get("id"))) for p in posts if isinstance(p, dict)}
+    current_ids: set[str] = set()
+    ordinary_ids: set[str] = set()
+    for item in posts:
+        if not isinstance(item, dict):
+            raise WeiboCollectError("schema_changed")
+        identifier = (
+            _ad_slot_id(item) if _native_ad(item) else _id(item.get("idstr", item.get("id")))
+        )
+        if identifier is not None:
+            current_ids.add(identifier)
+            if not _native_ad(item):
+                ordinary_ids.add(identifier)
     processed = previous & current_ids
+    skipped = 0
     advance = True
     limit = int(settings.get("max_posts", 200))
     status = queue.status()
@@ -208,6 +260,13 @@ async def _posts_page(
     for post in posts:
         if not isinstance(post, dict):
             raise WeiboCollectError("schema_changed")
+        if _native_ad(post):
+            ad_id = _ad_slot_id(post)
+            if ad_id is None or ad_id not in processed:
+                skipped += 1
+            if ad_id is not None:
+                processed.add(ad_id)
+            continue
         native, author, _name, _alias = _identity(post)
         if author != settings["uid"]:
             raise WeiboCollectError("author_mismatch")
@@ -257,6 +316,8 @@ async def _posts_page(
         include_replies=bool(settings.get("include_replies")),
         advance_page=advance,
         processed_ids=sorted(processed),
+        page_identity_ids=sorted(ordinary_ids),
+        skipped=skipped,
     )
 
 
@@ -275,6 +336,8 @@ async def fetch_history_page(
     job = queue.job()
     if job is None:
         return None
+    if settings.get("discussion_scope", "all_public") == "target_self" and job["kind"] == "replies":
+        queue.require_target_root(job, settings["uid"])
     try:
         cookies = credential_store.read_for_collection()
     except (ValueError, OSError):
@@ -292,6 +355,7 @@ async def fetch_history_page(
                     max_id=job["cursor"] or "0",
                     root_id=job["key"] if job["kind"] == "replies" else None,
                     root_author_id=job["author_id"] if job["kind"] == "replies" else None,
+                    post_alias=_post_alias(queue, job["post_id"]),
                 )
             except WeiboCollectError as exc:
                 if exc.code == "inaccessible":

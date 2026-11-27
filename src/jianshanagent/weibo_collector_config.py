@@ -25,6 +25,7 @@ _KEYS = frozenset(
         "include_comments",
         "include_replies",
         "discussion_source_id",
+        "discussion_scope",
     }
 )
 
@@ -81,6 +82,11 @@ def parse_weibo_collector(value: Any) -> dict[str, Any]:
         if not isinstance(mode, str) or mode not in {"recent", "full_then_incremental"}:
             raise ValueError("collector.mode 必须是 recent 或 full_then_incremental")
         result["mode"] = mode
+    if "discussion_scope" in value:
+        scope = value["discussion_scope"]
+        if not isinstance(scope, str) or scope not in {"all_public", "target_self"}:
+            raise ValueError("collector.discussion_scope 必须是 all_public 或 target_self")
+        result["discussion_scope"] = scope
     for key in ("include_comments", "include_replies"):
         if key in value:
             if not isinstance(value[key], bool):

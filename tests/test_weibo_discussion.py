@@ -1,5 +1,6 @@
 """合成讨论数据：父帖归属、独立身份、完整长文与成员出处。"""
 
+import json
 from copy import deepcopy
 from dataclasses import replace
 
@@ -63,6 +64,19 @@ def adapter(tmp_path, monkeypatch):
         },
     )
     return WeiboSourceAdapter(SourceSetup(conf, child))
+
+
+@pytest.fixture
+def target_adapter(adapter, monkeypatch):
+    parent = source_instance(adapter.setup.config, "parent")
+    raw = deepcopy(parent.raw)
+    raw["collector"]["discussion_scope"] = "target_self"
+    scoped_parent = replace(parent, raw=raw)
+    monkeypatch.setattr("jianshanagent.platforms.weibo.source_instance", lambda *_: scoped_parent)
+    monkeypatch.setattr(
+        "jianshanagent.plugins.knowledge.source_import_v2.get_source_node", lambda *_: None
+    )
+    return adapter
 
 
 def as_kb(chunk):
@@ -346,6 +360,197 @@ def test_logical_packet_node_bound_applies_across_all_fragments(adapter):
     ]
     with pytest.raises(ValueError, match="合计不得超过 64"):
         adapter.normalize(rows)
+
+
+def test_target_self_root_and_own_reply_keep_community_role(target_adapter):
+    docs = target_adapter.normalize(
+        [
+            packet(
+                nodes=[
+                    node(author_id="42"),
+                    node("102", author_id="42", parent_id="101", reply_to_id="101"),
+                ]
+            )
+        ]
+    )
+    assert docs[0].meta["source_role"] == "community"
+    assert docs[0].meta["author_ids"] == ["42"]
+    assert docs[0].meta["node_ids"] == ["101", "102"]
+    assert docs[0].meta["discussion_scope"] == "target_self"
+
+
+@pytest.mark.parametrize(
+    "nodes",
+    [
+        [node(author_id="7", author_name="目标官方")],
+        [node(author_id="42"), node("102", author_id="7", parent_id="101")],
+        [node(author_id="7"), node("102", author_id="42", parent_id="101")],
+    ],
+)
+def test_target_self_rejects_other_top_reply_or_root(target_adapter, nodes):
+    with pytest.raises(ValueError, match="仅接受目标 UID"):
+        target_adapter.normalize([packet(nodes=nodes)])
+
+
+def test_target_self_fragment_root_verified_from_full_batch_not_just_current_row(
+    target_adapter, monkeypatch
+):
+    def no_disk_lookup(*_):
+        raise AssertionError("同批已有目标根，不应进行历史查询")
+
+    monkeypatch.setattr(
+        "jianshanagent.plugins.knowledge.source_import_v2.get_source_node", no_disk_lookup
+    )
+    # 根与回复分属两个物理片段，倒序输入亦可；被排除用户仅留下关系ID、不保存内容。
+    rows = [
+        packet(
+            id="12345:102",
+            packet_id="12345:101",
+            nodes=[
+                node("102", author_id="42", parent_id="999", reply_to_id="998"),
+            ],
+        ),
+        packet(packet_id="12345:101", nodes=[node(author_id="42", text="根" * 100000)]),
+    ]
+    docs = target_adapter.normalize(rows)
+    assert [doc.meta["node_ids"] for doc in docs] == [["102"], ["101"]]
+    assert all(doc.meta["logical_packet_id"] == "12345:101" for doc in docs)
+    assert all(doc.meta["source_role"] == "community" for doc in docs)
+
+
+def test_target_self_published_target_root_allows_later_reply(target_adapter, monkeypatch):
+    calls = []
+
+    def published_root(conf, source_id, node_id):
+        calls.append((source_id, node_id))
+        return {**node(author_id="42"), "post_id": "12345"}
+
+    monkeypatch.setattr(
+        "jianshanagent.plugins.knowledge.source_import_v2.get_source_node", published_root
+    )
+    doc = target_adapter.normalize(
+        [
+            packet(
+                id="12345:102",
+                nodes=[
+                    node("102", author_id="42", parent_id="101"),
+                    node("103", author_id="42", parent_id="101"),
+                ],
+            )
+        ]
+    )[0]
+    assert doc.meta["node_ids"] == ["102", "103"]
+    assert calls == [("discussion", "101")]  # 每批缓存已发布根验证。
+
+
+@pytest.mark.parametrize(
+    "root_changes",
+    [
+        {"author_id": "7", "author_name": "目标官方"},
+        {"post_id": "99999"},
+        {"id": "999"},
+        {"root_id": "999"},
+        {"parent_id": "999"},
+        {"author_id": "042"},
+        {"post_id": None},
+    ],
+)
+def test_target_self_rejects_forged_other_or_cross_post_published_root(
+    target_adapter, monkeypatch, root_changes
+):
+    root = {**node(author_id="42"), "post_id": "12345", **root_changes}
+    monkeypatch.setattr(
+        "jianshanagent.plugins.knowledge.source_import_v2.get_source_node", lambda *_: root
+    )
+    with pytest.raises(ValueError, match="已验证的目标账号根评论"):
+        target_adapter.normalize(
+            [
+                packet(
+                    id="12345:102",
+                    nodes=[
+                        node("102", author_id="42", parent_id="101"),
+                    ],
+                )
+            ]
+        )
+
+
+def test_target_self_cannot_blindly_trust_missing_root_id(target_adapter):
+    with pytest.raises(ValueError, match="已验证的目标账号根评论"):
+        target_adapter.normalize(
+            [
+                packet(
+                    id="12345:102",
+                    nodes=[
+                        node("102", author_id="42", parent_id="101"),
+                    ],
+                )
+            ]
+        )
+
+
+def test_legacy_all_public_never_looks_up_target_roots(adapter, monkeypatch):
+    def no_disk_lookup(*_):
+        raise AssertionError("缺省all_public不能改变旧节点接纳行为")
+
+    monkeypatch.setattr(
+        "jianshanagent.plugins.knowledge.source_import_v2.get_source_node", no_disk_lookup
+    )
+    doc = adapter.normalize(
+        [
+            packet(
+                id="12345:102",
+                nodes=[
+                    node("102", author_id="7", parent_id="101"),
+                ],
+            )
+        ]
+    )[0]
+    assert doc.meta["author_ids"] == ["7"]
+    assert doc.meta["discussion_scope"] == "all_public"
+
+
+@pytest.mark.parametrize(
+    "root_author,root_root_id,reply_post,allowed",
+    [
+        ("42", "200", "100", True),
+        ("7", "200", "100", False),
+        ("42", "999", "100", False),
+        ("42", "200", "101", False),
+    ],
+)
+async def test_target_self_validates_root_against_real_published_reader(
+    tmp_path, monkeypatch, root_author, root_root_id, reply_post, allowed
+):
+    from test_source_import import batch
+    from test_source_import_v2 import packet as storage_packet
+    from test_source_import_v2_node_reader import discussion_service
+
+    service, _, _ = await discussion_service(tmp_path)
+    await service.import_data("social", batch("101", author_id="42"))
+    archived = json.loads(storage_packet())
+    archived["nodes"][0].update(author_id=root_author, root_id=root_root_id)
+    await service.import_data("comments", json.dumps(archived))
+    # 不mock两个只读reader：目标作者、根关系和post_id均来自实际已发布归档。
+    parent = source_instance(service.config, "social")
+    target_raw = deepcopy(parent.raw)
+    target_raw["collector"]["discussion_scope"] = "target_self"
+    target_parent = replace(parent, raw=target_raw)
+    child = source_instance(service.config, "comments")
+    monkeypatch.setattr("jianshanagent.platforms.weibo.source_instance", lambda *_: target_parent)
+    guarded = WeiboSourceAdapter(SourceSetup(service.config, child))
+    reply = json.loads(storage_packet(seed="201"))
+    reply.update(
+        id=f"{reply_post}:201",
+        post_id=reply_post,
+        post_url=f"https://weibo.com/detail/{reply_post}",
+    )
+    reply["nodes"][0].update(root_id="200", parent_id="200", reply_to_id="200")
+    if allowed:
+        assert guarded.normalize([reply])[0].meta["node_ids"] == ["201"]
+    else:
+        with pytest.raises(ValueError, match="已验证的目标账号根评论"):
+            guarded.normalize([reply])
 
 
 def test_full_packet_text_is_bounded_without_truncation(adapter):

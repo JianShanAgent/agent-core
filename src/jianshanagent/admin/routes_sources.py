@@ -69,6 +69,7 @@ _META_FIELDS = {
     "packet_id",
     "logical_packet_id",
     "fragment_id",
+    "discussion_scope",
 }
 
 

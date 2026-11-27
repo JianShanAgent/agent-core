@@ -53,6 +53,9 @@ _STATUS_FIELDS = frozenset(
         "paused",
         "coverage_message",
         "measurement",
+        "discussion_scope",
+        "counter_basis",
+        "skipped",
     }
 )
 

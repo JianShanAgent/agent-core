@@ -935,6 +935,8 @@ export interface WeiboCollectorConfig {
   include_comments?: boolean;
   include_replies?: boolean;
   discussion_source_id?: string;
+  /** 缺省保持旧 all_public；不得在编辑保存时静默补为 target_self。 */
+  discussion_scope?: "all_public" | "target_self";
 }
 
 export type HistoryPhase = "posts" | "comments" | "indexing" | "verifying" | "incremental" | "paused" | "blocked";
@@ -986,6 +988,9 @@ export interface CollectorStatus {
   next_batch_at?: number | string | null;
   paused?: boolean;
   coverage_message?: string | null;
+  /** 服务端累计提交的实际讨论范围/计数口径，不能仅由当前配置推定。 */
+  discussion_scope?: "all_public" | "target_self" | null;
+  counter_basis?: string | null;
   measurement?: Record<string, unknown> | null;
 }
 

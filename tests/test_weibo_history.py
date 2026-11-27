@@ -505,6 +505,7 @@ async def test_comments_transport_real_array_contract_and_fixed_query(monkeypatc
     assert dict(requests[0].url.params) == {
         "id": "100",
         "uid": UID,
+        "flow": "0",
         "is_reload": "1",
         "is_show_bulletin": "2",
         "is_mix": "0",
@@ -513,7 +514,9 @@ async def test_comments_transport_real_array_contract_and_fixed_query(monkeypatc
         "locale": "zh-CN",
     }
     assert requests[1].url.params["id"] == "200"
-    assert requests[1].url.params["uid"] == "12345"
+    # The thread request keeps uid as the post owner even with a root_author_id marker;
+    # the read-only probe proved both uid values return identical rows.
+    assert requests[1].url.params["uid"] == UID
     assert requests[1].url.params["fetch_level"] == requests[1].url.params["is_mix"] == "1"
     assert requests[1].url.params["max_id"] == "999"
 

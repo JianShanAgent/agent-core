@@ -73,6 +73,9 @@ def test_legacy_collector_serialization_unchanged():
     [
         {"mode": "all"},
         {"mode": True},
+        {"discussion_scope": "other_users"},
+        {"discussion_scope": True},
+        {"discussion_scope": ["target_self"]},
         {"include_comments": "true"},
         {"include_replies": 1},
         {"include_replies": True},
@@ -156,3 +159,14 @@ def test_backend_creates_child_atomically_and_never_overwrites_collision():
         _with_discussion_sources(
             [parent, {"id": "weibo_yys_comments", "platform": "weibo", "role": "official"}]
         )
+
+        @pytest.mark.parametrize("scope", ["all_public", "target_self"])
+        def test_explicit_discussion_scope_roundtrips_without_changing_legacy(tmp_path, scope):
+            parent = _parent()
+            parent["collector"]["discussion_scope"] = scope
+            config = _config(tmp_path, [parent, _child()])
+            assert config.source("weibo_yys").raw["collector"]["discussion_scope"] == scope
+            write_source_instances(config, [parent, _child()])
+            restored = load_config(config.root, overrides_dir=config.overrides_dir)
+            assert restored.source("weibo_yys").raw["collector"]["discussion_scope"] == scope
+            assert "discussion_scope" not in parse_weibo_collector(_collector())

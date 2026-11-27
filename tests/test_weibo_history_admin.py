@@ -118,3 +118,45 @@ async def test_bad_scope_rejected_before_any_source_is_saved(local: LocalEnv, fi
     )
     result = await local.send("GET", "/api/sources")
     assert not any(s["id"] in {"official", "official_comments"} for s in result["sources"])
+
+    async def test_save_target_self_scope_is_explicit_and_legacy_scope_stays_absent(
+        local: LocalEnv,
+    ):
+        await local.send(
+            "POST",
+            "/api/sources",
+            {
+                "id": "official",
+                "platform": "weibo",
+                "role": "official",
+                "collector": FULL,
+            },
+            201,
+        )
+        before = await local.send("GET", "/api/sources")
+        original = next(s for s in before["sources"] if s["id"] == "official")
+        assert "discussion_scope" not in original["collector"]
+        saved = await local.send(
+            "PUT",
+            "/api/sources/official",
+            {
+                "collector": {**FULL, "discussion_scope": "target_self"},
+            },
+        )
+        assert saved["source"]["collector"]["discussion_scope"] == "target_self"
+        assert saved["source"]["role"] == "official"
+        await local.send(
+            "PUT",
+            "/api/sources/official",
+            {
+                "collector": {**FULL, "discussion_scope": "nickname_match"},
+            },
+            400,
+        )
+        final = await local.send("GET", "/api/sources")
+        assert (
+            next(s for s in final["sources"] if s["id"] == "official")["collector"][
+                "discussion_scope"
+            ]
+            == "target_self"
+        )

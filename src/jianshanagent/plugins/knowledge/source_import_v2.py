@@ -293,6 +293,43 @@ def get_source_row(config: AppConfig, source_id: str, row_id: str) -> dict[str, 
     )
 
 
+def get_source_node(config: AppConfig, source_id: str, node_id: str) -> dict[str, Any] | None:
+    """Read one current discussion node, with its archive-proven ``post_id``.
+
+    Resolve the immutable native-node/logical-packet index first, then only that
+    packet's at most 64 live physical fragments. Tombstones shadow older fragments;
+    neither full-history raw scans nor legacy vector/snapshot loads are needed.
+    The returned author and relation fields are original persisted node data, not
+    claims supplied by the caller. This function does not normalize or write files.
+    """
+    import re
+
+    if not isinstance(node_id, str) or re.fullmatch(r"[0-9]{1,32}", node_id) is None:
+        return None
+    source = source_instance(config, source_id)
+    if not source.raw.get("discussion_of"):
+        return None
+    directory = _directory(config, source_id)
+    pointer_path = directory / "current.json"
+    if not pointer_path.exists():
+        return None
+    pointer = _read_json(pointer_path)
+    if pointer.get("version") != 2:
+        return None
+    generation = pointer["generation"]
+    packet_id = _node_owner(directory, generation, node_id)
+    if packet_id is None:
+        return None
+    for entry in _logical_entries(directory, generation, packet_id).values():
+        row = _raw(entry)
+        if row.get("version") != 2 or row.get("packet_id", row.get("id")) != packet_id:
+            raise SourceImportError("讨论节点清单与原文逻辑归属不符")
+        for node in row["nodes"]:
+            if node.get("id") == node_id:
+                return {**node, "post_id": row["post_id"]}
+    return None
+
+
 def uses_stream_v2(config: AppConfig, source_id: str) -> bool:
     if source_instance(config, source_id).raw.get("storage") == "stream_v2":
         return True

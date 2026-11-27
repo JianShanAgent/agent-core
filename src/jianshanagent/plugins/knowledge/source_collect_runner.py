@@ -310,7 +310,7 @@ class SourceCollectorRunner:
             def progress(value: dict[str, Any]) -> None:
                 clean = {
                     key: value[key]
-                    for key in ("pages", "fetched", "accepted", "limited")
+                    for key in ("pages", "fetched", "skipped", "accepted", "limited")
                     if key in value and isinstance(value[key], (int, bool))
                 }
                 save(**clean)
@@ -333,6 +333,7 @@ class SourceCollectorRunner:
                 phase="importing",
                 pages=batch.pages,
                 fetched=batch.fetched,
+                skipped=batch.skipped,
                 accepted=len(batch.rows),
                 limited=batch.limited,
                 message="正在增量导入微博资料。",
@@ -503,22 +504,32 @@ class SourceCollectorRunner:
             _atomic_json(directory / "status.json", state)
 
         def check() -> str | None:
-            if self._closing or _read(directory / "cancel.json").get("job_id") == state["job_id"]:
-                return "cancelled"
-            if _read(directory / "pause.json").get("paused") is True:
-                return "cancelled"
+            # A worker shutdown is resumable, not a durable user cancellation.
+            # Explicit control/config changes always outrank a concurrent shutdown.
             try:
                 if _config_signature(self.config_provider(), source_id) != identity:
                     return "config_changed"
             except (ValueError, OSError):
                 return "config_changed"
-            return None
+            if (
+                _read(directory / "cancel.json").get("job_id") == state["job_id"]
+                or _read(directory / "pause.json").get("paused") is True
+            ):
+                return "cancelled"
+            return "interrupted" if self._closing else None
+
+        def observe_stop() -> str | None:
+            nonlocal stop_code
+            current = check()
+            priority = {None: 0, "interrupted": 1, "cancelled": 2, "config_changed": 3}
+            if priority[current] > priority[stop_code]:
+                stop_code = current
+            return stop_code
 
         async def wait_work() -> Any:
-            nonlocal stop_code
             assert work is not None
             while not work.done():
-                stop_code = stop_code or check()
+                observe_stop()
                 if stop_code:
                     save(state="stopping", phase="stopping")
                     if import_source and service is not None:
@@ -531,6 +542,27 @@ class SourceCollectorRunner:
                         save(state="stopping" if stop_code else "committing", phase="committing")
                 await asyncio.wait({work}, timeout=0.25)
             return await work
+
+        def persist_stop(code: str, message: str) -> None:
+            durable = code != "interrupted"
+            if durable:
+                if queue is not None:
+                    queue.pause(True, reason=None if code == "cancelled" else code)
+                _atomic_json(directory / "pause.json", {"paused": True})
+            final = "interrupted" if not durable else "paused" if code == "cancelled" else "blocked"
+            extra: dict[str, Any] = {
+                "state": final,
+                "phase": final,
+                "paused": durable,
+                "error_code": code,
+                "message": message,
+                "finished_at": self.clock(),
+                "next_run_at": None,
+                "next_batch_at": None,
+            }
+            if durable:
+                extra["history_phase"] = final
+            save(**extra)
 
         async def measure() -> dict[str, Any]:
             assert queue is not None and service is not None
@@ -556,11 +588,14 @@ class SourceCollectorRunner:
             )
 
         try:
+            history_path = directory / "history.sqlite3"
+            legacy_signature = await _blocking(
+                self._scope_legacy_signature, config, settings, not history_path.exists()
+            )
             queue = HistoryQueue(
-                directory / "history.sqlite3",
-                settings["uid"],
-                _signature(settings),
-                now=self.clock(),
+                history_path, settings["uid"], _signature(settings), now=self.clock(),
+                discussion_scope=settings.get("discussion_scope", "all_public"),
+                legacy_signature=legacy_signature,
             )
             if state.get("manual"):
                 queue.pause(False)
@@ -576,8 +611,8 @@ class SourceCollectorRunner:
                 await _blocking(self._verify_ownership, service, source_id, settings["uid"])
                 with queue.transaction():
                     queue.set("ownership_verified", True)
-            if check():
-                raise SourceCollectError(check() or "cancelled")
+            if observe_stop():
+                raise SourceCollectError(stop_code or "interrupted")
             resources = await measure()
             if resources["blocked"]:
                 raise SourceCollectError("resource_limit")
@@ -586,8 +621,8 @@ class SourceCollectorRunner:
                 fetch_history_page(queue, settings, WeiboCredentialStore(config.root))
             )
             pending = await wait_work()
-            if stop_code or check():
-                raise SourceCollectError(stop_code or check() or "cancelled")
+            if observe_stop():
+                raise SourceCollectError(stop_code or "interrupted")
             if pending is not None:
                 published = 0
                 for lane, rows in queue.publications():
@@ -629,8 +664,8 @@ class SourceCollectorRunner:
                         unchanged=result.get("unchanged", 0),
                     )
                     import_source = None
-                    if stop_code or check():
-                        raise SourceCollectError(stop_code or check() or "cancelled")
+                    if observe_stop():
+                        raise SourceCollectError(stop_code or "interrupted")
                     queue.publication_succeeded()
                     published += 1
                 # Empty terminal pages require no index publication, but their proposed
@@ -664,7 +699,8 @@ class SourceCollectorRunner:
             )
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
-                code, message = stop_code or "cancelled", _MESSAGES[stop_code or "cancelled"]
+                code = observe_stop() or "interrupted"
+                message = _MESSAGES[code]
             elif isinstance(exc, (SourceCollectError, WeiboCollectError)):
                 code, message = exc.code, exc.public_message
             elif isinstance(exc, SourceImportCapacityError):
@@ -679,20 +715,11 @@ class SourceCollectorRunner:
                 else:
                     work.cancel()
                 await asyncio.gather(work, return_exceptions=True)
-            if queue is not None:
-                queue.pause(True, reason=None if code == "cancelled" else code)
-            _atomic_json(directory / "pause.json", {"paused": True})
-            save(
-                state="paused" if code == "cancelled" else "blocked",
-                phase="paused" if code == "cancelled" else "blocked",
-                history_phase="paused" if code == "cancelled" else "blocked",
-                paused=True,
-                error_code=code,
-                message=message,
-                finished_at=self.clock(),
-                next_run_at=None,
-                next_batch_at=None,
-            )
+            with _control(config, source_id):
+                if code in {"interrupted", "cancelled", "config_changed"}:
+                    code = observe_stop() or code
+                    message = _MESSAGES[code]
+                persist_stop(code, message)
         finally:
             try:
                 if service is not None:
@@ -700,34 +727,69 @@ class SourceCollectorRunner:
                 if close is not None:
                     with contextlib.suppress(Exception):
                         await close()
-                paused = queue is not None and queue.get("paused")
-                if queue is not None and not paused:
-                    pending = queue.status()
-                    unfinished = any(
-                        pending[key]
-                        for key in (
-                            "pending_posts",
-                            "pending_comments",
-                            "pending_replies",
-                            "index_pending",
-                        )
-                    )
-                    delay = (
-                        2.0
-                        if not queue.get("history_complete") or unfinished
-                        else settings["interval_seconds"]
-                    )
-                    next_at = (
-                        self.clock() + delay
-                        if settings["enabled"] or not queue.get("history_complete")
-                        else None
-                    )
-                    save(next_run_at=next_at, next_batch_at=next_at)
+                # Recheck under the same short control lock used by cancel_collect.
+                # A user pause arriving while importer/DB shutdown drains must win,
+                # and must never be overwritten by the resumable shutdown status.
+                with _control(config, source_id):
+                    if queue is not None and not queue.get("paused"):
+                        current = observe_stop()
+                        if current in {"cancelled", "config_changed"}:
+                            persist_stop(current, _MESSAGES[current])
+                        else:
+                            if current == "interrupted" and state.get("state") != "interrupted":
+                                persist_stop(current, _MESSAGES[current])
+                            pending = queue.status()
+                            unfinished = any(
+                                pending[key]
+                                for key in (
+                                    "pending_posts",
+                                    "pending_comments",
+                                    "pending_replies",
+                                    "index_pending",
+                                )
+                            )
+                            delay = (
+                                2.0
+                                if not queue.get("history_complete") or unfinished
+                                else settings["interval_seconds"]
+                            )
+                            next_at = (
+                                self.clock() + delay
+                                if settings["enabled"] or not queue.get("history_complete")
+                                else None
+                            )
+                            save(next_run_at=next_at, next_batch_at=next_at)
             finally:
                 if queue is not None:
                     queue.close()
                 collector.close()
                 lease.close()
+
+    @staticmethod
+    def _scope_legacy_signature(
+        config: AppConfig, settings: dict[str, Any], fresh_queue: bool = False,
+    ) -> str | None:
+        """Bounded read-only archive proof, never trust the queue's node count alone."""
+        legacy = _signature({key: value for key, value in settings.items()
+                             if key != "discussion_scope"})
+        if settings.get("discussion_scope", "all_public") == "all_public":
+            return legacy
+        from jianshanagent.plugins.knowledge.source_import_v2 import iter_source_rows
+        from jianshanagent.weibo_client import WeiboCollectError
+
+        child = settings.get("discussion_source_id")
+        if not child:
+            return legacy
+        rows = iter_source_rows(config, child)
+        try:
+            empty = next(rows, None) is None
+        finally:
+            close_rows = getattr(rows, "close", None)
+            if close_rows is not None:
+                close_rows()
+        if not empty and fresh_queue:
+            raise WeiboCollectError("scope_migration_blocked")
+        return legacy if empty else None
 
     @staticmethod
     def _verify_ownership(service: SourceImportService, source_id: str, uid: str) -> None:

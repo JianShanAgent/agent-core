@@ -20,7 +20,8 @@ const full = {
   ...legacy, mode: "full_then_incremental", include_comments: true,
   include_replies: true, discussion_source_id: "test_discussion",
 };
-const renderProgress = (status) => renderToStaticMarkup(createElement(ui.HistoryProgress, { status, intervalSeconds: 1800 }));
+const selfFull = { ...full, discussion_scope: "target_self" };
+const renderProgress = (status, collector) => renderToStaticMarkup(createElement(ui.HistoryProgress, { status, collector, intervalSeconds: 1800 }));
 
 test("旧配置编辑保留mode缺省，首次启用全历史只需确认一次范围", () => {
   assert.equal(ui.collectorProblem(legacy), "");
@@ -34,6 +35,54 @@ test("旧配置编辑保留mode缺省，首次启用全历史只需确认一次�
   assert.match(scope, /后续有界批次自动续采，不逐批确认/);
   assert.equal(ui.collectorConfirmation(full, full), null);
   assert.match(ui.collectorConfirmation({ ...full, enabled: true }, full), /开启定时/);
+});
+
+test("旧scope缺省保留全公开，新范围必须显式选择并一次确认，不能保存时暗改", () => {
+  assert.equal(Object.hasOwn(full, "discussion_scope"), false);
+  assert.equal(ui.collectorConfirmation(full, full), null);
+  const html = renderToStaticMarkup(createElement(ui.CollectorFields, {
+    value: full, onChange() { assert.fail("不能在渲染时替用户改变scope"); }, disabled: false,
+  }));
+  assert.match(html, /旧配置未指定作者范围，仍按全部公开讨论处理/);
+  assert.equal(Object.hasOwn(full, "discussion_scope"), false);
+  const narrowed = ui.collectorConfirmation(selfFull, full);
+  assert.match(narrowed, /仅 UID 123456 账号自评及其自评线程自回复，不收其他用户/);
+  assert.match(narrowed, /显式变更范围/);
+  assert.equal(ui.collectorConfirmation(selfFull, selfFull), null);
+  const expanded = ui.collectorConfirmation({ ...full, discussion_scope: "all_public" }, selfFull);
+  assert.match(expanded, /包含其他用户/);
+  assert.match(ui.collectorConfirmation(full, selfFull), /包含其他用户/);
+  assert.match(ui.collectorProblem({ ...full, discussion_scope: "unknown" }), /有效的讨论作者范围/);
+});
+
+test("target_self界面准确说明自评线程且保留原switch aria-label兼容性", () => {
+  const html = renderToStaticMarkup(createElement(ui.CollectorFields, {
+    value: selfFull, onChange() {}, disabled: false,
+  }));
+  assert.match(html, /讨论作者范围/);
+  assert.match(html, /包含目标账号自评/);
+  assert.match(html, /包含其自评线程内的自回复/);
+  assert.match(html, /不收其他用户/);
+  assert.match(html, /不跟进其他用户的根评论，也不保存或索引其内容/);
+  assert.match(html, /aria-label="包含公开评论"/);
+  assert.match(html, /aria-label="包含楼中楼回复"/);
+  assert.doesNotMatch(html, /旧配置未指定作者范围/);
+});
+
+test("target_self累计数按服务端实际scope显示，不把旧统计冒充已过滤", () => {
+  const filtered = renderProgress({ history_phase: "comments", discussion_scope: "target_self",
+    comments_total: 3, replies_total: 4, counter_basis: "target_author_cursor" }, selfFull);
+  assert.match(filtered, /仅 UID 123456 账号自评及其自评线程自回复，不收其他用户/);
+  assert.match(filtered, /累计提交评论（仅自评）/);
+  assert.match(filtered, /累计提交楼中楼（仅自评线程自回复）/);
+  assert.match(filtered, /target_author_cursor/);
+  assert.match(filtered, /不将未筛选的源站评论总数与仅目标范围作数量对比/);
+  assert.doesNotMatch(filtered, /累计统计范围尚未确认/);
+  for (const scope of [undefined, "all_public"]) {
+    const pending = renderProgress({ history_phase: "comments", discussion_scope: scope }, selfFull);
+    assert.match(pending, /累计统计范围尚未确认或与当前配置不一致/);
+    assert.doesNotMatch(pending, /累计提交评论（仅自评）/);
+  }
 });
 
 test("讨论范围和来源身份约束", () => {
@@ -130,6 +179,12 @@ test("讨论子来源不会挂载CollectorLine或产生独立时间线控制，�
   assert.match(html, /社区讨论分区/);
   assert.match(html, /保留真实作者/);
   assert.doesNotMatch(html, /暂停历史|继续采集|立即采集|全历史采集进度/);
+  const selfChild = renderToStaticMarkup(createElement(ui.WeiboSourceCard, {
+    ...props, source: { ...source, collector: null }, discussionCollector: selfFull,
+  }));
+  assert.match(selfChild, /仅 UID 123456 账号自评及其自评线程自回复，不收其他用户/);
+  assert.match(selfChild, /社区讨论分区/);
+  assert.doesNotMatch(selfChild, /暂停历史|继续采集|立即采集|全历史采集进度/);
   const other = renderToStaticMarkup(createElement(ui.WeiboSourceCard, { ...props, source: { ...source, platform: "other", discussion_of: null } }));
   assert.doesNotMatch(other, /暂停历史|继续采集|全历史采集进度/);
 });
@@ -172,6 +227,9 @@ test("请求保留旧配置，并通过现有路由绑定job_id暂停/空body恢
     await api.updateSource("test_parent", { collector: full });
     assert.equal(requests.at(-1).body.storage, "stream_v2");
     assert.equal(requests.at(-1).body.collector.discussion_source_id, "test_discussion");
+    assert.equal(Object.hasOwn(requests.at(-1).body.collector, "discussion_scope"), false);
+    await api.updateSource("test_parent", { collector: selfFull });
+    assert.equal(requests.at(-1).body.collector.discussion_scope, "target_self");
     await api.createSource({ id: "test_parent", collector: full });
     assert.equal(requests.at(-1).body.storage, "stream_v2");
     await api.collectSource("test_parent");
@@ -180,6 +238,6 @@ test("请求保留旧配置，并通过现有路由绑定job_id暂停/空body恢
     await api.cancelSourceCollection("test_parent", "current-job");
     assert.equal(requests.at(-1).url, "/api/sources/test_parent/collect/cancel");
     assert.deepEqual(requests.at(-1).body, { job_id: "current-job" });
-    assert.equal(requests.length, 5);
+    assert.equal(requests.length, 6);
   } finally { globalThis.fetch = original; }
 });

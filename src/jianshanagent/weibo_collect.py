@@ -114,7 +114,21 @@ def _html_text(value: Any) -> str:
     return _string("".join(root.itertext()))
 
 
+def _native_ad(post: dict[str, Any]) -> bool:
+    """Only the observed native boolean can exempt a timeline advertising slot."""
+    return post.get("isAd") is True
+
+
+def _ad_slot_id(post: dict[str, Any]) -> str | None:
+    # Advertising slots need not carry a normal post's author/date/alias fields.
+    # A valid native ID is used only for the proposed page_done skip counter.
+    value = post.get("idstr", post.get("id"))
+    return str(value) if type(value) in (str, int) and _ID.fullmatch(str(value)) else None
+
+
 def _public(post: dict[str, Any]) -> bool:
+    if _native_ad(post):
+        return False
     visible = post.get("visible")
     if not isinstance(visible, dict) or type(visible.get("type")) is not int:
         return False
@@ -379,6 +393,14 @@ async def fetch_weibo(
                     for post in posts:
                         if not isinstance(post, dict):
                             raise WeiboCollectError("schema_changed")
+                        if _native_ad(post):
+                            ad_id = _ad_slot_id(post)
+                            if ad_id is None or ad_id not in done:
+                                skipped += 1
+                            if ad_id is not None:
+                                done.add(ad_id)
+                                proposed["page_done"] = sorted(done)
+                            continue
                         post_id, author, _name, _alias = _identity(post)
                         if author != config["uid"]:
                             raise WeiboCollectError("author_mismatch")
@@ -428,7 +450,7 @@ async def fetch_weibo(
                             return WeiboFetchBatch(
                                 rows, proposed, False, fetched, skipped, pages, True
                             )
-                    if set(page_ids) <= set(proposed["previous_ids"]):
+                    if page_ids and set(page_ids) <= set(proposed["previous_ids"]):
                         raise WeiboCollectError("pagination_stalled")
                     if ordinary_dates and all(published < start for published in ordinary_dates):
                         complete = True

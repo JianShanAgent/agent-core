@@ -47,6 +47,8 @@ HISTORY_STATUS_FIELDS = frozenset(
         "coverage_message",
         "measurement",
         "parent_source_id",
+        "discussion_scope",
+        "counter_basis",
     }
 )
 STATUS_FIELDS = HISTORY_STATUS_FIELDS | frozenset(
@@ -58,6 +60,7 @@ STATUS_FIELDS = HISTORY_STATUS_FIELDS | frozenset(
         "profile_url",
         "pages",
         "fetched",
+        "skipped",
         "accepted",
         "new",
         "updated",
@@ -307,6 +310,7 @@ def _public(value: dict[str, Any]) -> dict[str, Any]:
         "profile_url": None,
         "pages": 0,
         "fetched": 0,
+        "skipped": 0,
         "accepted": 0,
         "new": 0,
         "updated": 0,
@@ -321,7 +325,7 @@ def _public(value: dict[str, Any]) -> dict[str, Any]:
     }
     if isinstance(value.get("phase"), str) and value["phase"] in states:
         result["phase"] = value["phase"]
-    for field in ("pages", "fetched", "accepted", "new", "updated", "unchanged"):
+    for field in ("pages", "fetched", "skipped", "accepted", "new", "updated", "unchanged"):
         number = value.get(field)
         if type(number) is int and 0 <= number <= 10**9:
             result[field] = number
@@ -365,6 +369,7 @@ def _public(value: dict[str, Any]) -> dict[str, Any]:
             "detail_unavailable",
             "row_too_large",
             "inaccessible",
+            "scope_migration_blocked",
         }
         if code in _MESSAGES:
             result.update(error_code=code, message=_MESSAGES[code])
@@ -421,6 +426,19 @@ def _public(value: dict[str, Any]) -> dict[str, Any]:
             if result["history_complete"]
             else "历史尚未完整核验；批次完成不代表全历史完成。"
         )
+        scope = value.get("discussion_scope")
+        result["discussion_scope"] = (
+            scope
+            if isinstance(scope, str) and scope in {"all_public", "target_self"}
+            else "all_public"
+        )
+        target_only = result["discussion_scope"] == "target_self"
+        result["counter_basis"] = "target_cursor_exhaustion" if target_only else "all_public_totals"
+        if target_only:
+            result["coverage_message"] = (
+                "仅统计目标账号自评及本人根评论下的本人回复，不包含其他用户。"
+                + result["coverage_message"]
+            )
         measurement = value.get("measurement")
         result["measurement"] = {}
         if isinstance(measurement, dict):
