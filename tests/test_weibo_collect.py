@@ -331,6 +331,23 @@ async def test_longtext_replaces_truncated_text_and_preserves_links(fixture, sto
     assert normalize(tmp_path, batch.rows)
 
 
+async def test_empty_longtext_detail_keeps_truncated_text_with_gap_marker(fixture, store, tmp_path):
+    fixture.pages = {1: [post(isLongText=True, text_raw="截断的公开短文…")]}
+    fixture.details["Ab100"] = {"longTextContent": ""}
+    batch = await fetch_weibo({"uid": _UID}, store)
+    assert batch.rows[0]["text"] == "截断的公开短文…"
+    assert batch.rows[0]["text_incomplete"] is True
+    assert normalize(tmp_path, batch.rows)
+
+
+async def test_empty_longtext_detail_without_any_text_still_stops(fixture, store):
+    fixture.pages = {1: [post(isLongText=True, text_raw="")]}
+    fixture.details["Ab100"] = {"longTextContent": ""}
+    with pytest.raises(WeiboCollectError) as caught:
+        await fetch_weibo({"uid": _UID}, store)
+    assert caught.value.code == "detail_unavailable"
+
+
 async def test_repost_only_reference_and_media_links(fixture, store, tmp_path):
     original = post(200, user={"id": 9999, "screen_name": "引用作者"}, isLongText=True)
     fixture.pages = {
@@ -395,12 +412,14 @@ async def test_unknown_schema_fixed_error(fixture, store, data):
     assert error.value.code == "schema_changed"
 
 
-async def test_detail_failure_cannot_return_truncated_overwrite(fixture, store):
+async def test_detail_failure_marks_truncated_gap_instead_of_silent_overwrite(fixture, store):
+    # A permanently empty detail keeps the public truncated text but must never
+    # pass as complete: the explicit gap marker is what prevents silent overwrite.
     fixture.pages = {1: [post(isLongText=True, text_raw="bad truncated")]}
     fixture.details["Ab100"] = {}
-    with pytest.raises(WeiboCollectError) as error:
-        await fetch_weibo({"uid": _UID}, store)
-    assert error.value.code == "detail_unavailable"
+    batch = await fetch_weibo({"uid": _UID}, store)
+    assert batch.rows[0]["text"] == "bad truncated"
+    assert batch.rows[0]["text_incomplete"] is True
 
 
 @pytest.mark.parametrize(

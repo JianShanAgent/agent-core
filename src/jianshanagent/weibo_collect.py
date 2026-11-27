@@ -175,6 +175,7 @@ async def _row(post: dict[str, Any], client: WeiboClient) -> dict[str, Any]:
     if type(long) not in (bool, int) or long not in (0, 1):
         raise WeiboCollectError("schema_changed")
     content = post
+    incomplete = False
     if long:
         try:
             content = await client.json("/ajax/statuses/longtext", {"id": alias})
@@ -191,9 +192,18 @@ async def _row(post: dict[str, Any], client: WeiboClient) -> dict[str, Any]:
                 else _html_text(content["longTextContent"])
             )
         else:
-            raise WeiboCollectError("detail_unavailable")
+            text = ""
         if not text:
-            raise WeiboCollectError("detail_unavailable")
+            # An emptied or hidden long-text detail keeps the public truncated
+            # list text and records the gap; nothing collectable still stops.
+            text = (
+                _string(post["text_raw"])
+                if isinstance(post.get("text_raw"), str)
+                else _html_text(post.get("text"))
+            )
+            if not text:
+                raise WeiboCollectError("detail_unavailable")
+            incomplete = True
     elif isinstance(content.get("text_raw"), str):
         text = _string(content["text_raw"])
     else:
@@ -216,6 +226,7 @@ async def _row(post: dict[str, Any], client: WeiboClient) -> dict[str, Any]:
         "version": 1,
         "id": post_id,
         "text": _string(text),
+        **({"text_incomplete": True} if incomplete else {}),
         "url": f"https://weibo.com/{author_id}/{alias}",
         "published_at": _date(post.get("created_at")).isoformat(),
         "author_id": author_id,

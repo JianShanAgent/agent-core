@@ -27,6 +27,7 @@ _FIELDS = {
     "edited_at",
     "collected_at",
     "collection",
+    "text_incomplete",
 }
 _REPOST_FIELDS = {"id", "url", "text", "author_id", "author_name", "published_at"}
 _ID = re.compile(r"[0-9]{1,32}\Z")
@@ -430,6 +431,10 @@ class WeiboSourceAdapter:
                         meta[name] = _timestamp(row[name], name)
                 if "collection" in row:
                     meta["collection"] = _string(row["collection"], "collection", 500)
+                if "text_incomplete" in row:
+                    if type(row["text_incomplete"]) is not bool or not row["text_incomplete"]:
+                        raise ValueError("text_incomplete 只能为 true 的缺口标记")
+                    meta["text_incomplete"] = True
                 if "repost" in row:
                     repost = row["repost"]
                     if not isinstance(repost, dict) or set(repost) - _REPOST_FIELDS:
